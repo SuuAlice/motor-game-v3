@@ -5,7 +5,7 @@ This file provides guidance to coding agents working with this repository. `AGEN
 
 ## プロジェクトの現状
 
-v1.0(Phase 1〜3、仕様書 `docs/spec.md` §7)が完了しています。物理エンジン + 4モード(実験室・調整チャレンジ・トラブル診断・組み立て)を実装済み、テスト41件、`npm run test && npm run build` 通過、Vercelにデプロイ済み(`v1.0`タグ)。
+v1.5が完了しています。物理エンジン拡張、SI単位UI、ObservationPanel、実験ノート、レシピコード、クラシック/EXチャレンジを実装済みです。テスト66件、`npm run test && npm run build && npm run lint` 通過、`v1.5`タグで公開済みです。
 
 - `src/engine/` — 純粋な物理エンジン(`constants.ts`・`commutator.ts`・`motorPhysics.ts`・`scoring.ts`・`failures.ts`・`__tests__/`)
 - `src/store/gameStore.ts` — zustandストア(config/simState/history/モード別ロック)
@@ -13,7 +13,7 @@ v1.0(Phase 1〜3、仕様書 `docs/spec.md` §7)が完了しています。物�
 - `src/components/` / `src/modes/` — 4モードのUI一式
 - `src/data/` — チャレンジ定義・故障プリセット
 
-現在は `docs/spec-v1.5.md` に基づくv1.5(Phase A: エンジン拡張 → Phase B: UI一本化・実験ノート → Phase C: レシピコード・チャレンジ再設計)に着手中。マルチエージェント体制(下記)で進めます。
+このリポジトリはv2開発専用です。v1.5を凍結済みの基準点とし、承認済みの `docs/spec.md` をv2における唯一の正とします。
 
 コマンド:
 - `npm run dev` — 開発サーバー起動
@@ -21,7 +21,7 @@ v1.0(Phase 1〜3、仕様書 `docs/spec.md` §7)が完了しています。物�
 - `npm run build` — 型チェック(`tsc -b`)+ 本番ビルド
 - `npm run sweep` — チャレンジ設計用のパラメータグリッド探索ツール
 
-**作業を始める前に、`docs/spec.md`(v1.0仕様の正)・`docs/spec-v1.5.md`(今回の変更仕様の正)・`docs/handoff.md`(経緯と落とし穴のまとめ)を読んでください。** 以下の要約はそれらの代わりにはなりません。
+**作業を始める前に、`docs/spec.md`・`docs/handoff.md`・`docs/handoff-v2.md`・`docs/baseline-v1.5.md`を読んでください。** v1.5由来の資料と実装が矛盾する場合、v2については `docs/spec.md` を優先してください。
 
 ## このプロジェクトについて
 
@@ -87,7 +87,7 @@ v1.5から、実装は2エージェント体制で行う。
 | alice | Claude Code | **エンジンオーナー**。`src/engine/` 一式・テスト・物理の整合性。Phase A主担当。仕様との突き合わせ・レビュー |
 | Suu | Codex (GPT-5.6) | **アプリ担当**。UI(Phase B)・データ(Phase C)・sweep運用。エンジンには原則触れない |
 
-- 連絡は agmsg(チーム: SuuAlice)。人間はスプリント境界の判断のみ行う
+- 連絡は agmsg(チーム: MotorGameV2)。v1.5保守用の`MotorGame`チームと混在させない
 - 役割境界: `src/engine/` への変更はaliceのみがコミットする。SuuがエンジンAPIの変更を必要とする場合はagmsgでaliceに依頼し、aliceがテスト込みで実装する
 - コミットメッセージに担当エージェント名を含める(例: `feat(engine): コギングトルク導入 [alice]`)
 - **`CLAUDE.md` と `AGENTS.md` は常に同内容に保つこと。** どちらかを更新したら必ず他方も同じ内容に更新する(CodexはAGENTS.mdを読むため、内容が乖離すると2エージェントの認識がずれる)
