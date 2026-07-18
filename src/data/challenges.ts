@@ -1,102 +1,91 @@
-// spec docs/spec.md §6ディレクトリ構成で指定された「チャレンジ定義(目標RPM・固定パラメータ)」。
-// targetRpm・star3MaxAvgCurrentAは scripts/sweep.ts の実行結果を元に、各縛り条件で
-// 「☆2条件(10秒間±10%)を保てる中での最大RPM」の90%をtargetRpmに、そのときの
-// 平均電流に約1.1倍の余裕を持たせた値をstar3の閾値にした。
-//
-// 試遊の知見(壊れない・ブレない範囲で最大速度を探すのが楽しい)に基づき、
-// 7つの縛りはいずれも「1つのパラメータを不利な側に固定し、残りで上限に迫る」設計。
-//
-// Phase3バランス調整(2026-07-18再計算): 「巻き数とブラシ圧をとにかく減らす」構成が
-// ほぼ全チャレンジの最適解になる縮退戦略が試遊で見つかったため、
-// (1) engine/constants.tsのチャタリングモデルを強化し、brushPressure<0.2は
-//     ☆2の安定条件を確実に破るようにした(motorPhysics.ts参照)
-// (2) coilTurnsを固定していない6チャレンジにparamRanges({coilTurns:[50,150]})を
-//     追加し、「巻き数最小化」自体を選択肢から外した
-// この2つの結果、sweep.tsの各シナリオの上位候補はbrushPressure=0.3
-// (spec設計目標の適正値)・coilTurns=50以上に収束するようになった。
-// 数値は再計算後のものに更新済み。
 import type { MotorConfig } from '../engine/motorPhysics';
 
-// Phase3バランス調整で追加。coilTurns最小化のような「自由パラメータを極端に振る」
-// 縮退戦略を防ぐため、チャレンジごとに自由パラメータの可動域を狭められるようにする。
-// batteryVoltageは連続値ではなく離散選択なので対象外。
-type ContinuousParam = Exclude<keyof MotorConfig, 'batteryVoltage'>;
-
-// coilTurnsを固定していないチャレンジに共通で使う下限(sweep.tsのCOIL_TURNS_FLOOR_OVERRIDEと対応)
-const COIL_TURNS_FLOOR: [number, number] = [50, 150];
+export interface ChallengeConditions {
+  targetRpm: number;
+  durationSec: number;
+  maxCurrentA?: number;
+  maxBatteryHeat?: number;
+  maxRpmVariation?: number;
+  noCoilCollapse?: boolean;
+}
 
 export interface Challenge {
   id: string;
+  kind: 'classic' | 'ex';
   title: string;
   description: string;
-  lockedParams: Partial<MotorConfig>; // ユーザーが動かせない固定パラメータ
-  paramRanges?: Partial<Record<ContinuousParam, [number, number]>>; // 自由パラメータの可動域制限(省略時はMotorConfigの全体範囲)
-  targetRpm: number; // ☆1: 到達目標RPM
-  star3MaxAvgCurrentA: number; // ☆3: この値以下の平均電流で効率評価クリア
+  lockedParams: Partial<MotorConfig>;
+  paramRanges?: Partial<Record<keyof MotorConfig, [number, number]>>;
+  conditions: ChallengeConditions;
 }
+
+const COIL_TURNS_FLOOR: [number, number] = [50, 150];
+const CLASSIC_BASE: Partial<MotorConfig> = { wireGaugeMm: 0.4, parallelStrands: 1, varnished: true };
 
 export const CHALLENGES: Challenge[] = [
   {
-    id: 'axis-offset',
-    title: '軸ずれモーターで攻める',
-    description:
-      '軸が少しずれたモーターです。速く回しすぎるとガタガタ振動して外れてしまうかも。壊れるギリギリの速さを狙おう。',
-    lockedParams: { axisOffsetMm: 2.5 },
-    paramRanges: { coilTurns: COIL_TURNS_FLOOR },
-    targetRpm: 791,
-    star3MaxAvgCurrentA: 0.73,
+    id: 'axis-offset', kind: 'classic', title: '軸ずれモーターで攻める',
+    description: '軸ずれ2.5 mm固定。振動を抑えながら上限回転数へ迫る。',
+    lockedParams: { ...CLASSIC_BASE, axisOffsetMm: 2.5 }, paramRanges: { coilTurns: COIL_TURNS_FLOOR },
+    conditions: { targetRpm: 1493, durationSec: 10, noCoilCollapse: true },
   },
   {
-    id: 'weak-magnet',
-    title: '弱い磁石でどこまで出せるか',
-    description: 'フェライト磁石(弱い磁石)しか使えません。他のパラメータを工夫して速さを稼ごう。',
-    lockedParams: { magnetStrength: 0.2 },
-    paramRanges: { coilTurns: COIL_TURNS_FLOOR },
-    targetRpm: 556,
-    star3MaxAvgCurrentA: 1.56,
+    id: 'weak-magnet', kind: 'classic', title: '弱磁石の最高速',
+    description: '磁石強度0.2固定。線径と巻き数の組み合わせで磁束不足を補う。',
+    lockedParams: { ...CLASSIC_BASE, magnetStrength: 0.2 }, paramRanges: { coilTurns: COIL_TURNS_FLOOR },
+    conditions: { targetRpm: 1522, durationSec: 10, maxBatteryHeat: 0.99, noCoilCollapse: true },
   },
   {
-    id: 'few-turns',
-    title: '巻き数ひかえめチャレンジ',
-    description: 'コイルの巻き数が30回に固定されています。トルクの弱さを他のパラメータで補おう。',
-    lockedParams: { coilTurns: 30 },
-    targetRpm: 2650,
-    star3MaxAvgCurrentA: 2.37,
+    id: 'few-turns', kind: 'classic', title: '30回巻きの最高速',
+    description: '巻き数30回固定。低インダクタンス側のレシピを追い込む。',
+    lockedParams: { ...CLASSIC_BASE, coilTurns: 30 }, conditions: { targetRpm: 2886, durationSec: 10, noCoilCollapse: true },
   },
   {
-    id: 'low-voltage',
-    title: '1.5Vだけで走らせる',
-    description: '電池は1.5V固定です。低い電圧でもしっかり回る組み合わせを探そう。',
-    lockedParams: { batteryVoltage: 1.5 },
-    paramRanges: { coilTurns: COIL_TURNS_FLOOR },
-    targetRpm: 372,
-    star3MaxAvgCurrentA: 1.01,
+    id: 'low-voltage', kind: 'classic', title: '1.5 Vチューニング',
+    description: '電池電圧1.5 V固定。内部抵抗の天井まで使い切る。',
+    lockedParams: { ...CLASSIC_BASE, batteryVoltage: 1.5 }, paramRanges: { coilTurns: COIL_TURNS_FLOOR },
+    conditions: { targetRpm: 575, durationSec: 10, noCoilCollapse: true },
   },
   {
-    id: 'firm-brush',
-    title: 'ブラシを強めに押し当てたまま',
-    description: 'ブラシの押し付け圧が高めに固定されています。摩擦に負けない設定を見つけよう。',
-    lockedParams: { brushPressure: 0.45 },
-    paramRanges: { coilTurns: COIL_TURNS_FLOOR },
-    targetRpm: 545,
-    star3MaxAvgCurrentA: 0.67,
+    id: 'firm-brush', kind: 'classic', title: '高ブラシ圧で回す',
+    description: 'ブラシ圧0.40固定。接触抵抗と摩擦の損失を他のパラメータで補う。',
+    lockedParams: { ...CLASSIC_BASE, brushPressure: 0.4 }, paramRanges: { coilTurns: COIL_TURNS_FLOOR },
+    conditions: { targetRpm: 627, durationSec: 10, maxBatteryHeat: 0.99, noCoilCollapse: true },
   },
   {
-    id: 'narrow-slit',
-    title: '狭いスリットで整流する',
-    description: '整流子のすき間が0.8mmに固定されています。デッドゾーンの影響を抑える工夫をしよう。',
-    lockedParams: { slitWidthMm: 0.8 },
-    paramRanges: { coilTurns: COIL_TURNS_FLOOR },
-    targetRpm: 1744,
-    star3MaxAvgCurrentA: 1.49,
+    id: 'narrow-slit', kind: 'classic', title: 'スリット0.8 mm',
+    description: 'スリット幅0.8 mm固定。整流デューティを活かして最高速を狙う。',
+    lockedParams: { ...CLASSIC_BASE, slitWidthMm: 0.8 }, paramRanges: { coilTurns: COIL_TURNS_FLOOR },
+    conditions: { targetRpm: 2915, durationSec: 10, noCoilCollapse: true },
   },
   {
-    id: 'far-magnet',
-    title: '磁石を遠ざけたまま挑戦',
-    description: '磁石とコイルの距離が25mmに固定されています。磁力の弱まりを他の工夫で補おう。',
-    lockedParams: { magnetDistanceMm: 25 },
-    paramRanges: { coilTurns: COIL_TURNS_FLOOR },
-    targetRpm: 1534,
-    star3MaxAvgCurrentA: 1.95,
+    id: 'far-magnet', kind: 'classic', title: '磁石距離25 mm',
+    description: '磁石距離25 mm固定。弱い磁束で回転数を稼ぐ。',
+    lockedParams: { ...CLASSIC_BASE, magnetDistanceMm: 25 }, paramRanges: { coilTurns: COIL_TURNS_FLOOR },
+    conditions: { targetRpm: 2262, durationSec: 10, noCoilCollapse: true },
+  },
+  {
+    id: 'ex-current-limit', kind: 'ex', title: 'EX: 電流0.5 A制限',
+    description: '最大電流0.5 A、発熱ゲージ50%以下で30秒間維持する。',
+    lockedParams: {},
+    conditions: { targetRpm: 460, durationSec: 30, maxCurrentA: 0.5, maxBatteryHeat: 0.5, noCoilCollapse: true },
+  },
+  {
+    id: 'ex-close-magnet', kind: 'ex', title: 'EX: 強コギング帯',
+    description: '磁石距離2〜5 mmで始動し、シミュレーション上の限界回転域でRPM変動係数5%以下を維持する。',
+    lockedParams: {}, paramRanges: { magnetDistanceMm: [2, 5] },
+    conditions: { targetRpm: 5123, durationSec: 10, maxRpmVariation: 0.05, maxBatteryHeat: 0.99, noCoilCollapse: true },
+  },
+  {
+    id: 'ex-no-varnish', kind: 'ex', title: 'EX: ワニス禁止',
+    description: 'ワニスなしでコイルを崩壊させずに回転数を維持する。',
+    lockedParams: { varnished: false },
+    conditions: { targetRpm: 2162, durationSec: 10, noCoilCollapse: true },
+  },
+  {
+    id: 'ex-thick-wire', kind: 'ex', title: 'EX: 太線・低電圧',
+    description: '線径0.8 mm、電池1.5 V固定。電池内部抵抗との最適点を探す。',
+    lockedParams: { wireGaugeMm: 0.8, batteryVoltage: 1.5 },
+    conditions: { targetRpm: 2072, durationSec: 10, maxBatteryHeat: 0.99, noCoilCollapse: true },
   },
 ];

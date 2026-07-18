@@ -7,6 +7,7 @@ import { AxisStep } from '../components/assembly/AxisStep';
 import { ClipStep } from '../components/assembly/ClipStep';
 import { AssemblyReviewStep } from '../components/assembly/AssemblyReviewStep';
 import { StartStep } from '../components/assembly/StartStep';
+import { VarnishStep } from '../components/assembly/VarnishStep';
 
 // spec docs/spec.md §2「① 組み立てモードの手順」。手順3(整流子作り)は
 // 「やすりがけ」「スリット調整」を別々の工程画面として実装する(ジェスチャーごとに
@@ -23,7 +24,8 @@ interface StepDef {
 
 const STEPS: StepDef[] = [
   { title: '① コイル巻き', Component: CoilWindingStep },
-  { title: '② 軸の固定', Component: AxisStep },
+  { title: '② ワニス固め', Component: VarnishStep },
+  { title: '③ 軸の固定', Component: AxisStep },
   { title: '③ 整流子作り(やすりがけ)', Component: SandingStep },
   { title: '③ 整流子作り(スリット調整)', Component: SlitStep },
   { title: '④ 台座作り', Component: ClipStep },
@@ -42,6 +44,9 @@ const INITIAL_DRAFT: MotorConfig = {
   magnetDistanceMm: 15,
   batteryVoltage: 3.0,
   axisOffsetMm: 0,
+  wireGaugeMm: 0.4,
+  parallelStrands: 1,
+  varnished: false,
 };
 
 export function AssemblyMode() {

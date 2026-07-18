@@ -1,20 +1,25 @@
 import type { AssemblyStepProps } from '../../modes/AssemblyMode';
 import { useDragAccumulator } from './useDragAccumulator';
+import { computeMaxTurns } from '../../engine/motorPhysics';
+import { PresetButtons, SliderRow } from '../ParamPanel';
 
 // spec docs/spec.md §2手順1: 「釘にエナメル線を巻く(ドラッグ/連打で巻き数が増える。
 // 50〜100回が適正)」
 const MIN_TURNS = 10;
-const MAX_TURNS = 150;
 const GOOD_MIN = 50;
 const GOOD_MAX = 100;
 const PX_PER_TURN = 8; // ドラッグ8pxごとに1回巻く
 const CLICK_INCREMENT = 5; // 「+」ボタン1クリックあたりの巻き数(キーボード操作の代替)
 
 export function CoilWindingStep({ draft, setDraft }: AssemblyStepProps) {
+  const wireGaugeMm = draft.wireGaugeMm ?? 0.4;
+  const parallelStrands = draft.parallelStrands ?? 1;
+  const maxTurns = computeMaxTurns(wireGaugeMm, parallelStrands);
+
   function addTurns(amount: number) {
     setDraft((prev) => ({
       ...prev,
-      coilTurns: Math.min(MAX_TURNS, Math.max(MIN_TURNS, prev.coilTurns + amount)),
+      coilTurns: Math.min(maxTurns, Math.max(MIN_TURNS, prev.coilTurns + amount)),
     }));
   }
 
@@ -28,14 +33,25 @@ export function CoilWindingStep({ draft, setDraft }: AssemblyStepProps) {
   return (
     <div className="flex flex-col items-center gap-3 rounded-lg bg-white p-6 shadow-sm">
       <p className="text-sm text-slate-600">
-        釘にエナメル線を巻きつけよう。下のエリアを指でこすると巻き数が増えるよ。
+        線径と並列本数を決め、釘にエナメル線を巻く。太線・並列巻きほど巻き数上限が下がる。
       </p>
+      <div className="grid w-full gap-3">
+        <SliderRow label="線径" value={wireGaugeMm} min={0.2} max={0.8} step={0.1} unit="mm" onChange={(value) => setDraft((prev) => {
+          const nextMax = computeMaxTurns(value, prev.parallelStrands ?? 1);
+          return { ...prev, wireGaugeMm: value, coilTurns: Math.min(prev.coilTurns, nextMax) };
+        })} />
+        <PresetButtons label="並列巻き" options={[{ label: 'シングル（1本）', value: 1 }, { label: 'ダブル（2本）', value: 2 }]} value={parallelStrands} onChange={(value) => setDraft((prev) => {
+          const strands = value as 1 | 2;
+          const nextMax = computeMaxTurns(prev.wireGaugeMm ?? 0.4, strands);
+          return { ...prev, parallelStrands: strands, coilTurns: Math.min(prev.coilTurns, nextMax) };
+        })} />
+      </div>
       <div
         {...dragHandlers}
         role="slider"
         aria-label="コイル巻き数"
         aria-valuemin={MIN_TURNS}
-        aria-valuemax={MAX_TURNS}
+        aria-valuemax={maxTurns}
         aria-valuenow={draft.coilTurns}
         className="flex h-32 w-full touch-none select-none items-center justify-center rounded-lg bg-amber-100 text-amber-700 active:bg-amber-200"
       >
@@ -49,7 +65,7 @@ export function CoilWindingStep({ draft, setDraft }: AssemblyStepProps) {
       <div className={`flex items-center gap-1 text-sm font-bold ${isGood ? 'text-emerald-600' : 'text-slate-400'}`}>
         {isGood && <span aria-hidden="true">✅</span>}
         <span>
-          適正範囲: {GOOD_MIN}〜{GOOD_MAX}回
+          目安: {GOOD_MIN}〜{Math.min(GOOD_MAX, maxTurns)}回 / 物理上限: {maxTurns}回
         </span>
       </div>
 

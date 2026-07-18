@@ -3,6 +3,8 @@ import { RpmMeter } from '../components/RpmMeter';
 import { ParamPanel } from '../components/ParamPanel';
 import { ControlBar } from '../components/ControlBar';
 import { GraphPanel } from '../components/GraphPanel';
+import { ObservationPanel } from '../components/ObservationPanel';
+import { RecipePanel } from '../components/RecipePanel';
 
 // spec docs/spec.md §4のレイアウト順: Canvas → RPM/電流 → パラメータ → 始動/リセット → グラフ
 export function SandboxMode() {
@@ -11,7 +13,9 @@ export function SandboxMode() {
       <MotorCanvas />
       <RpmMeter />
       <ParamPanel />
+      <RecipePanel />
       <ControlBar />
+      <ObservationPanel />
       <GraphPanel />
     </div>
   );

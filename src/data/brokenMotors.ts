@@ -55,7 +55,7 @@ export const BROKEN_MOTORS: BrokenMotor[] = [
   {
     id: 'weak-field',
     title: 'モーター5号: 弱々しくしか回らない(その2)',
-    config: { ...GOOD, magnetStrength: 0.3 },
+    config: { ...GOOD, magnetStrength: 0.5 },
     repairableParam: 'magnetStrength',
   },
   {

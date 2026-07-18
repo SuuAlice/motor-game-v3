@@ -7,7 +7,7 @@ import { MotorCanvas } from '../render/MotorCanvas';
 import { RpmMeter } from '../components/RpmMeter';
 import { ParamPanel } from '../components/ParamPanel';
 import { ControlBar } from '../components/ControlBar';
-import { HintPopup } from '../components/HintPopup';
+import { ObservationPanel } from '../components/ObservationPanel';
 
 function BrokenMotorList({ onSelect }: { onSelect: (brokenMotor: BrokenMotor) => void }) {
   const diagnosisProgress = useGameStore((s) => s.diagnosisProgress);
@@ -84,7 +84,7 @@ function DiagnosisPlay({ brokenMotor, onExit }: { brokenMotor: BrokenMotor; onEx
       <RpmMeter />
       <ParamPanel />
       <ControlBar />
-      {!fixed && <HintPopup diagnosis={diagnosis} />}
+      <ObservationPanel />
     </div>
   );
 }

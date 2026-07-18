@@ -1,5 +1,13 @@
 import { useGameStore } from '../store/gameStore';
-import type { MotorConfig } from '../engine/motorPhysics';
+import {
+  computeB,
+  computeContactResistance,
+  computeJ,
+  computeMaxTurns,
+  computeRCoil,
+  type MotorConfig,
+} from '../engine/motorPhysics';
+import { BATTERY_PRESETS, MAGNET_PRESETS } from '../data/parameterPresets';
 
 export interface SliderRowProps {
   label: string;
@@ -17,7 +25,7 @@ export interface SliderRowProps {
 export function SliderRow({ label, value, min, max, step, unit, locked, onChange }: SliderRowProps) {
   return (
     <label className={`flex flex-col gap-1 text-sm ${locked ? 'text-slate-400' : 'text-slate-700'}`}>
-      <span className="flex justify-between">
+      <span className="flex items-center justify-between gap-3">
         <span className="flex items-center gap-1">
           {label}
           {locked && (
@@ -26,10 +34,23 @@ export function SliderRow({ label, value, min, max, step, unit, locked, onChange
             </span>
           )}
         </span>
-        <span className="tabular-nums text-slate-500">
-          {value.toFixed(step < 1 ? 2 : 0)}
-          {unit}
-          {locked && '(固定)'}
+        <span className="flex items-center gap-1 tabular-nums text-slate-500">
+          <input
+            type="number"
+            aria-label={`${label}の数値`}
+            min={min}
+            max={max}
+            step={step}
+            value={value}
+            disabled={locked}
+            onChange={(e) => {
+              const next = Number(e.target.value);
+              if (Number.isFinite(next)) onChange(Math.min(max, Math.max(min, next)));
+            }}
+            className="w-20 rounded border border-slate-300 bg-white px-2 py-1 text-right disabled:bg-slate-100"
+          />
+          <span>{unit}</span>
+          {locked && <span>(固定)</span>}
         </span>
       </span>
       <input
@@ -53,7 +74,7 @@ export interface PresetOption<T extends string | number> {
 
 export interface PresetButtonsProps<T extends string | number> {
   label: string;
-  options: PresetOption<T>[];
+  options: readonly PresetOption<T>[];
   value: T;
   locked?: boolean;
   onChange: (value: T) => void;
@@ -95,17 +116,6 @@ export function PresetButtons<T extends string | number>({
 }
 
 // spec §3.7.1: 「弱/中/強」ボタンはmagnetStrength(0–1連続値)の代表値プリセット
-export const MAGNET_PRESETS: PresetOption<number>[] = [
-  { label: '弱(フェライト)', value: 0.2 },
-  { label: '中', value: 0.5 },
-  { label: '強(ネオジム)', value: 0.9 },
-];
-
-export const BATTERY_PRESETS: PresetOption<1.5 | 3.0>[] = [
-  { label: '1.5V', value: 1.5 },
-  { label: '3V', value: 3.0 },
-];
-
 export function ParamPanel() {
   const config = useGameStore((s) => s.config);
   const setConfig = useGameStore((s) => s.setConfig);
@@ -123,12 +133,27 @@ export function ParamPanel() {
     return paramRanges[key] ?? [defaultMin, defaultMax];
   }
 
-  const [coilTurnsMin, coilTurnsMax] = rangeFor('coilTurns', 10, 150);
+  const wireGaugeMm = config.wireGaugeMm ?? 0.4;
+  const parallelStrands = config.parallelStrands ?? 1;
+  const physicalMaxTurns = computeMaxTurns(wireGaugeMm, parallelStrands);
+  const [coilTurnsMin, configuredCoilTurnsMax] = rangeFor('coilTurns', 10, 150);
+  const coilTurnsMax = Math.min(configuredCoilTurnsMax, physicalMaxTurns);
   const [slitWidthMmMin, slitWidthMmMax] = rangeFor('slitWidthMm', 0, 5);
   const [sandingQualityMin, sandingQualityMax] = rangeFor('sandingQuality', 0, 1);
   const [brushPressureMin, brushPressureMax] = rangeFor('brushPressure', 0, 1);
-  const [magnetDistanceMmMin, magnetDistanceMmMax] = rangeFor('magnetDistanceMm', 5, 30);
+  const [magnetDistanceMmMin, magnetDistanceMmMax] = rangeFor('magnetDistanceMm', 2, 30);
   const [axisOffsetMmMin, axisOffsetMmMax] = rangeFor('axisOffsetMm', 0, 3);
+  const magnetOptions = MAGNET_PRESETS.map((preset) => ({
+    ...preset,
+    label: `${preset.label} ${computeB(preset.value, config.magnetDistanceMm).toFixed(3)} T`,
+  }));
+  const derivedValues = [
+    ['コイル抵抗', computeRCoil(config).toFixed(3), 'Ω'],
+    ['接触抵抗（推定）', computeContactResistance(config).toFixed(3), 'Ω'],
+    ['慣性モーメント', computeJ(config).toExponential(3), 'kg·m²'],
+    ['巻き数上限', String(physicalMaxTurns), '回'],
+    ['巻き数残量', String(Math.max(0, physicalMaxTurns - config.coilTurns)), '回'],
+  ] as const;
 
   return (
     <div className="grid gap-3 rounded-lg bg-white p-4 shadow-sm">
@@ -141,6 +166,36 @@ export function ParamPanel() {
         unit="回"
         locked={isLocked('coilTurns')}
         onChange={(v) => update('coilTurns', v)}
+      />
+      <SliderRow
+        label="線径"
+        value={wireGaugeMm}
+        min={0.2}
+        max={0.8}
+        step={0.1}
+        unit="mm"
+        locked={isLocked('wireGaugeMm')}
+        onChange={(v) => update('wireGaugeMm', v)}
+      />
+      <PresetButtons
+        label="並列巻き"
+        options={[
+          { label: 'シングル（1本）', value: 1 },
+          { label: 'ダブル（2本）', value: 2 },
+        ]}
+        value={parallelStrands}
+        locked={isLocked('parallelStrands')}
+        onChange={(v) => update('parallelStrands', v as 1 | 2)}
+      />
+      <PresetButtons
+        label="ワニス固め"
+        options={[
+          { label: 'あり', value: 'yes' },
+          { label: 'なし', value: 'no' },
+        ]}
+        value={(config.varnished ?? true) ? 'yes' : 'no'}
+        locked={isLocked('varnished')}
+        onChange={(v) => update('varnished', v === 'yes')}
       />
       <SliderRow
         label="スリット幅"
@@ -158,6 +213,7 @@ export function ParamPanel() {
         min={sandingQualityMin}
         max={sandingQualityMax}
         step={0.01}
+        unit="比"
         locked={isLocked('sandingQuality')}
         onChange={(v) => update('sandingQuality', v)}
       />
@@ -167,6 +223,7 @@ export function ParamPanel() {
         min={brushPressureMin}
         max={brushPressureMax}
         step={0.01}
+        unit="比"
         locked={isLocked('brushPressure')}
         onChange={(v) => update('brushPressure', v)}
       />
@@ -193,7 +250,7 @@ export function ParamPanel() {
 
       <PresetButtons
         label="磁石の強さ"
-        options={MAGNET_PRESETS}
+        options={magnetOptions}
         value={config.magnetStrength}
         locked={isLocked('magnetStrength')}
         onChange={(v) => update('magnetStrength', v)}
@@ -206,6 +263,18 @@ export function ParamPanel() {
         locked={isLocked('batteryVoltage')}
         onChange={(v) => update('batteryVoltage', v)}
       />
+
+      <section className="rounded-lg bg-slate-100 p-3" aria-labelledby="derived-values-title">
+        <h3 id="derived-values-title" className="text-sm font-bold text-slate-700">導出量</h3>
+        <dl className="mt-2 grid gap-1 text-xs text-slate-600">
+          {derivedValues.map(([label, value, unit]) => (
+            <div key={label} className="flex justify-between gap-3">
+              <dt>{label}</dt>
+              <dd className="tabular-nums text-slate-800">{value} {unit}</dd>
+            </div>
+          ))}
+        </dl>
+      </section>
     </div>
   );
 }

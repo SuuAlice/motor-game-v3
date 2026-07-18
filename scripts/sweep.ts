@@ -1,16 +1,6 @@
-// Phase 2チャレンジ設計用の開発ツール(UIには含めない)。
-// engine/のstep()を凍結利用し、縛り条件ごとにパラメータをグリッド探索して、
-// 「安定を保てる中での最大RPM(上限)」と、そのときの平均電流を出力する。
-// この結果を見て data/challenges.ts の targetRpm / star3MaxAvgCurrentA を決める。
-//
-// 実行: npm run sweep (= vite-node scripts/sweep.ts)
-// engine/側の相対importが拡張子なし(Vite/bundler解決前提)のため、Node標準ESM
-// ローダーでは解決できない。vite-nodeはVite同様の解決をするため、engine/を
-// 一切変更せずに実行できる。
-import { step, type MotorConfig, type SimState } from '../src/engine/motorPhysics';
+import { computeMaxTurns, step, type MotorConfig, type SimState } from '../src/engine/motorPhysics';
 import { FLICK_INITIAL_OMEGA, OMEGA_EPS } from '../src/engine/constants';
 
-// __tests__/prng.ts と同じmulberry32アルゴリズム(テスト専用ディレクトリなのでimportせず複製)
 function mulberry32(seed: number): () => number {
   let a = seed;
   return () => {
@@ -22,150 +12,168 @@ function mulberry32(seed: number): () => number {
   };
 }
 
-const FIXED_DT = 1 / 120;
-const WARMUP_STEPS = 5 * 120; // 5秒: 収束待ち
-const EVAL_STEPS = 10 * 120; // 10秒: spec §3.6の☆2安定判定と同じ窓
-const SEED = 42;
-
-type FreeGrid = { [K in keyof MotorConfig]: number[] };
-
-// 各シナリオで縛られていないパラメータを振る既定グリッド(3〜4値程度に抑え、
-// 1シナリオあたりの探索数を実用的な範囲に収める)
-const DEFAULT_FREE_GRID: FreeGrid = {
-  coilTurns: [40, 80, 120],
-  slitWidthMm: [1, 1.5, 2.5],
-  sandingQuality: [0.7, 0.9, 1.0],
-  brushPressure: [0.15, 0.3, 0.5],
+const DT = 1 / 120;
+const WARMUP_SECONDS = 5;
+const SAMPLE_COUNT = 1200;
+const GRID = {
+  coilTurns: [30, 50, 80, 110, 150],
+  slitWidthMm: [0.8, 1.5, 2.5],
+  sandingQuality: [0.7, 0.9, 1],
+  brushPressure: [0.2, 0.3, 0.45],
   magnetStrength: [0.2, 0.5, 0.9],
-  magnetDistanceMm: [5, 12, 20],
-  batteryVoltage: [1.5, 3.0],
-  axisOffsetMm: [0, 1, 2],
+  magnetDistanceMm: [2, 5, 10, 15, 25],
+  batteryVoltage: [1.5, 3] as const,
+  axisOffsetMm: [0, 0.5, 2],
+  wireGaugeMm: [0.2, 0.4, 0.6, 0.8],
+  parallelStrands: [1, 2] as const,
+  varnished: [true, false],
 };
-
-interface Scenario {
-  name: string;
-  locked: Partial<MotorConfig>;
-  // Phase3バランス調整で追加。特定の自由パラメータだけ既定グリッドを差し替える
-  // (data/challenges.tsのparamRangesと対応させ、実際にプレイヤーが選べる範囲を反映する)
-  freeGridOverrides?: Partial<FreeGrid>;
-}
-
-// 試遊の知見(壊れない・ブレない範囲で最大速度を探すのが楽しさの核)に基づく候補。
-// 実行結果を見て5〜8個に絞り込む(このスクリプト自体は絞り込みをしない)。
-//
-// Phase3バランス調整: coilTurnsを固定していない6シナリオには、data/challenges.tsの
-// paramRangesと合わせてcoilTurnsの下限を50に引き上げたグリッドを使う
-// (「巻き数を減らすほど有利」という縮退戦略を選択肢から外すため。§7受け入れ基準5が
-// 保証する物理挙動自体は正しいので、engine側ではなくここで可動域を絞る)。
-const COIL_TURNS_FLOOR_OVERRIDE: Partial<FreeGrid> = { coilTurns: [50, 80, 120] };
-
-const SCENARIOS: Scenario[] = [
-  { name: '軸ずれ固定(高め)', locked: { axisOffsetMm: 2.5 }, freeGridOverrides: COIL_TURNS_FLOOR_OVERRIDE },
-  { name: '弱磁石縛り', locked: { magnetStrength: 0.2 }, freeGridOverrides: COIL_TURNS_FLOOR_OVERRIDE },
-  { name: '巻き数少なめ固定', locked: { coilTurns: 30 } },
-  { name: '低電圧縛り(1.5V)', locked: { batteryVoltage: 1.5 }, freeGridOverrides: COIL_TURNS_FLOOR_OVERRIDE },
-  { name: 'ブラシ圧やや高め固定', locked: { brushPressure: 0.45 }, freeGridOverrides: COIL_TURNS_FLOOR_OVERRIDE },
-  { name: 'スリット幅狭め固定', locked: { slitWidthMm: 0.8 }, freeGridOverrides: COIL_TURNS_FLOOR_OVERRIDE },
-  { name: '磁石距離固定(遠め)', locked: { magnetDistanceMm: 25 }, freeGridOverrides: COIL_TURNS_FLOOR_OVERRIDE },
-];
-
-function cartesianConfigs(scenario: Scenario): MotorConfig[] {
-  const grid: FreeGrid = { ...DEFAULT_FREE_GRID, ...(scenario.freeGridOverrides ?? {}) };
-  const freeKeys = (Object.keys(grid) as (keyof MotorConfig)[]).filter((key) => !(key in scenario.locked));
-
-  let combos: Partial<MotorConfig>[] = [{}];
-  for (const key of freeKeys) {
-    const values = grid[key];
-    const next: Partial<MotorConfig>[] = [];
-    for (const combo of combos) {
-      for (const value of values) {
-        next.push({ ...combo, [key]: value });
-      }
-    }
-    combos = next;
-  }
-  return combos.map((combo) => ({ ...combo, ...scenario.locked }) as MotorConfig);
-}
 
 interface SimResult {
   steadyRpm: number;
-  stable: boolean; // spec §3.6の☆2条件と同じ基準(評価窓の±10%以内)
   avgCurrentA: number;
+  maxCurrentA: number;
+  rpmCv: number;
+  maxHeat: number;
   shorted: boolean;
-  stalled: boolean; // 評価窓終了時点で静止摩擦により停止
+  stalled: boolean;
+  collapsed: boolean;
+}
+
+interface Scenario {
+  id: string;
+  name: string;
+  kind: 'classic' | 'ex';
+  locked: Partial<MotorConfig>;
+  evalSeconds?: number;
+  overrides?: Partial<typeof GRID>;
+  accepts?: (result: SimResult) => boolean;
+}
+
+const CLASSIC: Scenario[] = [
+  { id: 'axis-offset', name: '軸ずれ固定', kind: 'classic', locked: { axisOffsetMm: 2.5 } },
+  { id: 'weak-magnet', name: '弱磁石', kind: 'classic', locked: { magnetStrength: 0.2 } },
+  { id: 'few-turns', name: '30回巻き', kind: 'classic', locked: { coilTurns: 30 } },
+  { id: 'low-voltage', name: '1.5 V', kind: 'classic', locked: { batteryVoltage: 1.5 } },
+  { id: 'firm-brush', name: 'ブラシ圧0.40', kind: 'classic', locked: { brushPressure: 0.4 } },
+  { id: 'narrow-slit', name: 'スリット0.8 mm', kind: 'classic', locked: { slitWidthMm: 0.8 } },
+  { id: 'far-magnet', name: '磁石距離25 mm', kind: 'classic', locked: { magnetDistanceMm: 25 } },
+];
+
+const CLASSIC_BASE: Partial<MotorConfig> = {
+  wireGaugeMm: 0.4,
+  parallelStrands: 1,
+  varnished: true,
+};
+
+for (const scenario of CLASSIC) {
+  scenario.locked = { ...CLASSIC_BASE, ...scenario.locked };
+}
+
+const EX: Scenario[] = [
+  {
+    id: 'ex-current-limit', name: '電流・発熱制限', kind: 'ex', locked: {}, evalSeconds: 30,
+    accepts: (result) => result.maxCurrentA <= 0.5 && result.maxHeat <= 0.5,
+  },
+  {
+    id: 'ex-close-magnet', name: '近接磁石・低変動', kind: 'ex', locked: {},
+    overrides: { magnetDistanceMm: [2, 3, 5] },
+    accepts: (result) => result.rpmCv <= 0.05,
+  },
+  {
+    id: 'ex-no-varnish', name: 'ワニス禁止', kind: 'ex', locked: { varnished: false },
+    accepts: (result) => !result.collapsed,
+  },
+  {
+    id: 'ex-thick-wire', name: '線径0.8 mm・1.5 V', kind: 'ex', locked: { wireGaugeMm: 0.8, batteryVoltage: 1.5 } },
+];
+
+function pick<T>(values: readonly T[], rng: () => number): T {
+  return values[Math.floor(rng() * values.length)];
+}
+
+function sampleConfig(scenario: Scenario, rng: () => number): MotorConfig {
+  const grid = { ...GRID, ...(scenario.overrides ?? {}) };
+  const wireGaugeMm = scenario.locked.wireGaugeMm ?? pick(grid.wireGaugeMm, rng);
+  const parallelStrands = scenario.locked.parallelStrands ?? pick(grid.parallelStrands, rng);
+  const maxTurns = computeMaxTurns(wireGaugeMm, parallelStrands);
+  const requestedTurns = scenario.locked.coilTurns ?? pick(grid.coilTurns, rng);
+  return {
+    coilTurns: Math.min(requestedTurns, maxTurns),
+    slitWidthMm: scenario.locked.slitWidthMm ?? pick(grid.slitWidthMm, rng),
+    sandingQuality: scenario.locked.sandingQuality ?? pick(grid.sandingQuality, rng),
+    brushPressure: scenario.locked.brushPressure ?? pick(grid.brushPressure, rng),
+    magnetStrength: scenario.locked.magnetStrength ?? pick(grid.magnetStrength, rng),
+    magnetDistanceMm: scenario.locked.magnetDistanceMm ?? pick(grid.magnetDistanceMm, rng),
+    batteryVoltage: scenario.locked.batteryVoltage ?? pick(grid.batteryVoltage, rng),
+    axisOffsetMm: scenario.locked.axisOffsetMm ?? pick(grid.axisOffsetMm, rng),
+    wireGaugeMm,
+    parallelStrands,
+    varnished: scenario.locked.varnished ?? pick(grid.varnished, rng),
+  };
 }
 
 function average(values: number[]): number {
-  return values.reduce((a, b) => a + b, 0) / values.length;
+  return values.reduce((sum, value) => sum + value, 0) / Math.max(1, values.length);
 }
 
-function simulate(config: MotorConfig): SimResult {
-  const rng = mulberry32(SEED);
+function simulate(config: MotorConfig, evalSeconds: number, seed: number): SimResult {
+  const rng = mulberry32(seed);
   let state: SimState = {
-    theta: 0,
-    omega: FLICK_INITIAL_OMEGA,
-    current: 0,
-    backEmf: 0,
-    shorted: false,
-    running: true,
-    rpm: 0,
-    chatterFramesLeft: 0,
+    theta: 0, omega: FLICK_INITIAL_OMEGA, current: 0, backEmf: 0, shorted: false,
+    running: true, rpm: 0, chatterFramesLeft: 0, batteryHeat: 0, coilCollapsed: false,
+    highSpeedFrameCount: 0,
   };
-
-  for (let i = 0; i < WARMUP_STEPS; i++) {
-    state = step(config, state, FIXED_DT, rng);
-  }
-
-  const rpmSamples: number[] = [];
-  const currentSamples: number[] = [];
+  for (let index = 0; index < WARMUP_SECONDS / DT; index += 1) state = step(config, state, DT, rng);
+  const rpms: number[] = [];
+  const currents: number[] = [];
+  let maxHeat = state.batteryHeat;
   let shorted = state.shorted;
-  for (let i = 0; i < EVAL_STEPS; i++) {
-    state = step(config, state, FIXED_DT, rng);
-    rpmSamples.push(state.rpm);
-    currentSamples.push(state.current);
-    shorted = shorted || state.shorted;
+  for (let index = 0; index < evalSeconds / DT; index += 1) {
+    state = step(config, state, DT, rng);
+    rpms.push(Math.abs(state.rpm)); currents.push(state.current);
+    maxHeat = Math.max(maxHeat, state.batteryHeat); shorted ||= state.shorted;
   }
-
-  const steadyRpm = average(rpmSamples);
-  const maxDeviation = Math.max(...rpmSamples.map((r) => Math.abs(r - steadyRpm)));
-  const stable = steadyRpm > 0 && maxDeviation <= steadyRpm * 0.1;
-  const avgCurrentA = average(currentSamples);
-  const stalled = Math.abs(state.omega) < OMEGA_EPS;
-
-  return { steadyRpm, stable, avgCurrentA, shorted, stalled };
+  const steadyRpm = average(rpms);
+  const variance = average(rpms.map((rpm) => (rpm - steadyRpm) ** 2));
+  return {
+    steadyRpm,
+    avgCurrentA: average(currents),
+    maxCurrentA: Math.max(0, ...currents),
+    rpmCv: steadyRpm > 0 ? Math.sqrt(variance) / steadyRpm : 1,
+    maxHeat,
+    shorted,
+    stalled: Math.abs(state.omega) < OMEGA_EPS,
+    collapsed: state.coilCollapsed,
+  };
 }
 
 function runScenario(scenario: Scenario): void {
-  const configs = cartesianConfigs(scenario);
-  const results = configs.map((config) => ({ config, result: simulate(config) }));
-  const viable = results.filter(
-    ({ result }) => !result.shorted && !result.stalled && result.stable,
-  );
+  const configRng = mulberry32(0x15_0000 + scenario.id.length);
+  const seen = new Set<string>();
+  const viable: { config: MotorConfig; result: SimResult }[] = [];
+  for (let index = 0; index < SAMPLE_COUNT; index += 1) {
+    const config = sampleConfig(scenario, configRng);
+    const key = JSON.stringify(config);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const result = simulate(config, scenario.evalSeconds ?? 10, 42 + index);
+    const baseAccepts = !result.shorted
+      && !result.stalled
+      && !result.collapsed
+      && result.maxHeat < 1
+      && result.rpmCv <= 0.1;
+    if (baseAccepts && (scenario.accepts?.(result) ?? true)) viable.push({ config, result });
+  }
   viable.sort((a, b) => b.result.steadyRpm - a.result.steadyRpm);
-
-  console.log(`\n=== ${scenario.name} (locked: ${JSON.stringify(scenario.locked)}) ===`);
-  console.log(`探索組み合わせ数: ${configs.length} / 安定に到達: ${viable.length}`);
-
-  if (viable.length === 0) {
-    console.log('☆2条件(安定)を満たす組み合わせが見つかりませんでした。free gridの見直しが必要です。');
-    return;
-  }
-
   const ceiling = viable[0];
-  console.log(
-    `安定を保てる上限: ${ceiling.result.steadyRpm.toFixed(0)} RPM (平均電流 ${ceiling.result.avgCurrentA.toFixed(3)} A)`,
-  );
-  console.log(`  config: ${JSON.stringify(ceiling.config)}`);
-  console.log(`  targetRpm目安(上限の85〜95%): ${(ceiling.result.steadyRpm * 0.85).toFixed(0)} 〜 ${(ceiling.result.steadyRpm * 0.95).toFixed(0)}`);
-
-  console.log('上位候補(RPM降順、最大5件):');
-  for (const { config, result } of viable.slice(0, 5)) {
-    console.log(
-      `  RPM=${result.steadyRpm.toFixed(0)} avgCurrent=${result.avgCurrentA.toFixed(3)}A  ${JSON.stringify(config)}`,
-    );
-  }
+  console.log(`\n=== ${scenario.kind.toUpperCase()} ${scenario.id}: ${scenario.name} ===`);
+  console.log(`探索 ${seen.size}件 / 条件達成 ${viable.length}件`);
+  if (!ceiling) { console.log('条件達成レシピなし'); return; }
+  const ratio = scenario.kind === 'classic' ? 0.97 : 0.96;
+  console.log(`上限 ${ceiling.result.steadyRpm.toFixed(0)} RPM / 推奨目標 ${Math.floor(ceiling.result.steadyRpm * ratio)} RPM`);
+  console.log(`平均 ${ceiling.result.avgCurrentA.toFixed(3)} A / 最大 ${ceiling.result.maxCurrentA.toFixed(3)} A / CV ${(ceiling.result.rpmCv * 100).toFixed(2)} % / 発熱 ${ceiling.result.maxHeat.toFixed(3)}`);
+  console.log(JSON.stringify(ceiling.config));
 }
 
-for (const scenario of SCENARIOS) {
-  runScenario(scenario);
-}
+for (const scenario of [...CLASSIC, ...EX]) runScenario(scenario);

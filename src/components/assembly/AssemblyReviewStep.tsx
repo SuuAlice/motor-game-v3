@@ -1,5 +1,6 @@
 import type { AssemblyStepProps } from '../../modes/AssemblyMode';
-import { PresetButtons, SliderRow, MAGNET_PRESETS, BATTERY_PRESETS } from '../ParamPanel';
+import { PresetButtons, SliderRow } from '../ParamPanel';
+import { BATTERY_PRESETS, MAGNET_PRESETS } from '../../data/parameterPresets';
 
 // spec docs/spec.md §2手順5: 「軸受けに軸を乗せ、磁石を釘の下に置き、電池を接続」
 export function AssemblyReviewStep({ draft, setDraft }: AssemblyStepProps) {
@@ -18,7 +19,7 @@ export function AssemblyReviewStep({ draft, setDraft }: AssemblyStepProps) {
       <SliderRow
         label="磁石との距離"
         value={draft.magnetDistanceMm}
-        min={5}
+        min={2}
         max={30}
         step={1}
         unit="mm"
@@ -35,6 +36,9 @@ export function AssemblyReviewStep({ draft, setDraft }: AssemblyStepProps) {
         <p className="mb-1 font-bold text-slate-700">できあがったモーター</p>
         <ul className="grid grid-cols-2 gap-x-3 gap-y-1 tabular-nums">
           <li>巻き数: {draft.coilTurns}回</li>
+          <li>線径: {draft.wireGaugeMm ?? 0.4}mm</li>
+          <li>並列本数: {draft.parallelStrands ?? 1}本</li>
+          <li>ワニス: {(draft.varnished ?? false) ? 'あり' : 'なし'}</li>
           <li>スリット幅: {draft.slitWidthMm.toFixed(1)}mm</li>
           <li>削り具合: {Math.round(draft.sandingQuality * 100)}%</li>
           <li>ブラシ圧: {draft.brushPressure.toFixed(2)}</li>

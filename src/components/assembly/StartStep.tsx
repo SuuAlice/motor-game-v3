@@ -4,10 +4,9 @@ import { useFlickGesture } from './useFlickGesture';
 import { useGameStore } from '../../store/gameStore';
 import { drawMotor } from '../../render/drawMotor';
 import type { SimState } from '../../engine/motorPhysics';
-import { diagnoseFailures } from '../../engine/failures';
 import { MotorCanvas } from '../../render/MotorCanvas';
 import { RpmMeter } from '../RpmMeter';
-import { HintPopup } from '../HintPopup';
+import { ObservationPanel } from '../ObservationPanel';
 
 // px/msの速度をrad/sの初期omegaへ変換する係数。MAX_FLICK_OMEGA付近まで
 // 出せる強めのフリックを想定して選んだ(engine/constants.tsのMAX_FLICK_OMEGAで
@@ -23,6 +22,9 @@ const PREVIEW_REST_STATE: SimState = {
   running: true,
   rpm: 0,
   chatterFramesLeft: 0,
+  batteryHeat: 0,
+  coilCollapsed: false,
+  highSpeedFrameCount: 0,
 };
 
 export function StartStep({ draft }: AssemblyStepProps) {
@@ -65,16 +67,11 @@ export function StartStep({ draft }: AssemblyStepProps) {
 }
 
 function StartedMotor() {
-  const config = useGameStore((s) => s.config);
-  const history = useGameStore((s) => s.history);
-  const lockedKeys = useGameStore((s) => s.lockedKeys);
-  const diagnosis = diagnoseFailures(config, history, lockedKeys)[0] ?? null;
-
   return (
     <div className="flex flex-col items-center gap-3">
       <MotorCanvas />
       <RpmMeter />
-      <HintPopup diagnosis={diagnosis} />
+      <ObservationPanel />
     </div>
   );
 }
