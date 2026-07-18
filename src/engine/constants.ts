@@ -37,3 +37,9 @@ export const CHATTER_MAX_PROB = 0.3; // brushPressure=0のときの1ステップ
 // RPM表示の指数移動平均(SimState.rpmは「表示用・移動平均」とのみ規定されており、
 // 窓幅はspecに明記がないため追加)
 export const RPM_SMOOTHING_ALPHA = 0.1;
+
+// UI操作用の追加定数(spec §3.7の物理定数表には含まれない、engine外のstore/UI層が
+// 参照する)。サンドボックス/調整チャレンジの「始動」ボタンが与える固定初速。
+// OMEGA_EPS(静止摩擦クランプの閾値)とデッドゾーンを確実に超え、確実に回転を
+// 開始させる値から出発する。サンドボックスでのチューニング対象。
+export const FLICK_INITIAL_OMEGA = 15; // rad/s
