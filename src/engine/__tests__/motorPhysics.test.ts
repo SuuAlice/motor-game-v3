@@ -9,6 +9,8 @@ import {
   K_B_DISTANCE,
   K_E,
   K_T,
+  CHATTER_BURST_FRAMES,
+  CHATTER_PRESSURE_THRESHOLD,
 } from '../constants';
 import { mulberry32 } from './prng';
 
@@ -31,7 +33,7 @@ function goodConfig(overrides: Partial<MotorConfig> = {}): MotorConfig {
 }
 
 function restState(theta = Math.PI / 4): SimState {
-  return { theta, omega: 0, current: 0, backEmf: 0, shorted: false, running: true, rpm: 0 };
+  return { theta, omega: 0, current: 0, backEmf: 0, shorted: false, running: true, rpm: 0, chatterFramesLeft: 0 };
 }
 
 function runSteps(config: MotorConfig, steps: number, rng: () => number = NO_NOISE_RNG, initial = restState()) {
@@ -129,7 +131,7 @@ describe('受け入れ基準4: ω=0付近での符号チャタリング防止', 
 
 describe('受け入れ基準5: Jの巻き数依存(§3.1)', () => {
   it('単体プロパティ: 同一のθ・ωから1ステップ進めたとき、coilTurnsが大きい(Jが大きい)方がΔωが小さい', () => {
-    const base: SimState = { theta: Math.PI / 2, omega: 10, current: 0, backEmf: 0, shorted: false, running: true, rpm: 0 };
+    const base: SimState = { theta: Math.PI / 2, omega: 10, current: 0, backEmf: 0, shorted: false, running: true, rpm: 0, chatterFramesLeft: 0 };
     const low = step(goodConfig({ coilTurns: 80 }), base, DT, NO_NOISE_RNG);
     const high = step(goodConfig({ coilTurns: 140 }), base, DT, NO_NOISE_RNG);
     expect(high.omega - base.omega).toBeLessThan(low.omega - base.omega);
@@ -208,5 +210,55 @@ describe('性質ベーステスト(ランダムパラメータ)', () => {
         prevOmega = s.omega;
       }
     }
+  });
+});
+
+describe('Phase3バランス調整: 持続的チャタリングバースト(§3.5)', () => {
+  it('瞬断が発生するとCHATTER_BURST_FRAMES分だけ連続してcurrent=0が続き、その後は復帰する', () => {
+    const config = goodConfig({ brushPressure: 0.1, axisOffsetMm: 0 });
+    let callCount = 0;
+    // 最初の乱数呼び出し(=最初のチャタリング判定)だけ発火させ、以降は発火させない
+    const rng = () => {
+      callCount += 1;
+      return callCount === 1 ? 0 : 0.999999;
+    };
+    // 静止摩擦クランプに引っかからないよう、十分に回転している状態から始める
+    let s: SimState = { theta: Math.PI / 2, omega: 10, current: 0, backEmf: 0, shorted: false, running: true, rpm: 0, chatterFramesLeft: 0 };
+
+    const currents: number[] = [];
+    for (let i = 0; i < 30; i++) {
+      s = step(config, s, DT, rng);
+      currents.push(s.current);
+    }
+
+    for (let i = 0; i < CHATTER_BURST_FRAMES; i++) {
+      expect(currents[i]).toBe(0);
+    }
+    expect(currents[CHATTER_BURST_FRAMES]).toBeGreaterThan(0);
+  });
+
+  it('brushPressureが閾値以上のときはチャタリングが一切発火しない(乱数が常に発火条件を満たしても)', () => {
+    const config = goodConfig({ brushPressure: CHATTER_PRESSURE_THRESHOLD, axisOffsetMm: 0 });
+    const ALWAYS_TRIGGER_RNG = () => 0; // 発火条件を満たす側の乱数を常に返す
+    let s: SimState = { theta: Math.PI / 2, omega: 10, current: 0, backEmf: 0, shorted: false, running: true, rpm: 0, chatterFramesLeft: 0 };
+
+    for (let i = 0; i < 60; i++) {
+      s = step(config, s, DT, ALWAYS_TRIGGER_RNG);
+      expect(s.chatterFramesLeft).toBe(0);
+    }
+  });
+});
+
+describe('Phase3: 組み立てモードの逆方向フリック', () => {
+  // 検証の結果、整流子の符号ロジック(commutator.ts)は電流が正である限り
+  // 角度によらず常に正方向のトルクを生む(実物の2線整流子と同じく、回転方向は
+  // 弾いた向きではなく電池の極性で決まるという仕様)。そのため、負の初期omegaを
+  // 与えても最終的には正方向の定常回転に収束する。これは仕様として固定する
+  // (逆に弾くと減速→停止→正方向に回り直す様子が見えること自体に教材価値がある)。
+  it('負の初期omegaを与えても、最終的には正方向の定常回転に収束する(回転方向は極性で決まる)', () => {
+    const config = goodConfig();
+    const initial: SimState = { ...restState(), omega: -15 };
+    const s = runSteps(config, 120 * 15, NO_NOISE_RNG, initial);
+    expect(s.omega).toBeGreaterThan(0);
   });
 });

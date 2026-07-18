@@ -20,6 +20,7 @@ import {
   K_PRESSURE,
   CHATTER_PRESSURE_THRESHOLD,
   CHATTER_MAX_PROB,
+  CHATTER_BURST_FRAMES,
   RPM_SMOOTHING_ALPHA,
 } from './constants';
 
@@ -43,6 +44,7 @@ export interface SimState {
   shorted: boolean;
   running: boolean;
   rpm: number; // 表示用(移動平均)
+  chatterFramesLeft: number; // 内部状態: 接触不良バーストの残りフレーム数(spec §3.5、Phase3バランス調整で追加)
 }
 
 type Rng = () => number;
@@ -71,12 +73,27 @@ function contactResistance(sandingQuality: number, brushPressure: number): numbe
   );
 }
 
-// spec §3.5: ブラシ圧が閾値未満のとき、フレームごとに確率で瞬断を発生させる。
-function isChatteringFrame(brushPressure: number, rng: Rng): boolean {
-  if (brushPressure >= CHATTER_PRESSURE_THRESHOLD) return false;
+// spec §3.5: ブラシ圧が閾値未満のとき、接触不良の瞬断が起こる。1フレーム単発では
+// 慣性JとRPM表示の移動平均(RPM_SMOOTHING_ALPHA)に埋もれてしまい効果が出ないため、
+// 発生した瞬断はCHATTER_BURST_FRAMES分だけ持続するバーストとしてモデル化する
+// (Phase3バランス調整で追加。spec §3.5の「瞬断」の実装詳細)。
+function nextChatterState(
+  brushPressure: number,
+  framesLeft: number,
+  rng: Rng,
+): { chattering: boolean; framesLeft: number } {
+  if (framesLeft > 0) {
+    return { chattering: true, framesLeft: framesLeft - 1 };
+  }
+  if (brushPressure >= CHATTER_PRESSURE_THRESHOLD) {
+    return { chattering: false, framesLeft: 0 };
+  }
   const prob =
     (CHATTER_MAX_PROB * (CHATTER_PRESSURE_THRESHOLD - brushPressure)) / CHATTER_PRESSURE_THRESHOLD;
-  return rng() < prob;
+  if (rng() < prob) {
+    return { chattering: true, framesLeft: CHATTER_BURST_FRAMES - 1 };
+  }
+  return { chattering: false, framesLeft: 0 };
 }
 
 // spec §3.5: 軸ずれによる振動はω²に比例し、ωにノイズを注入する。
@@ -112,8 +129,8 @@ export function step(config: MotorConfig, state: SimState, dt: number, rng: Rng 
 
   // 3. チャタリング判定(rng消費①)。T_magの計算前に電流へ反映させることで、
   //    瞬断フレームでは磁気トルクもゼロになる(ブラシ圧弱すぎ→不安定、を物理的に再現)。
-  const isChattering = isChatteringFrame(config.brushPressure, rng);
-  if (isChattering) {
+  const chatterState = nextChatterState(config.brushPressure, state.chatterFramesLeft, rng);
+  if (chatterState.chattering) {
     current = 0;
   }
 
@@ -131,6 +148,7 @@ export function step(config: MotorConfig, state: SimState, dt: number, rng: Rng 
       shorted,
       running: state.running,
       rpm: updateRpm(state.rpm, 0),
+      chatterFramesLeft: chatterState.framesLeft,
     };
   }
 
@@ -159,5 +177,6 @@ export function step(config: MotorConfig, state: SimState, dt: number, rng: Rng 
     shorted,
     running: state.running,
     rpm: updateRpm(state.rpm, omegaNew),
+    chatterFramesLeft: chatterState.framesLeft,
   };
 }

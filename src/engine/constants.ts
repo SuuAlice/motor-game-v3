@@ -32,7 +32,13 @@ export const K_PRESSURE = 3.0; // ブラシ圧に対する減衰の鋭さ
 
 // チャタリングモデル(§3.5「ブラシ圧が閾値未満のとき、フレームごとに確率で瞬断」の実装)
 export const CHATTER_PRESSURE_THRESHOLD = 0.2; // これ未満のbrushPressureで瞬断が起こりうる
-export const CHATTER_MAX_PROB = 0.3; // brushPressure=0のときの1ステップあたりの瞬断確率
+export const CHATTER_MAX_PROB = 0.3; // brushPressure=0のときの1ステップあたりの瞬断発生確率
+// Phase3バランス調整で追加。瞬断は単発(1フレーム)だと慣性・RPM移動平均に埋もれて
+// ☆2(10秒間±10%安定)の判定を破れないため、発生した瞬断はこのフレーム数だけ持続する
+// バーストにする。scripts/tune-chatter.tsでの実験値: 24フレーム(0.2秒)でbrushPressure
+// <0.2は確実に☆2を落とす(stalledまたは不安定)一方、0.3以上(spec設計目標の適正値)は
+// 無傷であることを確認した。
+export const CHATTER_BURST_FRAMES = 24;
 
 // RPM表示の指数移動平均(SimState.rpmは「表示用・移動平均」とのみ規定されており、
 // 窓幅はspecに明記がないため追加)
@@ -43,3 +49,15 @@ export const RPM_SMOOTHING_ALPHA = 0.1;
 // OMEGA_EPS(静止摩擦クランプの閾値)とデッドゾーンを確実に超え、確実に回転を
 // 開始させる値から出発する。サンドボックスでのチューニング対象。
 export const FLICK_INITIAL_OMEGA = 15; // rad/s
+
+// トラブル診断モード用の追加定数(spec §7タスク8)。「なおった!」と判定する
+// 回転数のしきい値。data/brokenMotors.tsの各プリセットは適正パラメータで
+// 約1000〜1200RPMに収束するよう作られているため、その半分程度を「健全」の
+// 目安にする(修理途中の中途半端な値では成立しない水準)。
+export const DIAGNOSIS_HEALTHY_RPM = 500;
+
+// 組み立てモードの始動フリック(spec §4末尾: モーター描画エリアを指ではじく
+// ジェスチャー)用の上限クランプ。強く弾きすぎても際限なく初速が乗らないようにする。
+// FLICK_INITIAL_OMEGA(ボタン方式の固定初速)よりは強く弾けるが、物理的に
+// 不自然にならない範囲を目安にした。
+export const MAX_FLICK_OMEGA = 40; // rad/s

@@ -45,28 +45,37 @@ const DEFAULT_FREE_GRID: FreeGrid = {
 interface Scenario {
   name: string;
   locked: Partial<MotorConfig>;
+  // Phase3バランス調整で追加。特定の自由パラメータだけ既定グリッドを差し替える
+  // (data/challenges.tsのparamRangesと対応させ、実際にプレイヤーが選べる範囲を反映する)
+  freeGridOverrides?: Partial<FreeGrid>;
 }
 
 // 試遊の知見(壊れない・ブレない範囲で最大速度を探すのが楽しさの核)に基づく候補。
 // 実行結果を見て5〜8個に絞り込む(このスクリプト自体は絞り込みをしない)。
+//
+// Phase3バランス調整: coilTurnsを固定していない6シナリオには、data/challenges.tsの
+// paramRangesと合わせてcoilTurnsの下限を50に引き上げたグリッドを使う
+// (「巻き数を減らすほど有利」という縮退戦略を選択肢から外すため。§7受け入れ基準5が
+// 保証する物理挙動自体は正しいので、engine側ではなくここで可動域を絞る)。
+const COIL_TURNS_FLOOR_OVERRIDE: Partial<FreeGrid> = { coilTurns: [50, 80, 120] };
+
 const SCENARIOS: Scenario[] = [
-  { name: '軸ずれ固定(高め)', locked: { axisOffsetMm: 2.5 } },
-  { name: '弱磁石縛り', locked: { magnetStrength: 0.2 } },
+  { name: '軸ずれ固定(高め)', locked: { axisOffsetMm: 2.5 }, freeGridOverrides: COIL_TURNS_FLOOR_OVERRIDE },
+  { name: '弱磁石縛り', locked: { magnetStrength: 0.2 }, freeGridOverrides: COIL_TURNS_FLOOR_OVERRIDE },
   { name: '巻き数少なめ固定', locked: { coilTurns: 30 } },
-  { name: '低電圧縛り(1.5V)', locked: { batteryVoltage: 1.5 } },
-  { name: 'ブラシ圧やや高め固定', locked: { brushPressure: 0.45 } },
-  { name: 'スリット幅狭め固定', locked: { slitWidthMm: 0.8 } },
-  { name: '磁石距離固定(遠め)', locked: { magnetDistanceMm: 25 } },
+  { name: '低電圧縛り(1.5V)', locked: { batteryVoltage: 1.5 }, freeGridOverrides: COIL_TURNS_FLOOR_OVERRIDE },
+  { name: 'ブラシ圧やや高め固定', locked: { brushPressure: 0.45 }, freeGridOverrides: COIL_TURNS_FLOOR_OVERRIDE },
+  { name: 'スリット幅狭め固定', locked: { slitWidthMm: 0.8 }, freeGridOverrides: COIL_TURNS_FLOOR_OVERRIDE },
+  { name: '磁石距離固定(遠め)', locked: { magnetDistanceMm: 25 }, freeGridOverrides: COIL_TURNS_FLOOR_OVERRIDE },
 ];
 
-function cartesianConfigs(locked: Partial<MotorConfig>): MotorConfig[] {
-  const freeKeys = (Object.keys(DEFAULT_FREE_GRID) as (keyof MotorConfig)[]).filter(
-    (key) => !(key in locked),
-  );
+function cartesianConfigs(scenario: Scenario): MotorConfig[] {
+  const grid: FreeGrid = { ...DEFAULT_FREE_GRID, ...(scenario.freeGridOverrides ?? {}) };
+  const freeKeys = (Object.keys(grid) as (keyof MotorConfig)[]).filter((key) => !(key in scenario.locked));
 
   let combos: Partial<MotorConfig>[] = [{}];
   for (const key of freeKeys) {
-    const values = DEFAULT_FREE_GRID[key];
+    const values = grid[key];
     const next: Partial<MotorConfig>[] = [];
     for (const combo of combos) {
       for (const value of values) {
@@ -75,7 +84,7 @@ function cartesianConfigs(locked: Partial<MotorConfig>): MotorConfig[] {
     }
     combos = next;
   }
-  return combos.map((combo) => ({ ...combo, ...locked }) as MotorConfig);
+  return combos.map((combo) => ({ ...combo, ...scenario.locked }) as MotorConfig);
 }
 
 interface SimResult {
@@ -100,6 +109,7 @@ function simulate(config: MotorConfig): SimResult {
     shorted: false,
     running: true,
     rpm: 0,
+    chatterFramesLeft: 0,
   };
 
   for (let i = 0; i < WARMUP_STEPS; i++) {
@@ -126,7 +136,7 @@ function simulate(config: MotorConfig): SimResult {
 }
 
 function runScenario(scenario: Scenario): void {
-  const configs = cartesianConfigs(scenario.locked);
+  const configs = cartesianConfigs(scenario);
   const results = configs.map((config) => ({ config, result: simulate(config) }));
   const viable = results.filter(
     ({ result }) => !result.shorted && !result.stalled && result.stable,
