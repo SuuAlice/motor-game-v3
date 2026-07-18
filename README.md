@@ -65,6 +65,8 @@ Vite / React 18 / TypeScript / zustand / Canvas 2D / recharts / Tailwind CSS / V
 
 仕様は [`docs/spec.md`](docs/spec.md) と [`docs/spec-v1.5.md`](docs/spec-v1.5.md) を参照してください。
 
+AIエージェント協働の実践記録は [`docs/ai-agent-collaboration-log.md`](docs/ai-agent-collaboration-log.md) にまとめています。
+
 ## 安全上の注意
 
 実物の電池では絶対に短絡させないでください。本作の発熱表示はシミュレーションですが、実物の短絡は発熱、液漏れ、破裂の原因になります。
