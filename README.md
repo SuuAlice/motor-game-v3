@@ -65,7 +65,7 @@ Vite / React 18 / TypeScript / zustand / Canvas 2D / recharts / Tailwind CSS / V
 
 仕様は [`docs/spec.md`](docs/spec.md) と [`docs/spec-v1.5.md`](docs/spec-v1.5.md) を参照してください。
 
-AIエージェント協働の実践記録は [`docs/ai-agent-collaboration-log.md`](docs/ai-agent-collaboration-log.md) にまとめています。
+AIエージェント協働の実践記録は [`docs/ai-agent-collaboration-log-v2.md`](docs/ai-agent-collaboration-log-v2.md) にまとめています。初版は [`docs/ai-agent-collaboration-log.md`](docs/ai-agent-collaboration-log.md) に残しています。
 
 ## 安全上の注意
 
