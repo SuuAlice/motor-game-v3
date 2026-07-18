@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { diagnoseFailures } from '../failures';
-import type { MotorConfig } from '../motorPhysics';
+import { step, type MotorConfig, type SimState } from '../motorPhysics';
+import { FLICK_INITIAL_OMEGA } from '../constants';
 import type { HistorySample } from '../scoring';
 
 // spec docs/spec.md §3.7の設計目標で使う「適正パラメータ」(他のテストと同じ)
@@ -18,10 +19,12 @@ function goodConfig(overrides: Partial<MotorConfig> = {}): MotorConfig {
   };
 }
 
-function movedThenStoppedHistory(): HistorySample[] {
+// 「回るがすぐ減速して止まる」用: 直近の窓がほぼ止まっている
+// (実測では立ち上がりの一瞬は0.1秒サンプリングにほぼ写らないため、
+// isStalledは「動いたことがある」を要求しない。詳細はfailures.tsのコメント参照)
+function stalledHistory(): HistorySample[] {
   const history: HistorySample[] = [];
-  for (let t = 0; t <= 2; t += 0.1) history.push({ t, rpm: 100, current: 0.5, backEmf: 0.1 });
-  for (let t = 2.1; t <= 6; t += 0.1) history.push({ t, rpm: 0, current: 0, backEmf: 0 });
+  for (let t = 0; t <= 6; t += 0.1) history.push({ t, rpm: 0, current: 0, backEmf: 0 });
   return history;
 }
 
@@ -63,19 +66,20 @@ describe('diagnoseFailures', () => {
     expect(result[0].causeParam).toBe('slitWidthMm');
   });
 
-  it('削り残し: sandingQualityが低く、動いてから止まった場合に検出される', () => {
-    const result = diagnoseFailures(goodConfig({ sandingQuality: 0.3 }), movedThenStoppedHistory());
+  it('削り残し: sandingQualityが低く、弱く回り続けている場合に検出される', () => {
+    // 実測: このモデルでは接触抵抗の増加は「止まる」ではなく「弱く回り続ける」形で現れる
+    const result = diagnoseFailures(goodConfig({ sandingQuality: 0.3 }), weaklySpinningHistory());
     expect(result.some((d) => d.category === 'sandingResidue')).toBe(true);
   });
 
-  it('ブラシ圧過大: brushPressureが高く、動いてから止まった場合に検出される', () => {
-    const result = diagnoseFailures(goodConfig({ brushPressure: 0.8 }), movedThenStoppedHistory());
+  it('ブラシ圧過大: brushPressureが高く、止まっている場合に検出される', () => {
+    const result = diagnoseFailures(goodConfig({ brushPressure: 0.8 }), stalledHistory());
     expect(result.some((d) => d.category === 'brushTooTight')).toBe(true);
-    // sandingQualityは正常範囲なので削り残しは誤検出しない
+    // sandingQualityは正常範囲なので削り残しは誤検出しない(止まっているので弱く回ってもいない)
     expect(result.some((d) => d.category === 'sandingResidue')).toBe(false);
   });
 
-  it('ブラシ圧不足: brushPressureが低く、間欠的な回転がある場合に検出される', () => {
+  it('ブラシ圧不足: brushPressureが低く、回転数のばらつきが大きい場合に検出される', () => {
     const result = diagnoseFailures(goodConfig({ brushPressure: 0.1 }), intermittentHistory());
     expect(result.some((d) => d.category === 'brushTooLoose')).toBe(true);
   });
@@ -112,5 +116,62 @@ describe('diagnoseFailures', () => {
     const config = goodConfig({ slitWidthMm: 0 });
     const result = diagnoseFailures(config, [], new Set(['slitWidthMm']));
     expect(result).toEqual([]);
+  });
+});
+
+describe('diagnoseFailures(実際のstep()出力を使った統合テスト)', () => {
+  // Phase3で追加。上記の合成データによるテストは検出ロジックの単体検証には十分だが、
+  // しきい値自体が実際のシミュレーション挙動と乖離していないかは別途確認が必要
+  // (これが原因で一度しきい値の全面見直しが必要になった)。ここでは実際の
+  // step()出力を使い、各カテゴリが期待通り検出されることを確認する。
+  const DT = 1 / 120;
+
+  function mulberry32(seed: number): () => number {
+    let a = seed;
+    return () => {
+      a |= 0;
+      a = (a + 0x6d2b79f5) | 0;
+      let t = Math.imul(a ^ (a >>> 15), 1 | a);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  function simulateHistory(config: MotorConfig, seed: number, seconds = 15): HistorySample[] {
+    const rng = mulberry32(seed);
+    let s: SimState = {
+      theta: 0,
+      omega: FLICK_INITIAL_OMEGA,
+      current: 0,
+      backEmf: 0,
+      shorted: false,
+      running: true,
+      rpm: 0,
+      chatterFramesLeft: 0,
+    };
+    const history: HistorySample[] = [];
+    const sampleEvery = Math.round(0.1 / DT);
+    for (let i = 0; i < seconds * 120; i++) {
+      s = step(config, s, DT, rng);
+      if (i % sampleEvery === 0) history.push({ t: i * DT, rpm: s.rpm, current: s.current, backEmf: s.backEmf });
+    }
+    return history;
+  }
+
+  it('適正パラメータでは何も誤検出しない', () => {
+    const history = simulateHistory(goodConfig(), 1);
+    expect(diagnoseFailures(goodConfig(), history, new Set())).toEqual([]);
+  });
+
+  it('brushPressure=0.43(静止摩擦を振り切れない)はbrushTooTightとして検出される', () => {
+    const config = goodConfig({ brushPressure: 0.43 });
+    const history = simulateHistory(config, 1);
+    expect(diagnoseFailures(config, history, new Set()).some((d) => d.category === 'brushTooTight')).toBe(true);
+  });
+
+  it('magnetStrength=0.3(弱磁石で回転数が半減)はweakFieldとして検出される', () => {
+    const config = goodConfig({ magnetStrength: 0.3 });
+    const history = simulateHistory(config, 1);
+    expect(diagnoseFailures(config, history, new Set()).some((d) => d.category === 'weakField')).toBe(true);
   });
 });

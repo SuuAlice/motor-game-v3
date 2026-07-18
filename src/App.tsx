@@ -1,6 +1,7 @@
 import { useGameStore } from './store/gameStore'
 import { SandboxMode } from './modes/SandboxMode'
 import { ChallengeMode } from './modes/ChallengeMode'
+import { DiagnosisMode } from './modes/DiagnosisMode'
 
 // spec docs/spec.md §4: 「[タイトル] → [モード選択]」
 function TitleScreen() {
@@ -26,6 +27,13 @@ function TitleScreen() {
         >
           調整チャレンジ
         </button>
+        <button
+          type="button"
+          onClick={() => setMode('diagnosis')}
+          className="rounded-lg bg-emerald-700 px-4 py-3 font-bold text-white"
+        >
+          トラブル診断
+        </button>
       </div>
     </div>
   )
@@ -48,6 +56,7 @@ function App() {
       {mode === 'title' && <TitleScreen />}
       {mode === 'sandbox' && <SandboxMode />}
       {mode === 'challenge' && <ChallengeMode />}
+      {mode === 'diagnosis' && <DiagnosisMode />}
     </main>
   )
 }

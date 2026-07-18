@@ -25,15 +25,32 @@ export interface FailureDiagnosis {
   hintStage2: string; // 段階表示2段目(具体的なヒント)
 }
 
+// 各しきい値は scripts/ の一時検証スクリプトで実際のstep()出力に対して
+// 動作確認して決めた(Phase3で追加)。単発の理論値ではなく、実シミュレーション上で
+// 期待するカテゴリが検出されることを確認済み。
 const RECENT_WINDOW_SEC = 3;
-const MOVING_RPM = 20;
-const STOPPED_RPM = 5;
-const WEAK_CEILING_RPM = 200;
+// FLICK_INITIAL_OMEGA(15rad/s)からの立ち上がりピークはRPM_SMOOTHING_ALPHAの
+// 平滑化により最初の0.1秒サンプルの時点で既に減衰し始めているため、8/2という
+// 小さめの値でないと「動いてから止まった」を検出できない
+const MOVING_RPM = 8;
+const STOPPED_RPM = 2;
+// 逆起電力支配域では巻き数・磁石距離を悪化させても定常回転数はあまり下がらず
+// (むしろ上がることすらある)、磁石強度だけが「弱いが動く」帯域を持つ。実測で
+// magnetStrength=0.3のとき約600RPM(適正パラメータの約半分)だったため、
+// それを検出できる水準に設定
+const WEAK_CEILING_RPM = 700;
 const WOBBLE_MIN_MEAN_RPM = 300;
-const WOBBLE_DEVIATION_RATIO = 0.15;
+const WOBBLE_DEVIATION_RATIO = 0.12;
+// 「時々回るが不安定」の代理指標(変動係数)。健全な定常回転は同条件で1%未満、
+// チャタリングで乱れている場合は10〜40%程度になることを実測で確認した
+// (乱数任せの挙動のため完全に安定はしないが、8%を超えれば明確に異常)
+const INTERMITTENT_CV_THRESHOLD = 0.08;
 
 const SANDING_RESIDUE_THRESHOLD = 0.5;
-const BRUSH_TOO_TIGHT_THRESHOLD = 0.6;
+// 実測: このモデルでは brushPressure≈0.43 を境に「まったく動けない」領域に入る
+// (0.42では約900RPMで安定、0.43では静止摩擦を振り切れず停止する)。0.6という
+// 設計時の見立てはこの境界より高すぎて検出対象を逃していたため引き下げた
+const BRUSH_TOO_TIGHT_THRESHOLD = 0.4;
 const WEAK_COIL_TURNS_THRESHOLD = 50;
 const WEAK_MAGNET_STRENGTH_THRESHOLD = 0.4;
 const FAR_MAGNET_DISTANCE_THRESHOLD = 20;
@@ -49,23 +66,30 @@ function recentWindow(history: HistorySample[]): HistorySample[] {
   return history.filter((s) => s.t >= endTime - RECENT_WINDOW_SEC);
 }
 
-function everMoved(history: HistorySample[]): boolean {
-  return history.some((s) => s.rpm > MOVING_RPM);
-}
-
-// 「ピクッと動いて止まる」「回るがすぐ減速して止まる」の共通判定:
-// 過去には動いたが、直近の窓ではほぼ止まっている
-function movedThenStopped(history: HistorySample[]): boolean {
+// 「回るがすぐ減速して止まる」の判定: 直近の窓でほぼ止まっている。
+// 実測: ブラシ圧が高いほど停止までが速く(数フレーム)、RPM表示の移動平均・
+// 0.1秒間隔のサンプリングでは立ち上がりの一瞬をほぼ捉えられないため、
+// 「動いたことがある」を要求せず、現在ほぼ止まっていることだけを見る
+// (フリックしても動き出せない場合も含めて「ブラシ圧が高すぎる」という
+// 診断は正しいため)
+function isStalled(history: HistorySample[]): boolean {
   const recent = recentWindow(history);
   if (recent.length === 0) return false;
-  return everMoved(history) && recent.every((s) => s.rpm < STOPPED_RPM);
+  return recent.every((s) => s.rpm < STOPPED_RPM);
 }
 
-// 「時々回るが不安定」の判定: 直近の窓に動いている瞬間と止まっている瞬間が混在する
+// 「時々回るが不安定」の判定: 接触不良のチャタリングで回転数が大きく暴れる。
+// 「動いている瞬間と止まっている瞬間が混在する」を素朴に判定すると、実際には
+// 一度勢いに乗ると完全なゼロには戻らないことが多く検出できないため、
+// 変動係数(標準偏差/平均)の大きさを代理指標にする
 function isIntermittent(history: HistorySample[]): boolean {
   const recent = recentWindow(history);
   if (recent.length < 4) return false;
-  return recent.some((s) => s.rpm > MOVING_RPM) && recent.some((s) => s.rpm < STOPPED_RPM);
+  const meanRpm = average(recent.map((s) => s.rpm));
+  if (meanRpm <= MOVING_RPM) return false;
+  const variance = average(recent.map((s) => (s.rpm - meanRpm) ** 2));
+  const coefficientOfVariation = Math.sqrt(variance) / meanRpm;
+  return coefficientOfVariation > INTERMITTENT_CV_THRESHOLD;
 }
 
 // 「弱々しく回る」の判定: 止まってはいないが、上限に対して明らかに遅い
@@ -105,7 +129,10 @@ export function diagnoseFailures(
     });
   }
 
-  if (config.sandingQuality < SANDING_RESIDUE_THRESHOLD && movedThenStopped(history)) {
+  // 実測: この物理モデルでは接触抵抗の増加は「止まる」よりも「弱く回り続ける」
+  // 形で現れる(R_CONTACT_FLOORのため完全な遮断にはならない)ため、
+  // movedThenStoppedではなくisWeaklySpinningで判定する
+  if (config.sandingQuality < SANDING_RESIDUE_THRESHOLD && isWeaklySpinning(history)) {
     candidates.push({
       category: 'sandingResidue',
       symptom: 'ピクッと動いて止まる',
@@ -115,7 +142,7 @@ export function diagnoseFailures(
     });
   }
 
-  if (config.brushPressure > BRUSH_TOO_TIGHT_THRESHOLD && movedThenStopped(history)) {
+  if (config.brushPressure > BRUSH_TOO_TIGHT_THRESHOLD && isStalled(history)) {
     candidates.push({
       category: 'brushTooTight',
       symptom: '回るがすぐ減速して止まる',
