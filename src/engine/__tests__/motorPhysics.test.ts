@@ -33,7 +33,7 @@ function goodConfig(overrides: Partial<MotorConfig> = {}): MotorConfig {
 }
 
 function restState(theta = Math.PI / 4): SimState {
-  return { theta, omega: 0, current: 0, backEmf: 0, shorted: false, running: true, rpm: 0, chatterFramesLeft: 0 };
+  return { theta, omega: 0, current: 0, backEmf: 0, shorted: false, running: true, rpm: 0, chatterFramesLeft: 0, batteryHeat: 0, coilCollapsed: false, highSpeedFrameCount: 0 };
 }
 
 function runSteps(config: MotorConfig, steps: number, rng: () => number = NO_NOISE_RNG, initial = restState()) {
@@ -131,7 +131,7 @@ describe('受け入れ基準4: ω=0付近での符号チャタリング防止', 
 
 describe('受け入れ基準5: Jの巻き数依存(§3.1)', () => {
   it('単体プロパティ: 同一のθ・ωから1ステップ進めたとき、coilTurnsが大きい(Jが大きい)方がΔωが小さい', () => {
-    const base: SimState = { theta: Math.PI / 2, omega: 10, current: 0, backEmf: 0, shorted: false, running: true, rpm: 0, chatterFramesLeft: 0 };
+    const base: SimState = { theta: Math.PI / 2, omega: 10, current: 0, backEmf: 0, shorted: false, running: true, rpm: 0, chatterFramesLeft: 0, batteryHeat: 0, coilCollapsed: false, highSpeedFrameCount: 0 };
     const low = step(goodConfig({ coilTurns: 80 }), base, DT, NO_NOISE_RNG);
     const high = step(goodConfig({ coilTurns: 140 }), base, DT, NO_NOISE_RNG);
     expect(high.omega - base.omega).toBeLessThan(low.omega - base.omega);
@@ -223,7 +223,7 @@ describe('Phase3バランス調整: 持続的チャタリングバースト(§3.
       return callCount === 1 ? 0 : 0.999999;
     };
     // 静止摩擦クランプに引っかからないよう、十分に回転している状態から始める
-    let s: SimState = { theta: Math.PI / 2, omega: 10, current: 0, backEmf: 0, shorted: false, running: true, rpm: 0, chatterFramesLeft: 0 };
+    let s: SimState = { theta: Math.PI / 2, omega: 10, current: 0, backEmf: 0, shorted: false, running: true, rpm: 0, chatterFramesLeft: 0, batteryHeat: 0, coilCollapsed: false, highSpeedFrameCount: 0 };
 
     const currents: number[] = [];
     for (let i = 0; i < 30; i++) {
@@ -240,7 +240,7 @@ describe('Phase3バランス調整: 持続的チャタリングバースト(§3.
   it('brushPressureが閾値以上のときはチャタリングが一切発火しない(乱数が常に発火条件を満たしても)', () => {
     const config = goodConfig({ brushPressure: CHATTER_PRESSURE_THRESHOLD, axisOffsetMm: 0 });
     const ALWAYS_TRIGGER_RNG = () => 0; // 発火条件を満たす側の乱数を常に返す
-    let s: SimState = { theta: Math.PI / 2, omega: 10, current: 0, backEmf: 0, shorted: false, running: true, rpm: 0, chatterFramesLeft: 0 };
+    let s: SimState = { theta: Math.PI / 2, omega: 10, current: 0, backEmf: 0, shorted: false, running: true, rpm: 0, chatterFramesLeft: 0, batteryHeat: 0, coilCollapsed: false, highSpeedFrameCount: 0 };
 
     for (let i = 0; i < 60; i++) {
       s = step(config, s, DT, ALWAYS_TRIGGER_RNG);

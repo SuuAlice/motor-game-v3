@@ -36,8 +36,9 @@ const MOVING_RPM = 8;
 const STOPPED_RPM = 2;
 // 逆起電力支配域では巻き数・磁石距離を悪化させても定常回転数はあまり下がらず
 // (むしろ上がることすらある)、磁石強度だけが「弱いが動く」帯域を持つ。実測で
-// magnetStrength=0.3のとき約600RPM(適正パラメータの約半分)だったため、
-// それを検出できる水準に設定
+// magnetStrength=0.45のとき約720RPM(適正パラメータの7割程度)だったため、
+// それを検出できる水準に設定(spec-v1.5.md §4の電池内部抵抗・§3のコギング
+// トルク導入でしきい値がシフトしたため、Phase Aで再調整した)
 const WEAK_CEILING_RPM = 700;
 const WOBBLE_MIN_MEAN_RPM = 300;
 const WOBBLE_DEVIATION_RATIO = 0.12;
@@ -52,7 +53,12 @@ const SANDING_RESIDUE_THRESHOLD = 0.5;
 // 設計時の見立てはこの境界より高すぎて検出対象を逃していたため引き下げた
 const BRUSH_TOO_TIGHT_THRESHOLD = 0.4;
 const WEAK_COIL_TURNS_THRESHOLD = 50;
-const WEAK_MAGNET_STRENGTH_THRESHOLD = 0.4;
+// spec-v1.5.md §4(電池内部抵抗)・§3(コギングトルク)の追加により、静止摩擦を
+// 振り切れる境界が0.42付近〜0.45付近になった(0.42以下は完全停止、0.45以上で
+// 720RPM前後まで滑らかに回復する)。「弱いが動く」帯域(完全停止も含む)を
+// 正しく検出できるよう0.45に設定(Phase A再調整。isStalledも検出条件に含めた
+// ため、完全停止のケースも本しきい値でweakFieldとして拾える)。
+const WEAK_MAGNET_STRENGTH_THRESHOLD = 0.45;
 const FAR_MAGNET_DISTANCE_THRESHOLD = 20;
 const WOBBLE_AXIS_OFFSET_THRESHOLD = 1.5;
 
@@ -162,7 +168,11 @@ export function diagnoseFailures(
     });
   }
 
-  if (isWeaklySpinning(history)) {
+  // spec-v1.5.md §3で導入したコギングトルクにより、磁石が弱いケースは「弱々しく
+  // 回り続ける」よりも「コギングの谷に磁力で捕まって止まる」形で現れることがある
+  // (実物のモーターでも起こりうる現象: 磁石が弱いとコギングに負けて始動できない)。
+  // どちらも実測で確認済みのため、isStalledもweakFieldの検出条件に含める
+  if (isWeaklySpinning(history) || isStalled(history)) {
     if (config.coilTurns < WEAK_COIL_TURNS_THRESHOLD) {
       candidates.push({
         category: 'weakField',

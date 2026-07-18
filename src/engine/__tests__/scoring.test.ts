@@ -81,7 +81,7 @@ describe('evaluateChallenge(実際のstep()出力を使った統合テスト)', 
 
   it('適正パラメータで十分低い目標RPMなら☆3まで到達する(0.1秒間隔でサンプリング)', () => {
     const config = goodConfig();
-    let s: SimState = { theta: Math.PI / 4, omega: 0, current: 0, backEmf: 0, shorted: false, running: true, rpm: 0, chatterFramesLeft: 0 };
+    let s: SimState = { theta: Math.PI / 4, omega: 0, current: 0, backEmf: 0, shorted: false, running: true, rpm: 0, chatterFramesLeft: 0, batteryHeat: 0, coilCollapsed: false, highSpeedFrameCount: 0 };
     const history: HistorySample[] = [];
     const sampleEverySteps = Math.round(0.1 / DT);
     const totalSteps = 120 * 20; // 20秒分シミュレート

@@ -148,6 +148,9 @@ describe('diagnoseFailures(実際のstep()出力を使った統合テスト)', (
       running: true,
       rpm: 0,
       chatterFramesLeft: 0,
+      batteryHeat: 0,
+      coilCollapsed: false,
+      highSpeedFrameCount: 0,
     };
     const history: HistorySample[] = [];
     const sampleEvery = Math.round(0.1 / DT);
@@ -169,8 +172,10 @@ describe('diagnoseFailures(実際のstep()出力を使った統合テスト)', (
     expect(diagnoseFailures(config, history, new Set()).some((d) => d.category === 'brushTooTight')).toBe(true);
   });
 
-  it('magnetStrength=0.3(弱磁石で回転数が半減)はweakFieldとして検出される', () => {
-    const config = goodConfig({ magnetStrength: 0.3 });
+  it('magnetStrength=0.42(弱磁石で回転数が半減)はweakFieldとして検出される', () => {
+    // spec-v1.5.md §4の電池内部抵抗導入で静止摩擦を振り切れる境界が0.3から0.42付近へ
+    // シフトした(0.3は完全停止になった)。WEAK_MAGNET_STRENGTH_THRESHOLDも合わせて調整済み。
+    const config = goodConfig({ magnetStrength: 0.42 });
     const history = simulateHistory(config, 1);
     expect(diagnoseFailures(config, history, new Set()).some((d) => d.category === 'weakField')).toBe(true);
   });
