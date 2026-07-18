@@ -1,38 +1,11 @@
-import { useEffect, useRef, useState } from 'react';
 import { LineChart, Line, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 import { useGameStore } from '../store/gameStore';
 
 // spec docs/spec.md §4: 「サンドボックスのグラフには RPM・電流に加えて逆起電力もプロット」
-// 毎フレーム(60Hz)ではなくサンプリングして、rechartsの描画負荷とバッファ量を抑える。
-const SAMPLE_INTERVAL_MS = 100;
-const HISTORY_WINDOW_SEC = 10;
-const MAX_SAMPLES = (HISTORY_WINDOW_SEC * 1000) / SAMPLE_INTERVAL_MS;
-
-interface Sample {
-  t: number; // グラフ開始からの経過秒
-  rpm: number;
-  current: number;
-  backEmf: number;
-}
-
+// サンプリングはstore.stepSim側で行い(engine/scoring.tsの☆評価とデータを共有するため)、
+// ここではstore.historyを読むだけにする。
 export function GraphPanel() {
-  const [history, setHistory] = useState<Sample[]>([]);
-  const startTimeRef = useRef(performance.now());
-
-  useEffect(() => {
-    const id = window.setInterval(() => {
-      const { simState } = useGameStore.getState();
-      const t = (performance.now() - startTimeRef.current) / 1000;
-      setHistory((prev) => {
-        const next = [
-          ...prev,
-          { t, rpm: simState.rpm, current: simState.current, backEmf: simState.backEmf },
-        ];
-        return next.length > MAX_SAMPLES ? next.slice(next.length - MAX_SAMPLES) : next;
-      });
-    }, SAMPLE_INTERVAL_MS);
-    return () => window.clearInterval(id);
-  }, []);
+  const history = useGameStore((s) => s.history);
 
   return (
     <div className="h-56 w-full rounded-lg bg-white p-2 shadow-sm">
