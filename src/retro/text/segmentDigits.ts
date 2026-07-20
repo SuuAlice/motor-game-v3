@@ -2,6 +2,11 @@
 // 人間承認の追加指示(3)(検死レポート題材にセグメント風数値のモックを含める)に対応する
 // ため、Unit Dで前倒し実装する。フォントファイルは追加しない(手続き描画のみ)。
 // セグメント割当はa(上)b(右上)c(右下)d(下)e(左下)f(左上)g(中央)の古典7セグ配列。
+//
+// PHASE1-UNITD-REVIEW追加指摘: art-spec §2.2(整数ピクセル規律)に適合させるため、
+// セグメント矩形の座標算出をcomputeSegmentRects純関数へ分離し、返り値をすべて
+// 整数化する。描画側(drawSegmentDigit/drawSegmentString)はこの結果をfillRectへ
+// 渡すのみで、内部で追加の非整数演算を行わない。
 
 export type SegmentPattern = readonly [boolean, boolean, boolean, boolean, boolean, boolean, boolean];
 
@@ -25,13 +30,56 @@ export function getSegmentPattern(char: string): SegmentPattern {
   return DIGIT_SEGMENTS[char] ?? DIGIT_SEGMENTS[' '];
 }
 
+export interface SegmentRect {
+  x: number;
+  y: number;
+  widthPx: number;
+  heightPx: number;
+}
+
+function pushIntRect(rects: SegmentRect[], x: number, y: number, widthPx: number, heightPx: number): void {
+  rects.push({
+    x: Math.round(x),
+    y: Math.round(y),
+    widthPx: Math.max(1, Math.round(widthPx)),
+    heightPx: Math.max(1, Math.round(heightPx)),
+  });
+}
+
+// 1桁分の点灯セグメントを矩形リストとして返す純関数。全フィールドを整数化する
+// (art-spec §2.2)。widthPx/heightPxが奇数でも内部のhalfH等の非整数中間値は
+// 各矩形の生成時にMath.roundするため、返り値は常に整数になる。
+export function computeSegmentRects(
+  char: string,
+  x: number,
+  y: number,
+  widthPx: number,
+  heightPx: number,
+  thicknessPx: number,
+): SegmentRect[] {
+  const [a, b, c, d, e, f, g] = getSegmentPattern(char);
+  const t = Math.max(1, Math.round(thicknessPx));
+  const halfH = heightPx / 2;
+  const rects: SegmentRect[] = [];
+
+  if (a) pushIntRect(rects, x + t, y, widthPx - 2 * t, t);
+  if (b) pushIntRect(rects, x + widthPx - t, y + t, t, halfH - 1.5 * t);
+  if (c) pushIntRect(rects, x + widthPx - t, y + halfH + 0.5 * t, t, halfH - 1.5 * t);
+  if (d) pushIntRect(rects, x + t, y + heightPx - t, widthPx - 2 * t, t);
+  if (e) pushIntRect(rects, x, y + halfH + 0.5 * t, t, halfH - 1.5 * t);
+  if (f) pushIntRect(rects, x, y + t, t, halfH - 1.5 * t);
+  if (g) pushIntRect(rects, x + t, y + halfH - t / 2, widthPx - 2 * t, t);
+
+  return rects;
+}
+
 export interface SegmentStyle {
   onColor: string;
   thicknessPx: number;
 }
 
 // 1桁分のセグメントを塗りつぶし矩形で描画する(副作用あり、canvas依存のためテスト対象外。
-// ロジックはgetSegmentPatternに集約しそちらをユニットテストする)。
+// ロジックはgetSegmentPattern/computeSegmentRectsに集約しそちらをユニットテストする)。
 export function drawSegmentDigit(
   ctx: CanvasRenderingContext2D,
   char: string,
@@ -41,21 +89,13 @@ export function drawSegmentDigit(
   heightPx: number,
   style: SegmentStyle,
 ): void {
-  const [a, b, c, d, e, f, g] = getSegmentPattern(char);
-  const t = Math.max(1, Math.round(style.thicknessPx));
-  const halfH = heightPx / 2;
   ctx.fillStyle = style.onColor;
-
-  if (a) ctx.fillRect(x + t, y, widthPx - 2 * t, t);
-  if (b) ctx.fillRect(x + widthPx - t, y + t, t, halfH - 1.5 * t);
-  if (c) ctx.fillRect(x + widthPx - t, y + halfH + 0.5 * t, t, halfH - 1.5 * t);
-  if (d) ctx.fillRect(x + t, y + heightPx - t, widthPx - 2 * t, t);
-  if (e) ctx.fillRect(x, y + halfH + 0.5 * t, t, halfH - 1.5 * t);
-  if (f) ctx.fillRect(x, y + t, t, halfH - 1.5 * t);
-  if (g) ctx.fillRect(x + t, y + halfH - t / 2, widthPx - 2 * t, t);
+  for (const rect of computeSegmentRects(char, x, y, widthPx, heightPx, style.thicknessPx)) {
+    ctx.fillRect(rect.x, rect.y, rect.widthPx, rect.heightPx);
+  }
 }
 
-// 文字列(数字・'-'・空白)を横に並べて描画する。
+// 文字列(数字・'-'・空白)を横に並べて描画する。開始位置・桁送り幅も整数化する。
 export function drawSegmentString(
   ctx: CanvasRenderingContext2D,
   text: string,
@@ -66,9 +106,11 @@ export function drawSegmentString(
   gapPx: number,
   style: SegmentStyle,
 ): void {
-  let cx = x;
+  let cx = Math.round(x);
+  const roundedY = Math.round(y);
+  const stepPx = Math.round(digitWidthPx + gapPx);
   for (const char of text) {
-    drawSegmentDigit(ctx, char, cx, y, digitWidthPx, digitHeightPx, style);
-    cx += digitWidthPx + gapPx;
+    drawSegmentDigit(ctx, char, cx, roundedY, digitWidthPx, digitHeightPx, style);
+    cx += stepPx;
   }
 }
