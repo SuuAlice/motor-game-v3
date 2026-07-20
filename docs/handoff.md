@@ -53,6 +53,28 @@
 
 ---
 
+## 4.5 GitHub/Vercel分離(Phase 0完了記録)
+
+Phase 0完了処理の一環として、リポジトリを同一履歴上でV3化した現HEADを起点にGitHub/Vercelの分離を実施した(人間承認済み、実施日2026-07-21)。
+
+**GitHub**:
+- リポジトリ: `suualice08/motor-game-v3`(public)。初回push実施時点ではリポジトリが空だったため、ローカル`develop`(Phase0作業ブランチ)と、同一commitを指す新規`main`ブランチの両方をpushした
+- default branch: `main`(`gh repo edit --default-branch main`で設定・確認済み)
+
+**Vercel**:
+- account: 個人account(`suu-alice`)。project名: `motor-game-v3`(作成前に既存project一覧を確認し、`motor-game-v2`・`motor-game`との重複がないことを確認済み。この2件は一切操作していない)
+- Git接続先: `suualice08/motor-game-v3`
+- Framework Preset: Vite / Build Command: `npm run build` / Output Directory: `dist` / Install Command: `npm ci`(明示Override。Vercel既定は`package-lock.json`検出時`npm install`のため、再現性のため明示指定した) / Node.jsバージョン: 24.x
+- Production Branch: `main`。`main`(b3d9ce2)からのDeployをProduction Deployとして実施し、`https://motor-game-v3.vercel.app`にエイリアスされることを確認した
+- Preview: `develop`(b3d9ce2)からのDeployは`target=null`(productionドメインへのaliasなし)でPreviewとして作成されることを確認した
+- Preview URLは既定でVercel Authentication(Deployment Protection)が有効。未認証アクセスはroot/各アセットとも302(`vercel.com/sso-api`へリダイレクト)。project所有者本人が普段ログイン済みのブラウザで認証後、Preview実ページへ正常に遷移できることを確認した。Protection設定の変更・bypass secretの発行は行っていない
+- 検証項目(Production/Preview両方、所有者本人によるDevTools実測を含む): root reload後の正常表示、`favicon.svg`/`manifest.webmanifest`/`sw.js`/JS/CSSアセットの最終200応答、Service Workerの`activated`状態、Cache Storageに`motor-game-v2-phase5-v1`(V2凍結UI由来の旧名称のまま。Phase0では変更していない)が作成されること。すべて確認済み
+- `.vercel/`・`.env.local`(`vercel link`が生成するOIDCトークンを含む)は`.gitignore`により追跡対象外であることを確認済み
+
+**タグ**: `phase-0-initialized`はこの分離完了後、docs更新・全ゲート成功を確認したコミットへローカルで作成する。pushは別途人間承認後に行う。
+
+---
+
 ## 5. 開発上の境界
 
 - `src/engine/`: エンジンオーナー(alice)。UI・描画・音・データ: UI担当。マネージャー: Suu(実装しない)
