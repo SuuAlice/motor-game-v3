@@ -5,6 +5,7 @@ import { ChallengeMode } from './modes/ChallengeMode'
 import { DiagnosisMode } from './modes/DiagnosisMode'
 import { AssemblyMode } from './modes/AssemblyMode'
 import { TestRunMode } from './modes/TestRunMode'
+import { CourseMode } from './modes/CourseMode'
 import { Glossary } from './components/Glossary'
 import { LegacyDataNotice } from './components/LegacyDataNotice'
 import { ExperimentNotebook } from './components/ExperimentNotebook'
@@ -19,6 +20,13 @@ function TitleScreen({ onOpenGlossary, onOpenNotebook }: { onOpenGlossary: () =>
         手巻きDCモーターと車体の釣り合いを追い込み、10 m直線で負荷性能を測るチューニングシミュレーター。
       </p>
       <div className="flex w-full flex-col gap-3">
+        <button
+          type="button"
+          onClick={() => setMode('course')}
+          className="rounded-lg bg-emerald-700 px-4 py-3 font-bold text-white"
+        >
+          工作コースに挑戦
+        </button>
         <button
           type="button"
           onClick={() => setMode('testRun')}
@@ -101,6 +109,7 @@ function App() {
           {mode === 'diagnosis' && <DiagnosisMode />}
           {mode === 'assembly' && <AssemblyMode />}
           {mode === 'testRun' && <TestRunMode />}
+          {mode === 'course' && <CourseMode />}
         </>
       )}
     </main>

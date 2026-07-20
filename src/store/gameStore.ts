@@ -10,6 +10,9 @@ import {
 } from '../engine/vehiclePhysics';
 import type { Challenge } from '../data/challenges';
 import type { BrokenMotor } from '../data/brokenMotors';
+import { TRACK_BY_ID } from '../data/tracks';
+import { stepTrackRun } from '../engine/trackPhysics';
+import { evaluateObjectives } from '../engine/scoring';
 import {
   createExperimentSession,
   useNotebookStore,
@@ -108,6 +111,25 @@ interface ChallengeProgress {
   bestAverageCurrentA: number;
 }
 
+export interface CourseRunRecord {
+  status: VehicleSimState['status'];
+  elapsedTimeS: number;
+  energyUsedJ: number;
+  positionM: number;
+  normalAchieved: boolean;
+  exAchieved: boolean;
+  completedAt: string;
+}
+
+export interface CourseProgress {
+  attempts: number;
+  normalCompleted: boolean;
+  exCompleted: boolean;
+  last: CourseRunRecord;
+  previous?: CourseRunRecord;
+  best?: CourseRunRecord;
+}
+
 export type MeasurementSample = NotebookSample;
 
 const MAX_SESSION_SAMPLES = 1200;
@@ -132,11 +154,15 @@ interface GameStore {
   config: MotorConfig;
   simState: SimState;
   history: MeasurementSample[];
-  mode: 'title' | 'testRun' | 'sandbox' | 'challenge' | 'diagnosis' | 'assembly';
+  mode: 'title' | 'testRun' | 'course' | 'sandbox' | 'challenge' | 'diagnosis' | 'assembly';
+  selectedTrackId: string;
   carConfig: CarConfig;
   vehicleState: VehicleSimState;
   testRunPhase: TestRunPhase;
   testRunHistory: TestRunSample[];
+  courseRunPhase: TestRunPhase;
+  courseRunHistory: TestRunSample[];
+  courseProgress: Record<string, CourseProgress>;
   activeChallengeId: string | null;
   activeBrokenMotorId: string | null;
   lockedKeys: ReadonlySet<keyof MotorConfig>;
@@ -165,11 +191,16 @@ interface GameStore {
   flickStart: () => void;
   resetSim: () => void;
   // トップレベルのモード切替(App.tsxのモード選択画面用)。進行中のチャレンジ状態を破棄する
-  setMode: (mode: 'title' | 'testRun' | 'sandbox' | 'challenge' | 'diagnosis' | 'assembly') => void;
+  setMode: (mode: 'title' | 'testRun' | 'course' | 'sandbox' | 'challenge' | 'diagnosis' | 'assembly') => void;
+  selectTrack: (trackId: string) => void;
   startTestRun: () => void;
   stepTestRun: (dt: number) => void;
   abortTestRun: () => void;
   resetTestRun: () => void;
+  startCourseRun: () => void;
+  stepCourseRun: (dt: number) => void;
+  abortCourseRun: () => void;
+  resetCourseRun: () => void;
   startChallenge: (challenge: Challenge) => void;
   // チャレンジのプレイ画面からチャレンジ一覧に戻る(modeは'challenge'のまま)
   stopChallenge: () => void;
@@ -190,10 +221,14 @@ export const useGameStore = create<GameStore>()(
       simState: REST_STATE,
       history: [],
       mode: 'title',
+      selectedTrackId: 'straight-10m',
       carConfig: STANDARD_CAR_CONFIG,
       vehicleState: createInitialVehicleState(DEFAULT_CONFIG, STANDARD_CAR_CONFIG),
       testRunPhase: 'ready',
       testRunHistory: [],
+      courseRunPhase: 'ready',
+      courseRunHistory: [],
+      courseProgress: {},
       activeChallengeId: null,
       activeBrokenMotorId: null,
       lockedKeys: new Set(),
@@ -241,6 +276,13 @@ export const useGameStore = create<GameStore>()(
       },
 
       randomizeRecipeSeed: () => set({ recipeSeed: createSessionSeed() }),
+
+      selectTrack: (trackId) => set((s) => ({
+        selectedTrackId: trackId,
+        vehicleState: createInitialVehicleState(s.config, s.carConfig),
+        courseRunPhase: 'ready',
+        courseRunHistory: [],
+      })),
 
       stepSim: (dt) =>
         set((s) => {
@@ -329,6 +371,8 @@ export const useGameStore = create<GameStore>()(
           vehicleState: createInitialVehicleState(get().config, get().carConfig),
           testRunPhase: 'ready',
           testRunHistory: [],
+          courseRunPhase: 'ready',
+          courseRunHistory: [],
           _vehicleSampleAccumulatorSec: 0,
         })),
 
@@ -393,6 +437,101 @@ export const useGameStore = create<GameStore>()(
         vehicleState: createInitialVehicleState(s.config, s.carConfig),
         testRunPhase: 'ready',
         testRunHistory: [],
+        _vehicleSampleAccumulatorSec: 0,
+      })),
+
+      startCourseRun: () => {
+        const seed = createSessionSeed();
+        set((s) => ({
+          vehicleState: createInitialVehicleState(s.config, s.carConfig),
+          courseRunPhase: 'running',
+          courseRunHistory: [],
+          _vehicleRngState: seed,
+          _vehicleSampleAccumulatorSec: 0,
+        }));
+      },
+
+      stepCourseRun: (dt) => set((s) => {
+        if (s.courseRunPhase !== 'running') return s;
+        const track = TRACK_BY_ID.get(s.selectedTrackId);
+        if (!track) return { courseRunPhase: 'aborted' };
+        let rngState = s._vehicleRngState;
+        const nextVehicleState = stepTrackRun(s.config, s.carConfig, track, s.vehicleState, dt, () => {
+          const [value, nextState] = nextRandom(rngState);
+          rngState = nextState;
+          return value;
+        });
+        let sampleAccumulator = s._vehicleSampleAccumulatorSec + dt;
+        let courseRunHistory = s.courseRunHistory;
+        if (sampleAccumulator >= 0.05) {
+          sampleAccumulator -= 0.05;
+          courseRunHistory = [...courseRunHistory, {
+            t: nextVehicleState.elapsedTimeS,
+            positionM: nextVehicleState.positionM,
+            velocityMps: nextVehicleState.velocityMps,
+            rpm: nextVehicleState.motor.rpm,
+            currentA: nextVehicleState.motor.current,
+            batteryHeat: nextVehicleState.motor.batteryHeat,
+            slipRatio: nextVehicleState.slipRatio,
+            isSlipping: nextVehicleState.isSlipping,
+          }];
+        }
+        const terminal = nextVehicleState.status === 'finished' || nextVehicleState.status === 'stalled'
+          || nextVehicleState.status === 'overheated' || nextVehicleState.status === 'derailed';
+        let courseProgress = s.courseProgress;
+        if (terminal) {
+          const objectiveContext = {
+            finalState: nextVehicleState,
+            motorConfig: s.config,
+            carConfig: s.carConfig,
+            restrictions: track.restrictions,
+          };
+          const normalAchieved = evaluateObjectives(track.objectives, objectiveContext).allAchieved;
+          const exAchieved = track.exObjectives
+            ? evaluateObjectives(track.exObjectives, objectiveContext).allAchieved
+            : false;
+          const previousProgress = s.courseProgress[track.id];
+          const record: CourseRunRecord = {
+            status: nextVehicleState.status,
+            elapsedTimeS: nextVehicleState.elapsedTimeS,
+            energyUsedJ: nextVehicleState.energyUsedJ,
+            positionM: nextVehicleState.positionM,
+            normalAchieved,
+            exAchieved,
+            completedAt: new Date().toISOString(),
+          };
+          const best = nextVehicleState.status === 'finished'
+            && (!previousProgress?.best || record.elapsedTimeS < previousProgress.best.elapsedTimeS)
+            ? record
+            : previousProgress?.best;
+          courseProgress = {
+            ...s.courseProgress,
+            [track.id]: {
+              attempts: (previousProgress?.attempts ?? 0) + 1,
+              normalCompleted: (previousProgress?.normalCompleted ?? false) || normalAchieved,
+              exCompleted: (previousProgress?.exCompleted ?? false) || exAchieved,
+              last: record,
+              previous: previousProgress?.last,
+              best,
+            },
+          };
+        }
+        return {
+          vehicleState: nextVehicleState,
+          courseRunPhase: terminal ? 'complete' : 'running',
+          courseRunHistory,
+          courseProgress,
+          _vehicleRngState: rngState,
+          _vehicleSampleAccumulatorSec: sampleAccumulator,
+        };
+      }),
+
+      abortCourseRun: () => set((s) => s.courseRunPhase === 'running' ? { courseRunPhase: 'aborted' } : s),
+
+      resetCourseRun: () => set((s) => ({
+        vehicleState: createInitialVehicleState(s.config, s.carConfig),
+        courseRunPhase: 'ready',
+        courseRunHistory: [],
         _vehicleSampleAccumulatorSec: 0,
       })),
 
@@ -495,9 +634,14 @@ export const useGameStore = create<GameStore>()(
     }),
     {
       // spec docs/spec.md §7タスク6「進捗のlocalStorage保存」。CLAUDE.mdの
-      // 「localStorage以外の永続化・外部通信は行わない」に従い、progressのみ保存する
+      // 「localStorage以外の永続化・外部通信は行わない」に従い、進捗のみ保存する。
       name: 'v15:progress',
-      partialize: (s) => ({ progress: s.progress, diagnosisProgress: s.diagnosisProgress }),
+      partialize: (s) => ({
+        progress: s.progress,
+        diagnosisProgress: s.diagnosisProgress,
+        courseProgress: s.courseProgress,
+        selectedTrackId: s.selectedTrackId,
+      }),
     },
   ),
 );

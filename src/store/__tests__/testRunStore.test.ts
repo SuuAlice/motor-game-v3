@@ -19,6 +19,7 @@ describe('テスト走行store', () => {
   });
 
   beforeEach(() => {
+    useGameStore.setState({ courseProgress: {} });
     useGameStore.getState().setMode('testRun');
     useGameStore.getState().resetTestRun();
   });
@@ -63,5 +64,49 @@ describe('テスト走行store', () => {
     useGameStore.getState().startTestRun();
     expect(useGameStore.getState().testRunHistory).toEqual([]);
     expect(useGameStore.getState().vehicleState.elapsedTimeS).toBe(0);
+  });
+
+  it('選択したPhase3コースをstepTrackRun経由で進める', () => {
+    useGameStore.getState().setMode('course');
+    useGameStore.getState().selectTrack('straight-10m');
+    useGameStore.getState().startCourseRun();
+    for (let i = 0; i < 120; i += 1) useGameStore.getState().stepCourseRun(DT);
+    const state = useGameStore.getState();
+    expect(state.courseRunPhase).toBe('running');
+    expect(state.vehicleState.elapsedTimeS).toBeCloseTo(1);
+    expect(state.vehicleState.positionM).toBeGreaterThan(0);
+    expect(state.courseRunHistory.length).toBeGreaterThan(0);
+  });
+
+  it('コース変更時に走行状態と履歴を待機状態へ戻す', () => {
+    useGameStore.getState().setMode('course');
+    useGameStore.getState().startCourseRun();
+    for (let i = 0; i < 30; i += 1) useGameStore.getState().stepCourseRun(DT);
+    useGameStore.getState().selectTrack('hill-climb');
+    const state = useGameStore.getState();
+    expect(state.selectedTrackId).toBe('hill-climb');
+    expect(state.courseRunPhase).toBe('ready');
+    expect(state.courseRunHistory).toEqual([]);
+    expect(state.vehicleState.positionM).toBe(0);
+  });
+
+  it('完走記録・前回記録・ベストをコース別に保存する', () => {
+    useGameStore.getState().setMode('course');
+    useGameStore.getState().selectTrack('straight-10m');
+    for (let run = 0; run < 2; run += 1) {
+      useGameStore.getState().startCourseRun();
+      let steps = 0;
+      while (useGameStore.getState().courseRunPhase === 'running' && steps < 120 * 30) {
+        useGameStore.getState().stepCourseRun(DT);
+        steps += 1;
+      }
+      expect(useGameStore.getState().courseRunPhase).toBe('complete');
+    }
+    const progress = useGameStore.getState().courseProgress['straight-10m'];
+    expect(progress.attempts).toBe(2);
+    expect(progress.last.status).toBe('finished');
+    expect(progress.previous?.status).toBe('finished');
+    expect(progress.best?.status).toBe('finished');
+    expect(typeof progress.normalCompleted).toBe('boolean');
   });
 });
