@@ -1,6 +1,7 @@
 // docs/phase1-plan.md §5.5/Unit F: Mode7見取り図ズームタブ。ResolutionHarnessと
 // 同様にコンテナへ整数拡大表示する。ズーム倍率は実時間ベースで往復させ、
-// ズームイン/アウトの見え方を確認できるようにする(物理エンジンには接続しない)。
+// 行ごとにサンプリング幅が変わる透視ズーム(床面が奥へ傾いて見える)の
+// 見え方を確認できるようにする(物理エンジンには接続しない)。
 import { useEffect, useRef, useState } from 'react';
 import { computeIntegerScale } from '../../retro/canvas/integerScale';
 import { drawMode7Demo } from './drawMode7Demo';
@@ -68,7 +69,7 @@ export function Mode7Demo() {
     <div className="flex h-full flex-col gap-3 p-3 text-sm">
       <div className="flex items-center gap-3">
         <span className="text-xs text-slate-600">
-          Mode7見取り図ズーム(行単位アフィン/透視ニアレストサンプリング)+通常スプライト重ね合わせ。演出専用、走行ビューには使用しない
+          Mode7見取り図の透視ズーム(行ごとにサンプリング幅が変わり床面が奥へ傾いて見える)+通常スプライト重ね合わせ。演出専用、走行ビューには使用しない
         </span>
       </div>
       <div ref={containerRef} className="relative flex-1 overflow-hidden bg-slate-800">
