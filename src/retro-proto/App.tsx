@@ -1,17 +1,19 @@
 // docs/phase1-plan.md §8: retro-proto.htmlのタブ切替シェル。Unit D「解像度比較」
-// 「俯瞰走行ビュー」、Unit E「色演算」、Unit F「Mode 7」を実装済み。音源(Unit G)・
+// 「俯瞰走行ビュー」、Unit E「色演算」、Unit F「Mode 7」、Unit G「音源」を実装済み。
 // 最悪ケース性能測定(Unit H)は後続Unitで追加する。
 import { useState } from 'react';
 import { ResolutionHarness } from './resolutionHarness/ResolutionHarness';
 import { OverheadViewDemo } from './overheadView/OverheadViewDemo';
 import { ColorOpsDemo } from './colorOpsDemo/ColorOpsDemo';
 import { Mode7Demo } from './mode7Demo/Mode7Demo';
+import { AudioDemo } from './audioDemo/AudioDemo';
 
 const TABS = [
   { id: 'resolution', label: '解像度比較', component: ResolutionHarness },
   { id: 'overhead', label: '俯瞰走行ビュー', component: OverheadViewDemo },
   { id: 'colorOps', label: '色演算', component: ColorOpsDemo },
   { id: 'mode7', label: 'Mode 7', component: Mode7Demo },
+  { id: 'audio', label: '音源', component: AudioDemo },
 ] as const;
 
 type TabId = (typeof TABS)[number]['id'];
