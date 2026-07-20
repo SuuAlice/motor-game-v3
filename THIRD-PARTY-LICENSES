@@ -1,0 +1,40 @@
+本プロジェクトは内製主義(docs/spec.md §15.1)を原則とし、第三者素材の使用は必要最小限に留める。
+導入した第三者素材とそのライセンスを以下に記録する。ライブラリ・フォントを新規導入した場合は、
+商用利用可能なライセンス(M+ / MIT / Apache-2.0 / OFL 等)であることを確認したうえで本ファイルに追記すること。
+
+================================================================================
+
+PixelMplus
+--------------------------------------------------------------------------------
+- フォント名: PixelMplus10 / PixelMplus12
+- 用途: 本文・UIフォント(docs/art-spec.md §4)。本文・工程説明の長文にPixelMplus12、
+  密度の高いUI・在庫リストにPixelMplus10を使用する
+- 配布元: https://github.com/itouhiro/PixelMplus (作者: itouhiro)
+- バージョン: 2013.0602
+- ライセンス: M+ FONT LICENSE
+- 著作権表示:
+  Copyright (C) 2013 itouhiro
+  Copyright (C) 2002-2013 M+ FONTS PROJECT
+- 状態: 本コミット時点でフォント本体(.ttf等)は未導入。ライセンス条項の記録のみ先行する。
+  フォント本体の取得はUI/描画/音担当参加後に行う
+
+M+ FONT LICENSE 全文(itouhiro/PixelMplus, misc/mplus_bitmap_fonts/LICENSE_E より取得):
+
+  M+ FONTS                                Copyright (C) 2002-2013 M+ FONTS PROJECT
+
+  -
+
+  LICENSE_E
+
+
+
+
+  These fonts are free software.
+  Unlimited permission is granted to use, copy, and distribute them, with
+  or without modification, either commercially or noncommercially.
+  THESE FONTS ARE PROVIDED "AS IS" WITHOUT WARRANTY.
+
+
+  http://mplus-fonts.sourceforge.jp/mplus-outline-fonts/
+
+================================================================================
