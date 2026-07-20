@@ -15,8 +15,14 @@ PixelMplus
 - 著作権表示:
   Copyright (C) 2013 itouhiro
   Copyright (C) 2002-2013 M+ FONTS PROJECT
-- 状態: 本コミット時点でフォント本体(.ttf等)は未導入。ライセンス条項の記録のみ先行する。
-  フォント本体の取得はUI/描画/音担当参加後に行う
+- 状態: フォント本体を導入済み(Phase 1 Unit C、2026-07-21)。対象はRegular 2ファイルのみ
+  (Bold等は未導入)。取得元コミット: d89b95f04eeb95bf98bb09cb9234a2f99d186df5
+  (README.mdコミットメッセージ「version 2013.0602」、タグv1.0.0が指す同一コミット)
+  - PixelMplus10-Regular.ttf: 1,133,216 bytes / SHA-256: 01b5e4aea5a3bbe80463c178e7868d5a34cd75e8ed7bc4d97097ebb1a71af7c7
+  - PixelMplus12-Regular.ttf: 1,274,396 bytes / SHA-256: 02f19467ea7cc235cc06c570b7f6c3b0a12a6f682bc8d74c43f2d323d97bcd12
+  配置先: public/fonts/pixelmplus/。CDN不使用、リポジトリ同梱でローカル参照する。
+  ライセンス全文は配布元misc/mplus_bitmap_fonts/LICENSE_E(同コミット)を取得し、
+  以下の記載と一致することを確認済み
 
 M+ FONT LICENSE 全文(itouhiro/PixelMplus, misc/mplus_bitmap_fonts/LICENSE_E より取得):
 
