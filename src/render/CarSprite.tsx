@@ -1,4 +1,4 @@
-export interface CarAppearance {
+export interface CarSpriteAppearance {
   chassisColor: string;
   accentColor: string;
 }
@@ -8,7 +8,7 @@ export type BatteryPositionPreset = 'rear' | 'center' | 'front';
 interface CarSpriteProps {
   wheelDiameterMm: number;
   batteryPositionPreset: BatteryPositionPreset;
-  appearance: CarAppearance;
+  appearance: CarSpriteAppearance;
   wheelAngleRad: number;
   motorAngleRad: number;
   isSlipping: boolean;

@@ -13,10 +13,12 @@ import type { BrokenMotor } from '../data/brokenMotors';
 import { TRACK_BY_ID } from '../data/tracks';
 import { stepTrackRun } from '../engine/trackPhysics';
 import { evaluateObjectives } from '../engine/scoring';
+import type { CarRecipe } from '../engine/recipeCode';
 import {
   DEFAULT_GARAGE_SELECTION,
   applyGarageBattery,
   resolveGarageBuild,
+  resolveGarageSelectionFromRecipe,
   type GarageSelection,
 } from '../data/partPresets';
 import {
@@ -198,6 +200,7 @@ interface GameStore {
 
   setConfig: (partial: Partial<MotorConfig>) => void;
   loadRecipe: (config: MotorConfig, seed: number) => void;
+  loadCarRecipe: (recipe: CarRecipe) => void;
   randomizeRecipeSeed: () => void;
   stepSim: (dt: number) => void;
   flickStart: () => void;
@@ -295,6 +298,38 @@ export const useGameStore = create<GameStore>()(
           recipeSeed: seed >>> 0,
           simState: { ...REST_STATE },
           history: [],
+          _elapsedSec: 0,
+          _sampleAccumulatorSec: 0,
+          _sessionSeed: null,
+          _sessionStartedAt: null,
+          _sessionConfig: null,
+          _sessionSamples: [],
+        });
+      },
+
+      loadCarRecipe: (recipe) => {
+        finishActiveSession(get());
+        const config = clampToCoilWindow({ ...recipe.motorConfig });
+        const carConfig = { ...recipe.carConfig };
+        const garageSelection = resolveGarageSelectionFromRecipe(
+          carConfig,
+          config.batteryVoltage,
+          recipe.appearance,
+        );
+        set({
+          config,
+          carConfig,
+          garageSelection,
+          recipeSeed: recipe.seed >>> 0,
+          simState: { ...REST_STATE },
+          vehicleState: createInitialVehicleState(config, carConfig),
+          history: [],
+          testRunPhase: 'ready',
+          testRunHistory: [],
+          testRunCompleted: false,
+          courseRunPhase: 'ready',
+          courseRunHistory: [],
+          courseRunSpeed: 0,
           _elapsedSec: 0,
           _sampleAccumulatorSec: 0,
           _sessionSeed: null,

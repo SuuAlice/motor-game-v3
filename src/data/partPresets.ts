@@ -1,6 +1,7 @@
 import type { BatteryPositionPreset } from '../render/CarSprite';
 import type { CarConfig } from '../engine/vehiclePhysics';
 import type { MotorConfig } from '../engine/motorPhysics';
+import type { CarAppearance } from '../engine/recipeCode';
 
 export const CHASSIS_PRESETS = [
   { id: 'light', name: '軽量シャーシ', baseMassG: 60, centerOfMassHeightMm: 14 },
@@ -102,5 +103,44 @@ export function resolveGarageColors(selection: GarageSelection): { chassisColor:
   return {
     chassisColor: byId(BODY_COLORS, selection.bodyColorId).value,
     accentColor: byId(ACCENT_COLORS, selection.accentColorId).value,
+  };
+}
+
+function nearest<T>(items: readonly T[], score: (item: T) => number): T {
+  return items.reduce((best, item) => score(item) < score(best) ? item : best);
+}
+
+/**
+ * レシピの連続値に最も近いプリセットを表示用に選ぶ。
+ * 走行計算ではこの逆引き結果ではなく、レシピのCarConfig原値を使うこと。
+ */
+export function resolveGarageSelectionFromRecipe(
+  carConfig: CarConfig,
+  batteryVoltage: MotorConfig['batteryVoltage'],
+  appearance: CarAppearance,
+): GarageSelection {
+  const battery = nearest(BATTERY_PRESETS, (item) => Math.abs(item.batteryVoltage - batteryVoltage));
+  const chassisAndPosition = nearest(
+    CHASSIS_PRESETS.flatMap((chassis) => BATTERY_POSITION_PRESETS.map((position) => ({ chassis, position }))),
+    ({ chassis, position }) => {
+      const massError = Math.abs(chassis.baseMassG + battery.massG - carConfig.massG) / 170;
+      const centerError = Math.abs(chassis.centerOfMassHeightMm + position.heightOffsetMm - carConfig.centerOfMassHeightMm) / 30;
+      return massError + centerError;
+    },
+  );
+  const gear = nearest(GEAR_PRESETS, (item) =>
+    Math.abs(item.gearRatio - carConfig.gearRatio) / 11
+    + Math.abs(item.gearEfficiency - carConfig.gearEfficiency) / 0.35);
+  const wheel = nearest(WHEEL_PRESETS, (item) => Math.abs(item.wheelDiameterMm - carConfig.wheelDiameterMm));
+  const tire = nearest(TIRE_PRESETS, (item) => Math.abs(item.tireGrip - carConfig.tireGrip));
+  return {
+    chassisId: chassisAndPosition.chassis.id,
+    gearId: gear.id,
+    wheelId: wheel.id,
+    tireId: tire.id,
+    batteryId: battery.id,
+    batteryPosition: chassisAndPosition.position.id,
+    bodyColorId: appearance.bodyColorId,
+    accentColorId: appearance.accentColorId,
   };
 }

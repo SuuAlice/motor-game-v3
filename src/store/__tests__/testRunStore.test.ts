@@ -1,6 +1,8 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { TEST_RUN_COURSE_LENGTH_M, useGameStore } from '../gameStore';
 import { DEFAULT_GARAGE_SELECTION } from '../../data/partPresets';
+import { decodeRecipe, encodeRecipe } from '../../engine/recipeCode';
+import { encodeRecipe as encodeLegacyRecipe } from '../../data/recipeCodec';
 
 const DT = 1 / 120;
 
@@ -110,6 +112,52 @@ describe('テスト走行store', () => {
     });
     expect(state.vehicleState.positionM).toBe(0);
     expect(state.garageSelection.bodyColorId).toBe('blue');
+  });
+
+  it('車体込みレシピはプリセット表示へ丸めても走行用CarConfig原値を保持する', () => {
+    const motorConfig = { ...useGameStore.getState().config, batteryVoltage: 1.5 as const };
+    const carConfig = {
+      massG: 123,
+      gearRatio: 5.25,
+      gearEfficiency: 0.83,
+      wheelDiameterMm: 37,
+      tireGrip: 0.63,
+      axleFriction: 0.17,
+      wheelAlignmentMm: 1.2,
+      centerOfMassHeightMm: 19,
+      motorMountOffsetMm: 2.5,
+    };
+    useGameStore.getState().loadCarRecipe({
+      motorConfig,
+      carConfig,
+      appearance: { bodyColorId: 'unknown-body', accentColorId: 'unknown-accent' },
+      seed: 123,
+    });
+    const state = useGameStore.getState();
+    expect(state.carConfig).toEqual(carConfig);
+    expect(state.garageSelection.gearId).toBe('balanced');
+    expect(state.garageSelection.wheelId).toBe('medium');
+    expect(state.garageSelection.bodyColorId).toBe('unknown-body');
+    expect(state.vehicleState.motor.omega).toBeGreaterThan(0);
+  });
+
+  it('M15互換レシピの磁石距離3 mmを読み込み・MC2再出力しても引き戻さない', () => {
+    const legacyConfig = { ...useGameStore.getState().config, magnetDistanceMm: 3 };
+    const legacyCode = encodeLegacyRecipe({ config: legacyConfig, seed: 77 });
+    const decoded = decodeRecipe(legacyCode);
+    useGameStore.getState().loadCarRecipe(decoded);
+    const loaded = useGameStore.getState();
+    expect(loaded.config.magnetDistanceMm).toBe(3);
+    const rewritten = encodeRecipe({
+      motorConfig: loaded.config,
+      carConfig: loaded.carConfig,
+      appearance: {
+        bodyColorId: loaded.garageSelection.bodyColorId,
+        accentColorId: loaded.garageSelection.accentColorId,
+      },
+      seed: loaded.recipeSeed,
+    });
+    expect(decodeRecipe(rewritten).motorConfig.magnetDistanceMm).toBe(3);
   });
 
   it('テスト走行中にモードを移動してもコース走行を自動開始しない', () => {

@@ -150,6 +150,8 @@ Phase1で`motorPhysics.step`に追加した`loadTorque`(N·m、省略時0。前�
 
 ## 7. 迷ったら見るもの
 
+レシピ読込時のプリセット逆引きは表示専用とし、走行にはレシピ値の`CarConfig`をそのまま使うこと。
+
 - ルール: `AGENTS.md`(`CLAUDE.md`と同内容)
 - v2の正式仕様(唯一の正): `docs/spec.md`
 - v1.0の正式仕様(歴史的記録): `docs/spec-v1.5.md`にv1.0からの差分あり

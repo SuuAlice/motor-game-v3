@@ -14,6 +14,7 @@ import {
 } from '../data/partPresets';
 import { CarSprite } from '../render/CarSprite';
 import { useGameStore } from '../store/gameStore';
+import { RecipePanel } from '../components/RecipePanel';
 
 type GarageTab = 'motor' | 'gear' | 'wheel' | 'chassis' | 'color';
 
@@ -67,6 +68,7 @@ export function GarageMode() {
       {tab === 'chassis' && <div className="grid gap-6"><PresetGrid title="シャーシ">{CHASSIS_PRESETS.map((item) => <PresetButton key={item.id} active={selection.chassisId === item.id} title={item.name} detail={`本体 ${item.baseMassG} g / 重心 ${item.centerOfMassHeightMm} mm`} onClick={() => setSelection({ chassisId: item.id })} />)}</PresetGrid><PresetGrid title="電池">{BATTERY_PRESETS.map((item) => <PresetButton key={item.id} active={selection.batteryId === item.id} title={item.name} detail={`${item.batteryVoltage} V / ${item.massG} g`} onClick={() => setSelection({ batteryId: item.id })} />)}</PresetGrid><PresetGrid title="電池位置">{BATTERY_POSITION_PRESETS.map((item) => <PresetButton key={item.id} active={selection.batteryPosition === item.id} title={item.name} detail={`重心補正 ${item.heightOffsetMm >= 0 ? '+' : ''}${item.heightOffsetMm} mm`} onClick={() => setSelection({ batteryPosition: item.id })} />)}</PresetGrid></div>}
       {tab === 'color' && <div className="grid gap-6"><ColorGrid title="車体色" items={BODY_COLORS} selectedId={selection.bodyColorId} onSelect={(bodyColorId) => setSelection({ bodyColorId })} /><ColorGrid title="アクセント色" items={ACCENT_COLORS} selectedId={selection.accentColorId} onSelect={(accentColorId) => setSelection({ accentColorId })} /></div>}
     </section>
+    <RecipePanel />
   </div>;
 }
 
