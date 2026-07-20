@@ -3,11 +3,13 @@
 // 遮蔽1点。パララックスではなく遮蔽と影で奥行きを表現する(art-spec §5.1.1改訂)。
 // エンジンには接続しない(ダミーデータのみ、物理固定dtループを新設しない)。
 import { PALETTE } from '../../retro/palette';
+import { computeCarSpriteGeometry } from './carSprite';
+import { getTallObjectColors } from './tallObjectStyle';
 import { TRACK_HALF_WIDTH, TRACK_STRAIGHT_LENGTH, offsetPerpendicular, snapTo16Directions, type TrackPoint } from './track';
 
 const WALL_HEIGHT_PX = 3;
-const CAR_WIDTH_PX = 16;
-const CAR_HEIGHT_PX = 10;
+const SHADOW_RADIUS_X_PX = 8;
+const SHADOW_RADIUS_Y_PX = 3;
 
 export interface TallObject {
   x: number;
@@ -55,36 +57,49 @@ function drawWalls(ctx: CanvasRenderingContext2D, points: TrackPoint[], camX: nu
   strokeOffsetPath(ctx, points, -1, 0, camX, camY);
 }
 
+// PHASE1-UNITD-REVIEW点2: ctx.rotateによる自由角回転(真上視点の矩形を回すだけ)を
+// 廃し、16方位インデックスから車体上面(roof)・側面(wall)・前後方向(front marker)を
+// 手続き的に描き分ける(computeCarSpriteGeometry、art-spec §2.2/§2.3)。
 function drawCar(ctx: CanvasRenderingContext2D, screenX: number, screenY: number, headingRad: number): void {
   // 接地影(不透明N1、色演算許可リスト外のアルファは使わない)
   ctx.fillStyle = PALETTE.N1;
   ctx.beginPath();
-  ctx.ellipse(screenX, screenY + CAR_HEIGHT_PX * 0.4, CAR_WIDTH_PX * 0.5, CAR_HEIGHT_PX * 0.3, 0, 0, Math.PI * 2);
+  ctx.ellipse(screenX, screenY + 2, SHADOW_RADIUS_X_PX, SHADOW_RADIUS_Y_PX, 0, 0, Math.PI * 2);
   ctx.fill();
 
   const dirIndex = snapTo16Directions(headingRad);
-  const snappedAngle = (dirIndex * Math.PI * 2) / 16;
-  ctx.save();
-  ctx.translate(screenX, screenY);
-  ctx.rotate(snappedAngle);
+  const geo = computeCarSpriteGeometry(dirIndex);
+
+  // 側面(wall): 3/4視点の立ち上がり。真横視で最大幅・最大高になる
+  ctx.fillStyle = PALETTE.R0;
+  ctx.fillRect(screenX - geo.wallWidthPx / 2, screenY - geo.wallHeightPx, geo.wallWidthPx, geo.wallHeightPx);
+
+  // 上面(roof): wallより明るい色で一段小さく重ね、車体上面を示す
   ctx.fillStyle = PALETTE.R1;
-  ctx.fillRect(-CAR_WIDTH_PX / 2, -CAR_HEIGHT_PX / 2, CAR_WIDTH_PX, CAR_HEIGHT_PX);
+  ctx.fillRect(
+    screenX - geo.roofWidthPx / 2,
+    screenY - geo.wallHeightPx - geo.roofHeightPx * 0.4,
+    geo.roofWidthPx,
+    geo.roofHeightPx,
+  );
+
+  // 前部マーカー: 進行方向ベクトルのオフセットをそのまま使い、前後方向を示す
   ctx.fillStyle = PALETTE.Y1;
-  ctx.beginPath();
-  ctx.moveTo(CAR_WIDTH_PX / 2, 0);
-  ctx.lineTo(CAR_WIDTH_PX / 2 - CAR_WIDTH_PX * 0.28, -CAR_HEIGHT_PX * 0.4);
-  ctx.lineTo(CAR_WIDTH_PX / 2 - CAR_WIDTH_PX * 0.28, CAR_HEIGHT_PX * 0.4);
-  ctx.closePath();
-  ctx.fill();
-  ctx.restore();
+  ctx.fillRect(
+    screenX + geo.frontMarkerOffsetXPx - 1,
+    screenY + geo.frontMarkerOffsetYPx - geo.wallHeightPx * 0.6 - 1,
+    2,
+    2,
+  );
 }
 
 function drawTallObject(ctx: CanvasRenderingContext2D, obj: TallObject, camX: number, camY: number): void {
   const sx = Math.round(obj.x - camX);
   const sy = Math.round(obj.y - camY);
-  ctx.fillStyle = PALETTE.N1;
+  const colors = getTallObjectColors();
+  ctx.fillStyle = colors.groundBand;
   ctx.fillRect(sx - obj.widthPx / 2, sy - obj.heightPx * 0.15, obj.widthPx, obj.heightPx * 0.2);
-  ctx.fillStyle = PALETTE.G0;
+  ctx.fillStyle = colors.base;
   ctx.fillRect(sx - obj.widthPx / 2, sy - obj.heightPx, obj.widthPx, obj.heightPx);
 }
 
