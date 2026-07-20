@@ -13,6 +13,7 @@ interface CarSpriteProps {
   motorAngleRad: number;
   isSlipping: boolean;
   vibrationOffset: number;
+  currentIntensity?: number;
 }
 
 const BATTERY_X: Record<BatteryPositionPreset, number> = {
@@ -29,6 +30,7 @@ export function CarSprite({
   motorAngleRad,
   isSlipping,
   vibrationOffset,
+  currentIntensity = 0,
 }: CarSpriteProps) {
   const wheelRadius = 42 * (wheelDiameterMm / 30);
   const batteryX = BATTERY_X[batteryPositionPreset];
@@ -38,7 +40,7 @@ export function CarSprite({
 
   return (
     <svg viewBox="70 120 570 230" role="img" aria-label="部品が露出した手作りモーターカーの側面" className="h-full w-full overflow-visible">
-      <g transform={`translate(0 ${vibrationOffset})`}>
+      <g>
         <ellipse cx="345" cy="310" rx="250" ry="9" fill="#0f172a" opacity="0.12" />
 
         <g data-part="wheels">
@@ -71,7 +73,7 @@ export function CarSprite({
           </g>
         </g>
 
-        <g data-part="motor">
+        <g data-part="motor" transform={`translate(0 ${vibrationOffset})`}>
           <path d="M243 202h187" stroke="#9aa0a6" strokeWidth="5" strokeLinecap="round" />
           <rect x="292" y="168" width="55" height="13" rx="2" fill="#6b7280" stroke="#374151" strokeWidth="2" />
           <rect x="292" y="223" width="55" height="13" rx="2" fill="#6b7280" stroke="#374151" strokeWidth="2" />
@@ -95,6 +97,11 @@ export function CarSprite({
           <path d={`M${batteryX - 10} 185 C${batteryX - 28} 182 444 190 430 196`} stroke="#dc2626" />
           <path d={`M${batteryX + 91} 187 C${batteryX + 105} 222 468 222 430 208`} stroke="#1f2937" />
         </g>
+        {currentIntensity > 0.04 && (
+          <g data-part="current-particles" fill="#fde047" className="current-particle-path" opacity={Math.min(1, 0.35 + currentIntensity)}>
+            <circle cx="430" cy="196" r="4" /><circle cx="455" cy="188" r="3" /><circle cx={batteryX - 8} cy="185" r="3.5" />
+          </g>
+        )}
         <g data-part="battery" transform={`translate(${batteryX - 445} 0)`}>
           <rect x="435" y="173" width="94" height="29" rx="9" fill="#e5e7eb" stroke="#9ca3af" strokeWidth="2" />
           <rect x="468" y="173" width="31" height="29" fill={appearance.accentColor} />

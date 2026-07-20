@@ -8,4 +8,30 @@
 
 body {
   margin: 0;
+  min-width: 320px;
+  overflow-x: hidden;
+}
+
+button, input, textarea { touch-action: manipulation; }
+
+@media (max-width: 420px) {
+  button { min-height: 44px; }
+}
+
+@keyframes current-flow {
+  0% { transform: translateX(0); opacity: 0.25; }
+  50% { opacity: 1; }
+  100% { transform: translateX(-22px); opacity: 0.25; }
+}
+
+@keyframes smoke-rise {
+  from { transform: translate(0, 0) scale(0.7); opacity: 0.75; }
+  to { transform: translate(-28px, -42px) scale(1.5); opacity: 0; }
+}
+
+.current-particle-path { animation: current-flow 0.55s linear infinite; }
+.slip-smoke { animation: smoke-rise 0.8s ease-out infinite; }
+
+@media (prefers-reduced-motion: reduce) {
+  .current-particle-path, .slip-smoke { animation: none; }
 }

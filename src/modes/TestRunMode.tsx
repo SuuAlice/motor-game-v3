@@ -57,7 +57,9 @@ export function TestRunMode() {
           <div className="flex justify-between text-xs text-slate-500"><span>進行度</span><span>{progress.toFixed(0)} %</span></div>
           <div className="mt-1 h-2 overflow-hidden rounded-full bg-slate-200"><div className="h-full bg-sky-600 transition-[width]" style={{ width: `${progress}%` }} /></div>
         </div>
-        {vehicle.isSlipping && <strong className="mt-3 block text-right text-sm text-amber-700">〰 車輪空転中</strong>}
+        <strong aria-live="polite" className={`mt-3 block min-h-5 text-right text-sm ${vehicle.isSlipping ? 'text-amber-700' : 'text-slate-500'}`}>
+          {vehicle.isSlipping ? '〰 車輪空転中' : '● タイヤ接地中'}
+        </strong>
       </section>
 
       <div className="flex gap-3">

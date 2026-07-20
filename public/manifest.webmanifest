@@ -1,0 +1,13 @@
+{
+  "name": "走れ!手作りモーターカー",
+  "short_name": "手作りモーターカー",
+  "description": "自作DCモーターと車体の釣り合いを試すチューニングシミュレーター",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f8fafc",
+  "theme_color": "#0f172a",
+  "lang": "ja",
+  "icons": [
+    { "src": "/favicon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}

@@ -84,12 +84,12 @@ export function CourseMode() {
             <span className="rounded-full bg-white/10 px-3 py-1 text-sm font-black" aria-live="polite">{terminalLabel}</span>
           </div>
           <CourseRaceCanvas />
-          {phase === 'running' && <div className="flex items-center justify-between rounded-2xl bg-white px-4 py-3 shadow-sm">
+          <div className="flex min-h-[68px] items-center justify-between rounded-2xl bg-white px-4 py-3 shadow-sm">
             <span className="text-sm font-black text-slate-700">走行速度</span>
             <div className="flex gap-2" role="group" aria-label="走行速度">
-              {([{ value: 0, label: '一時停止' }, { value: 1, label: '1倍' }, { value: 2, label: '2倍' }] as const).map((item) => <button key={item.value} type="button" onClick={() => setCourseRunSpeed(item.value)} aria-pressed={courseRunSpeed === item.value} className={`rounded-lg px-3 py-2 text-sm font-black ${courseRunSpeed === item.value ? 'bg-sky-700 text-white' : 'bg-slate-100 text-slate-700'}`}>{item.label}</button>)}
+              {([{ value: 0, label: '一時停止' }, { value: 1, label: '1倍' }, { value: 2, label: '2倍' }] as const).map((item) => <button key={item.value} type="button" disabled={phase !== 'running'} onClick={() => setCourseRunSpeed(item.value)} aria-pressed={courseRunSpeed === item.value} className={`rounded-lg px-3 py-2 text-sm font-black disabled:opacity-40 ${courseRunSpeed === item.value ? 'bg-sky-700 text-white' : 'bg-slate-100 text-slate-700'}`}>{item.label}</button>)}
             </div>
-          </div>}
+          </div>
           <CourseMeasurementPanel resolved={resolved} />
           {phase === 'complete' && (
             <CourseResult

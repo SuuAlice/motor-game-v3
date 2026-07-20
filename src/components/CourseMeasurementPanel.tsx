@@ -37,7 +37,9 @@ export function CourseMeasurementPanel({ resolved }: { resolved: ResolvedSegment
         <Status label="勾配・カーブ" value={resolved ? `${resolved.segment.slopeDeg.toFixed(0)}°${resolved.segment.curveRadiusM ? ` / 半径 ${resolved.segment.curveRadiusM.toFixed(3)} m` : ' / 直線'}` : '—'} icon="⌁" />
         <Status label="電池発熱" value={`${heatPercent.toFixed(1)} %${heatPercent >= 65 ? '（注意）' : ''}`} icon={heatPercent >= 65 ? '⚠' : '♨'} />
       </div>
-      {vehicle.isSlipping && <p className="mt-3 rounded-xl bg-amber-50 px-3 py-2 text-sm font-black text-amber-800">〰 車輪が空転しています</p>}
+      <p aria-live="polite" className={`mt-3 min-h-9 rounded-xl px-3 py-2 text-sm font-black ${vehicle.isSlipping ? 'bg-amber-50 text-amber-800' : 'bg-slate-50 text-slate-500'}`}>
+        {vehicle.isSlipping ? '〰 車輪が空転しています' : '● タイヤは接地しています'}
+      </p>
     </section>
   );
 }

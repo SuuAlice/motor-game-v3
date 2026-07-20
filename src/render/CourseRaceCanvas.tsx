@@ -6,6 +6,7 @@ import { drawRace } from './drawRace';
 import { IndoorCourseDecor } from './IndoorCourseDecor';
 import { resolveSegmentAt } from '../engine/trackPhysics';
 import { resolveGarageColors } from '../data/partPresets';
+import { RaceEffects } from './RaceEffects';
 
 const FIXED_DT = 1 / 120;
 const MAX_STEPS_PER_FRAME = 2;
@@ -14,6 +15,7 @@ export function CourseRaceCanvas() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const selectedTrackId = useGameStore((state) => state.selectedTrackId);
   const vehicleState = useGameStore((state) => state.vehicleState);
+  const courseRunSpeed = useGameStore((state) => state.courseRunSpeed);
   const carConfig = useGameStore((state) => state.carConfig);
   const config = useGameStore((state) => state.config);
   const garageSelection = useGameStore((state) => state.garageSelection);
@@ -56,6 +58,7 @@ export function CourseRaceCanvas() {
     <div className="relative overflow-hidden rounded-2xl border border-slate-200 bg-sky-50 shadow-sm">
       <canvas ref={canvasRef} width={720} height={360} className="block w-full" />
       <div className="pointer-events-none absolute inset-0"><IndoorCourseDecor positionM={vehicleState.positionM} /></div>
+      <RaceEffects vehicle={vehicleState} active={courseRunSpeed > 0} />
       <div className="pointer-events-none absolute left-3 top-[4.2rem] z-20 flex flex-col items-start gap-2">
         <div className="rounded-lg bg-slate-900/80 px-3 py-1.5 text-xs font-black text-white">
           {currentSegment?.curveRadiusM !== undefined ? '⌁ カーブ区間' : currentSegment && currentSegment.slopeDeg > 0 ? `↗ 上り ${currentSegment.slopeDeg.toFixed(0)}°` : currentSegment && currentSegment.roughness >= 0.5 ? '≋ 波板区間' : track?.hasEnergyBudget ? '⚡ 省エネ区間' : '↔ 直線区間'}
@@ -64,7 +67,7 @@ export function CourseRaceCanvas() {
       </div>
       <div
         className="pointer-events-none absolute w-[48%] max-w-[350px] transition-transform duration-300"
-        style={{ left: `${5 + launchTravel * 18}%`, bottom: '18%', transform: `rotate(${bumpPitchDeg}deg)` }}
+        style={{ left: `${5 + launchTravel * 18}%`, bottom: '18%', transform: vehicleState.status === 'derailed' ? 'translateY(34px) rotate(20deg)' : `rotate(${bumpPitchDeg}deg)` }}
       >
         <CarSprite
           wheelDiameterMm={carConfig.wheelDiameterMm}
@@ -74,6 +77,7 @@ export function CourseRaceCanvas() {
           motorAngleRad={vehicleState.motor.theta}
           isSlipping={vehicleState.isSlipping}
           vibrationOffset={Math.sin(vehicleState.elapsedTimeS * 48) * (config.axisOffsetMm + vehicleState.coilCollapsePenaltyMm) * 0.7}
+          currentIntensity={courseRunSpeed > 0 ? Math.min(1, vehicleState.motor.current / 2) : 0}
         />
       </div>
     </div>

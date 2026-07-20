@@ -4,6 +4,7 @@ import { drawRace } from './drawRace';
 import { CarSprite } from './CarSprite';
 import { IndoorCourseDecor } from './IndoorCourseDecor';
 import { resolveGarageColors } from '../data/partPresets';
+import { RaceEffects } from './RaceEffects';
 
 const FIXED_DT = 1 / 120;
 const MAX_STEPS_PER_FRAME = 2;
@@ -37,6 +38,7 @@ export function RaceCanvas() {
   }, []);
 
   const vehicleState = useGameStore((s) => s.vehicleState);
+  const testRunPhase = useGameStore((s) => s.testRunPhase);
   const carConfig = useGameStore((s) => s.carConfig);
   const config = useGameStore((s) => s.config);
   const garageSelection = useGameStore((s) => s.garageSelection);
@@ -49,6 +51,7 @@ export function RaceCanvas() {
       <div className="pointer-events-none absolute inset-0">
         <IndoorCourseDecor positionM={vehicleState.positionM} />
       </div>
+      <RaceEffects vehicle={vehicleState} active={testRunPhase === 'running'} />
       {vehicleState.motor.batteryHeat >= 0.65 && (
         <div className="pointer-events-none absolute left-3 top-[4.2rem] z-20 rounded-lg border border-red-300 bg-red-50 px-3 py-1.5 text-sm font-black text-red-800">
           ⚠ 発熱
@@ -56,7 +59,7 @@ export function RaceCanvas() {
       )}
       <div
         className="pointer-events-none absolute w-[48%] max-w-[350px]"
-        style={{ left: `${5 + launchTravel * 18}%`, bottom: '8%' }}
+        style={{ left: `${5 + launchTravel * 18}%`, bottom: '8%', transform: vehicleState.status === 'derailed' ? 'translateY(30px) rotate(18deg)' : undefined }}
       >
         <CarSprite
           wheelDiameterMm={carConfig.wheelDiameterMm}
@@ -66,6 +69,7 @@ export function RaceCanvas() {
           motorAngleRad={vehicleState.motor.theta}
           isSlipping={vehicleState.isSlipping}
           vibrationOffset={Math.sin(vehicleState.elapsedTimeS * 48) * (config.axisOffsetMm + vehicleState.coilCollapsePenaltyMm) * 0.7}
+          currentIntensity={testRunPhase === 'running' ? Math.min(1, vehicleState.motor.current / 2) : 0}
         />
       </div>
     </div>

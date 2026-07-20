@@ -9,6 +9,7 @@ import { GarageMode } from './modes/GarageMode'
 import { Glossary } from './components/Glossary'
 import { LegacyDataNotice } from './components/LegacyDataNotice'
 import { ExperimentNotebook } from './components/ExperimentNotebook'
+import { MotorAudioControl } from './components/MotorAudioControl'
 
 // spec docs/spec.md §4: 「[タイトル] → [モード選択]」
 function TitleScreen({ onOpenGlossary, onOpenNotebook }: { onOpenGlossary: () => void; onOpenNotebook: () => void }) {
@@ -88,13 +89,11 @@ function App() {
 
   return (
     <main className="min-h-svh bg-slate-50">
-      <div className="mx-auto flex max-w-md items-center justify-between px-4 pt-4">
-        <h1 className="text-xl font-bold text-slate-800">走れ!手作りモーターカー</h1>
-        {!utilityPage && mode !== 'title' && (
-          <button type="button" onClick={() => setMode('title')} className="text-sm text-slate-500 underline">
-            モード選択
-          </button>
-        )}
+      <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-2 px-4 pt-4">
+        <h1 className="text-lg font-bold text-slate-800 sm:text-xl">走れ!手作りモーターカー</h1>
+        <div className="ml-auto flex flex-wrap items-center justify-end gap-2"><MotorAudioControl />{!utilityPage && mode !== 'title' && (
+          <button type="button" onClick={() => setMode('title')} className="text-sm text-slate-500 underline">モード選択</button>
+        )}</div>
       </div>
       <LegacyDataNotice />
       {utilityPage === 'glossary' ? (
