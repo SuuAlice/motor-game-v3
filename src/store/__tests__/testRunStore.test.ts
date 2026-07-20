@@ -3,6 +3,7 @@ import { TEST_RUN_COURSE_LENGTH_M, useGameStore } from '../gameStore';
 import { DEFAULT_GARAGE_SELECTION } from '../../data/partPresets';
 import { decodeRecipe, encodeRecipe } from '../../engine/recipeCode';
 import { encodeRecipe as encodeLegacyRecipe } from '../../data/recipeCodec';
+import { BROKEN_CARS } from '../../data/brokenCars';
 
 const DT = 1 / 120;
 
@@ -158,6 +159,16 @@ describe('テスト走行store', () => {
       seed: loaded.recipeSeed,
     });
     expect(decodeRecipe(rewritten).motorConfig.magnetDistanceMm).toBe(3);
+  });
+
+  it('診断では許可された車体項目だけを変更できる', () => {
+    const brokenCar = BROKEN_CARS.find((item) => item.id === 'heavy-drag')!;
+    useGameStore.getState().startDiagnosis(brokenCar);
+    useGameStore.getState().setDiagnosisCarConfig({ axleFriction: 0.1, gearRatio: 12 });
+    const state = useGameStore.getState();
+    expect(state.carConfig.axleFriction).toBe(0.1);
+    expect(state.carConfig.gearRatio).toBe(brokenCar.carConfig.gearRatio);
+    expect(state.testRunPhase).toBe('ready');
   });
 
   it('テスト走行中にモードを移動してもコース走行を自動開始しない', () => {

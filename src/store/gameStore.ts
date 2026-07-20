@@ -9,7 +9,7 @@ import {
   type VehicleSimState,
 } from '../engine/vehiclePhysics';
 import type { Challenge } from '../data/challenges';
-import type { BrokenMotor } from '../data/brokenMotors';
+import type { BrokenCar } from '../data/brokenCars';
 import { TRACK_BY_ID } from '../data/tracks';
 import { stepTrackRun } from '../engine/trackPhysics';
 import { evaluateObjectives } from '../engine/scoring';
@@ -184,6 +184,7 @@ interface GameStore {
   paramRanges: Partial<Record<keyof MotorConfig, [number, number]>>;
   progress: Record<string, ChallengeProgress>;
   diagnosisProgress: Record<string, boolean>;
+  diagnosisRepairableCarKeys: ReadonlySet<keyof CarConfig>;
   recipeSeed: number;
 
   // 内部の時間管理(UIからは基本参照しない。resetSim/startChallengeで0に戻る)
@@ -223,7 +224,8 @@ interface GameStore {
   stopChallenge: () => void;
   recordChallengeResult: (challengeId: string, rpm: number, averageCurrentA: number) => void;
   // 診断モード: repairableParam以外を全てロックする(ChallengeModeのlockedKeys機構を転用)
-  startDiagnosis: (brokenMotor: BrokenMotor) => void;
+  startDiagnosis: (brokenCar: BrokenCar) => void;
+  setDiagnosisCarConfig: (partial: Partial<CarConfig>) => void;
   stopDiagnosis: () => void;
   recordDiagnosisSolved: (brokenMotorId: string) => void;
   // 組み立てモード: ドラフトconfigをコミットしつつ、フリックジェスチャーから
@@ -255,6 +257,7 @@ export const useGameStore = create<GameStore>()(
       paramRanges: {},
       progress: {},
       diagnosisProgress: {},
+      diagnosisRepairableCarKeys: new Set(),
       recipeSeed: createSessionSeed(),
       _elapsedSec: 0,
       _sampleAccumulatorSec: 0,
@@ -426,6 +429,7 @@ export const useGameStore = create<GameStore>()(
           mode,
           activeChallengeId: null,
           activeBrokenMotorId: null,
+          diagnosisRepairableCarKeys: new Set(),
           lockedKeys: new Set(),
           paramRanges: {},
           simState: { ...REST_STATE },
@@ -656,29 +660,43 @@ export const useGameStore = create<GameStore>()(
         }));
       },
 
-      // repairableParam以外の全キーをロックする(ChallengeModeのlockedKeys機構の転用)
-      startDiagnosis: (brokenMotor) =>
+      // 診断データが許可した項目だけを調整可能にする。
+      startDiagnosis: (brokenCar) =>
         set({
           mode: 'diagnosis',
-          activeBrokenMotorId: brokenMotor.id,
+          activeBrokenMotorId: brokenCar.id,
           lockedKeys: new Set(
-            (Object.keys(brokenMotor.config) as (keyof MotorConfig)[]).filter(
-              (key) => key !== brokenMotor.repairableParam,
+            (Object.keys(brokenCar.motorConfig) as (keyof MotorConfig)[]).filter(
+              (key) => !brokenCar.repairableMotorParams.includes(key),
             ),
           ),
+          diagnosisRepairableCarKeys: new Set(brokenCar.repairableCarParams),
           paramRanges: {},
-          config: brokenMotor.config,
+          config: { ...brokenCar.motorConfig },
+          carConfig: { ...brokenCar.carConfig },
           simState: { ...REST_STATE },
           history: [],
+          vehicleState: createInitialVehicleState(brokenCar.motorConfig, brokenCar.carConfig),
+          testRunPhase: 'ready',
+          testRunHistory: [],
           _elapsedSec: 0,
           _sampleAccumulatorSec: 0,
         }),
+
+      setDiagnosisCarConfig: (partial) => set((s) => {
+        const allowed = Object.fromEntries(
+          Object.entries(partial).filter(([key]) => s.diagnosisRepairableCarKeys.has(key as keyof CarConfig)),
+        ) as Partial<CarConfig>;
+        const carConfig = { ...s.carConfig, ...allowed };
+        return { carConfig, vehicleState: createInitialVehicleState(s.config, carConfig), testRunPhase: 'ready', testRunHistory: [] };
+      }),
 
       stopDiagnosis: () => {
         finishActiveSession(get());
         set({
           activeBrokenMotorId: null,
           lockedKeys: new Set(),
+          diagnosisRepairableCarKeys: new Set(),
           simState: { ...REST_STATE },
           history: [],
           _elapsedSec: 0,
