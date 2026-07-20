@@ -1,13 +1,15 @@
-// docs/phase1-plan.md §8: retro-proto.htmlのタブ切替シェル。Unit D時点では
-// 「解像度比較」「俯瞰走行ビュー」の2タブのみ実装する。色演算(Unit E)・Mode 7
-// (Unit F)・音源(Unit G)・最悪ケース性能測定(Unit H)は後続Unitで追加する。
+// docs/phase1-plan.md §8: retro-proto.htmlのタブ切替シェル。Unit D「解像度比較」
+// 「俯瞰走行ビュー」、Unit E「色演算」を実装済み。Mode 7(Unit F)・音源(Unit G)・
+// 最悪ケース性能測定(Unit H)は後続Unitで追加する。
 import { useState } from 'react';
 import { ResolutionHarness } from './resolutionHarness/ResolutionHarness';
 import { OverheadViewDemo } from './overheadView/OverheadViewDemo';
+import { ColorOpsDemo } from './colorOpsDemo/ColorOpsDemo';
 
 const TABS = [
   { id: 'resolution', label: '解像度比較', component: ResolutionHarness },
   { id: 'overhead', label: '俯瞰走行ビュー', component: OverheadViewDemo },
+  { id: 'colorOps', label: '色演算', component: ColorOpsDemo },
 ] as const;
 
 type TabId = (typeof TABS)[number]['id'];
