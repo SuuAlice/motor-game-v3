@@ -163,3 +163,47 @@ export const STALL_DETECTION_TIME_S = 1.0; // s
 // 車体の抵抗力に加える。既存のvibrationNoise(motorPhysics.ts、ωへのランダム
 // 摂動)とは別に、崩壊後に平均的な走行の重さが増すことを表現するための係数。
 export const K_VIB_DRAG = 0.001; // N·s/(mm·rad)
+
+// ============================================================
+// ここからコースと条件セット(v2 Phase3)で追加。spec.md §11の車体定数のうち
+// Phase2で見送ったBASE_STABILITY・BATTERY_CAPACITY_J_1_5V/3_0Vを含む。
+// ============================================================
+
+// カーブ安定性(spec §4.7)。a_limit = G・cos(slopeRad)・(BASE_STABILITY +
+// gripBonus - centerOfMassPenalty - mountOffsetPenalty)。「標準構成では
+// コースアウトしない・速度過大または高重心でコースアウトする」(spec §11)を
+// 満たすよう数値実験で調整する。
+export const BASE_STABILITY = 1.2;
+
+// gripBonus = K_STABILITY_GRIP・tireGrip・surfaceGrip の係数。
+export const K_STABILITY_GRIP = 0.6;
+
+// centerOfMassPenalty = K_STABILITY_COM・centerOfMassHeightMm の係数。
+export const K_STABILITY_COM = 0.02; // 1/mm
+
+// mountOffsetPenalty = K_STABILITY_MOUNT・motorMountOffsetMm の係数。
+export const K_STABILITY_MOUNT = 0.03; // 1/mm
+
+// コースアウト確定までの継続時間。STALL_DETECTION_TIME_Sと対称の設計
+// (誤検出防止の猶予と応答性のバランス)。
+export const DERAIL_DETECTION_TIME_S = 0.5; // s
+
+// 省エネコースのゲーム用エネルギー予算(spec §11・§4.8)。実物の単三電池容量の
+// 再現ではなく、数分以内の省エネ比較を成立させるための値。UIでは「このコースで
+// 使える電気」と表示し、実物相当であるかのような表現はしない。
+export const BATTERY_CAPACITY_J_1_5V = 40; // J
+export const BATTERY_CAPACITY_J_3_0V = 80; // J
+
+// でこぼこ道(spec §2.3)の路面凹凸。roughnessFactor = bumpAmplitudeM /
+// (wheelDiameterMm/2000) の係数(車輪径が小さいほど同じ凹凸を乗り越えにくい)。
+export const C_ROUGHNESS = 0.05;
+
+// roughness=1のときの路面凹凸の物理的な高さ。
+export const ROUGHNESS_BUMP_AMPLITUDE_M = 0.01; // m
+
+// 位置ベースの決定的な波動(sin(2π・positionM/ROUGHNESS_WAVELENGTH_M))の深さ。
+// 1未満とし、ripple=1+depth・sin(...)が常に正であることを構造的に保証する。
+export const ROUGHNESS_RIPPLE_DEPTH = 0.5;
+
+// 位置ベース波動の空間周期。
+export const ROUGHNESS_WAVELENGTH_M = 0.3; // m

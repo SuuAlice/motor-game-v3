@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { evaluateChallenge, type HistorySample } from '../scoring';
+import { evaluateChallenge, evaluateObjectives, validateBuildRestrictions, type HistorySample, type Objective } from '../scoring';
 import { step, type MotorConfig, type SimState } from '../motorPhysics';
+import { createInitialVehicleState, type CarConfig, type VehicleSimState } from '../vehiclePhysics';
+import type { BuildRestrictions } from '../trackPhysics';
 
 function sample(t: number, rpm: number, current: number, backEmf = 0): HistorySample {
   return { t, rpm, current, backEmf };
@@ -97,5 +99,177 @@ describe('evaluateChallenge(実際のstep()出力を使った統合テスト)', 
     expect(result.star1).toBe(true);
     expect(result.star2).toBe(true);
     expect(result.star3).toBe(true);
+  });
+});
+
+// Phase3: 条件セット(Objective)。既存の☆評価(v1.5由来)とは別のexport。
+function goodMotorConfig(overrides: Partial<MotorConfig> = {}): MotorConfig {
+  return {
+    coilTurns: 80,
+    slitWidthMm: 1.5,
+    sandingQuality: 0.9,
+    brushPressure: 0.3,
+    magnetStrength: 1.0,
+    magnetDistanceMm: 10,
+    batteryVoltage: 3.0,
+    axisOffsetMm: 0,
+    ...overrides,
+  };
+}
+
+function standardCarConfig(overrides: Partial<CarConfig> = {}): CarConfig {
+  return {
+    massG: 150,
+    gearRatio: 4,
+    gearEfficiency: 0.8,
+    wheelDiameterMm: 30,
+    tireGrip: 0.7,
+    axleFriction: 0,
+    wheelAlignmentMm: 0,
+    centerOfMassHeightMm: 20,
+    motorMountOffsetMm: 0,
+    ...overrides,
+  };
+}
+
+function finishedState(overrides: Partial<VehicleSimState> = {}): VehicleSimState {
+  const base = createInitialVehicleState(goodMotorConfig(), standardCarConfig());
+  return { ...base, status: 'finished', ...overrides };
+}
+
+describe('Phase3受け入れ基準: evaluateObjectives(条件セットの境界値)', () => {
+  it('未完走(status!==finished)はkindによらずachieved=falseになる', () => {
+    const state: VehicleSimState = { ...finishedState(), status: 'running' };
+    const objectives: Objective[] = [
+      { id: 'a', kind: 'finish' },
+      { id: 'b', kind: 'targetTimeS', value: 100 },
+      { id: 'c', kind: 'maxEnergyJ', value: 100 },
+    ];
+    const result = evaluateObjectives(objectives, { finalState: state });
+    expect(result.allAchieved).toBe(false);
+    expect(result.results.every((r) => r.achieved === false)).toBe(true);
+  });
+
+  it('finish: 完走していれば無条件で達成', () => {
+    const result = evaluateObjectives([{ id: 'a', kind: 'finish' }], { finalState: finishedState() });
+    expect(result.results[0]).toEqual({ id: 'a', achieved: true });
+  });
+
+  it('targetTimeS: ちょうど境界(elapsedTimeS===value)は達成、僅かに超えると未達成', () => {
+    const atBoundary = finishedState({ elapsedTimeS: 10 });
+    const overBoundary = finishedState({ elapsedTimeS: 10.001 });
+    const objective: Objective = { id: 'a', kind: 'targetTimeS', value: 10 };
+    expect(evaluateObjectives([objective], { finalState: atBoundary }).results[0].achieved).toBe(true);
+    expect(evaluateObjectives([objective], { finalState: overBoundary }).results[0].achieved).toBe(false);
+  });
+
+  it('maxEnergyJ: ちょうど境界(energyUsedJ===value)は達成、僅かに超えると未達成', () => {
+    const atBoundary = finishedState({ energyUsedJ: 40 });
+    const overBoundary = finishedState({ energyUsedJ: 40.001 });
+    const objective: Objective = { id: 'a', kind: 'maxEnergyJ', value: 40 };
+    expect(evaluateObjectives([objective], { finalState: atBoundary }).results[0].achieved).toBe(true);
+    expect(evaluateObjectives([objective], { finalState: overBoundary }).results[0].achieved).toBe(false);
+  });
+
+  it('compliance: motorConfig/carConfig/restrictionsが未指定なら判定不能としてachieved=false', () => {
+    const objective: Objective = { id: 'a', kind: 'compliance' };
+    const result = evaluateObjectives([objective], { finalState: finishedState() });
+    expect(result.results[0].achieved).toBe(false);
+  });
+
+  it('compliance: 制約を満たす構成ではachieved=true、破る構成ではachieved=false', () => {
+    const motorConfig = goodMotorConfig();
+    const carConfig = standardCarConfig();
+    const restrictions: Partial<BuildRestrictions> = { maxBatteryVoltage: 3.0 };
+    const objective: Objective = { id: 'a', kind: 'compliance' };
+    const ok = evaluateObjectives([objective], { finalState: finishedState(), motorConfig, carConfig, restrictions });
+    expect(ok.results[0].achieved).toBe(true);
+
+    const violating: Partial<BuildRestrictions> = { maxBatteryVoltage: 1.5 }; // motorConfig.batteryVoltage=3.0が超過
+    const bad = evaluateObjectives([objective], { finalState: finishedState(), motorConfig, carConfig, restrictions: violating });
+    expect(bad.results[0].achieved).toBe(false);
+  });
+
+  it('allAchieved: 全目標が達成された場合のみtrue', () => {
+    const state = finishedState({ elapsedTimeS: 5, energyUsedJ: 10 });
+    const objectives: Objective[] = [
+      { id: 'a', kind: 'finish' },
+      { id: 'b', kind: 'targetTimeS', value: 10 },
+      { id: 'c', kind: 'maxEnergyJ', value: 5 }, // energyUsedJ=10 > 5、未達成
+    ];
+    const result = evaluateObjectives(objectives, { finalState: state });
+    expect(result.allAchieved).toBe(false);
+    expect(result.results.map((r) => r.achieved)).toEqual([true, true, false]);
+  });
+});
+
+describe('Phase3受け入れ基準: validateBuildRestrictions', () => {
+  const motorConfig = goodMotorConfig();
+  const carConfig = standardCarConfig();
+
+  it('制約が空なら常にvalid', () => {
+    const result = validateBuildRestrictions(motorConfig, carConfig, {});
+    expect(result).toEqual({ valid: true, evaluable: true, violations: [] });
+  });
+
+  it('lockedMotorParams: 一致しない値はlocked違反', () => {
+    const result = validateBuildRestrictions(motorConfig, carConfig, { lockedMotorParams: { coilTurns: 999 } });
+    expect(result.valid).toBe(false);
+    expect(result.violations).toEqual([{ path: 'motor', key: 'coilTurns', reason: 'locked' }]);
+  });
+
+  it('motorParamRanges: 範囲外はoutOfRange違反、範囲内はvalid', () => {
+    const outOfRange = validateBuildRestrictions(motorConfig, carConfig, {
+      motorParamRanges: { coilTurns: { min: 100, max: 150 } },
+    });
+    expect(outOfRange.valid).toBe(false);
+    expect(outOfRange.violations).toEqual([{ path: 'motor', key: 'coilTurns', reason: 'outOfRange' }]);
+
+    const inRange = validateBuildRestrictions(motorConfig, carConfig, {
+      motorParamRanges: { coilTurns: { min: 10, max: 150 } },
+    });
+    expect(inRange.valid).toBe(true);
+  });
+
+  it('lockedCarParams・carParamRanges: 車体側も同様に判定する', () => {
+    const result = validateBuildRestrictions(motorConfig, carConfig, {
+      lockedCarParams: { gearRatio: 8 },
+      carParamRanges: { massG: { min: 200, max: 250 } },
+    });
+    expect(result.valid).toBe(false);
+    expect(result.violations).toEqual(
+      expect.arrayContaining([
+        { path: 'car', key: 'gearRatio', reason: 'locked' },
+        { path: 'car', key: 'massG', reason: 'outOfRange' },
+      ]),
+    );
+  });
+
+  it('maxBatteryVoltage: 超過するとbatteryVoltageExceeded違反', () => {
+    const result = validateBuildRestrictions(motorConfig, carConfig, { maxBatteryVoltage: 1.5 });
+    expect(result.valid).toBe(false);
+    expect(result.violations).toEqual([{ path: 'batteryVoltage', reason: 'batteryVoltageExceeded' }]);
+  });
+
+  it('allowedPartPresetIds: usedPartPresetIds未指定は判定不能(evaluable=false)であり、valid=falseに帰着する', () => {
+    const result = validateBuildRestrictions(motorConfig, carConfig, { allowedPartPresetIds: ['preset-a'] });
+    expect(result.evaluable).toBe(false);
+    expect(result.valid).toBe(false);
+  });
+
+  it('allowedPartPresetIds: usedPartPresetIdsが許可リスト内なら合格、リスト外を含むとpartPresetNotAllowed違反', () => {
+    const restrictions: Partial<BuildRestrictions> = { allowedPartPresetIds: ['preset-a', 'preset-b'] };
+    const ok = validateBuildRestrictions(motorConfig, carConfig, restrictions, ['preset-a']);
+    expect(ok).toEqual({ valid: true, evaluable: true, violations: [] });
+
+    const bad = validateBuildRestrictions(motorConfig, carConfig, restrictions, ['preset-c']);
+    expect(bad.evaluable).toBe(true);
+    expect(bad.valid).toBe(false);
+    expect(bad.violations).toEqual([{ path: 'partPreset', reason: 'partPresetNotAllowed' }]);
+  });
+
+  it('allowedPartPresetIdsが空配列(制限なし)ならusedPartPresetIds未指定でもevaluable=true', () => {
+    const result = validateBuildRestrictions(motorConfig, carConfig, { allowedPartPresetIds: [] });
+    expect(result).toEqual({ valid: true, evaluable: true, violations: [] });
   });
 });

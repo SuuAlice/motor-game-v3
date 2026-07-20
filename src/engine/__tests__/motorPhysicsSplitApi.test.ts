@@ -129,3 +129,53 @@ describe('Phase2受け入れ基準: 分割API(evaluateMotorFrame/advanceMotorSta
     });
   }
 });
+
+describe('Phase3受け入れ基準: evaluateMotorFrameのpowerOff引数', () => {
+  it('powerOff省略時(既定false)はPhase2の既存コードパスを一切通らず無影響', () => {
+    // powerOffが新規追加された引数であること自体の確認(既存呼び出しは無改修)
+    const config = goodConfig({ brushPressure: 0.05 });
+    const state = flickState(0, 20);
+    const rng1 = countingRng(1);
+    const rng2 = countingRng(1);
+    const withoutArg = evaluateMotorFrame(config, state, rng1.rng);
+    const withFalseArg = evaluateMotorFrame(config, state, rng2.rng, false);
+    expect(withFalseArg).toEqual(withoutArg);
+    expect(rng2.count()).toBe(rng1.count());
+  });
+
+  it('powerOff=trueのrng消費は常に0回(チャタリング判定を行わないため)', () => {
+    const scenarios2: SimState[] = [flickState(0, 20), flickState(0, 20, { chatterFramesLeft: 5 }), restState(0.05)];
+    for (const state of scenarios2) {
+      const counting = countingRng(1);
+      evaluateMotorFrame(goodConfig({ brushPressure: 0.05 }), state, counting.rng, true);
+      expect(counting.count()).toBe(0);
+    }
+  });
+
+  it('powerOff=trueはcurrent・tMagを0、shortedをfalseにする。backEmf・deadZoneは実値を保持する', () => {
+    const config = goodConfig();
+    const state = flickState(Math.PI / 4, 20); // theta=0はデッドゾーンでbackEmfが0になるため避ける
+    const evaluation = evaluateMotorFrame(config, state, () => 0, true);
+    expect(evaluation.current).toBe(0);
+    expect(evaluation.tMag).toBe(0);
+    expect(evaluation.shorted).toBe(false);
+    expect(evaluation.chatterFramesLeft).toBe(0);
+    // backEmfは実際のomegaに応じた非零値のはず(電源offでも回転そのものに起因する観測値)
+    expect(evaluation.backEmf).not.toBe(0);
+  });
+
+  it('powerOff=trueかつshortedになり得る構成(slitWidthMm=0)でも新規発熱が生じない', () => {
+    // shortedをfalseにすることで、advanceMotorState→nextBatteryHeatのshorted分岐
+    // (currentを無視してbatteryVoltage/(rContact+rBatteryInternal)を使う式)を
+    // 回避できていることを確認する
+    const config = goodConfig({ slitWidthMm: 0 });
+    let state = flickState(0, 20, { batteryHeat: 0.1 });
+    const rng = mulberry32(1);
+    for (let i = 0; i < 60; i++) {
+      const evaluation = evaluateMotorFrame(config, state, rng, true);
+      state = advanceMotorState(config, state, evaluation, DT, rng);
+    }
+    // HEAT_DISSIPATIONによる自然冷却のみのため、発熱は初期値を上回らない
+    expect(state.batteryHeat).toBeLessThanOrEqual(0.1);
+  });
+});

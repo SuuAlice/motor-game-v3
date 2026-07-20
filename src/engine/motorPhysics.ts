@@ -336,8 +336,35 @@ export interface MotorFrameEvaluation {
   chatterFramesLeft: number; // 次状態用、そのままSimStateへ転記する
 }
 
-export function evaluateMotorFrame(config: MotorConfig, state: SimState, rng: Rng = Math.random): MotorFrameEvaluation {
+export function evaluateMotorFrame(
+  config: MotorConfig,
+  state: SimState,
+  rng: Rng = Math.random,
+  powerOff: boolean = false,
+): MotorFrameEvaluation {
   const electrical = computeElectricalState(config, state.theta, state.omega);
+
+  if (powerOff) {
+    // 電力供給off(Phase3、省エネコースのエネルギー予算超過)。current・tMag・
+    // shortedをすべて0/falseにする。shortedをfalseにすることで、
+    // advanceMotorState→nextBatteryHeatのshorted分岐(currentを無視して
+    // batteryVoltage/(rContact+rBatteryInternal)を使う式)を通らなくなり、
+    // 電池発熱が正しく「新規発熱なし、HEAT_DISSIPATIONによる自然冷却のみ」になる。
+    // backEmf・deadZoneは、モーターの回転そのものに起因する観測値として実値を
+    // 保持する(診断表示専用。積分・発熱・エネルギー計算のいずれからも参照されない)。
+    // チャタリングは電流が存在しない場合意味を持たないため判定自体を行わず、
+    // rngを一切消費しない。
+    return {
+      current: 0,
+      backEmf: electrical.backEmf,
+      tMag: 0,
+      tCog: computeCoggingTorque(config, state.theta),
+      shorted: false,
+      deadZone: electrical.deadZone,
+      chatterFramesLeft: 0,
+    };
+  }
+
   let current = electrical.current;
 
   // チャタリング判定(rng消費①、条件付き)。T_magの計算前に電流へ反映させることで、
