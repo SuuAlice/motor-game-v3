@@ -2,10 +2,25 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 import { TEST_RUN_COURSE_LENGTH_M, useGameStore } from '../gameStore';
 import { DEFAULT_GARAGE_SELECTION } from '../../data/partPresets';
 import { decodeRecipe, encodeRecipe } from '../../engine/recipeCode';
-import { encodeRecipe as encodeLegacyRecipe } from '../../data/recipeCodec';
 import { BROKEN_CARS } from '../../data/brokenCars';
 
 const DT = 1 / 120;
+
+function encodeLegacyRecipe(config: ReturnType<typeof useGameStore.getState>['config'], seed: number): string {
+  const json = JSON.stringify([1, config.coilTurns, config.slitWidthMm, config.sandingQuality,
+    config.brushPressure, config.magnetStrength, config.magnetDistanceMm, config.batteryVoltage,
+    config.axisOffsetMm, config.wireGaugeMm, config.parallelStrands, config.varnished, seed]);
+  const bytes = new TextEncoder().encode(json);
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  const payload = btoa(binary).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/u, '');
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < payload.length; index += 1) {
+    hash ^= payload.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return `M15-${payload}.${(hash >>> 0).toString(36).padStart(7, '0')}`;
+}
 
 describe('テスト走行store', () => {
   let consoleError: ReturnType<typeof vi.spyOn>;
@@ -144,7 +159,7 @@ describe('テスト走行store', () => {
 
   it('M15互換レシピの磁石距離3 mmを読み込み・MC2再出力しても引き戻さない', () => {
     const legacyConfig = { ...useGameStore.getState().config, magnetDistanceMm: 3 };
-    const legacyCode = encodeLegacyRecipe({ config: legacyConfig, seed: 77 });
+    const legacyCode = encodeLegacyRecipe(legacyConfig, 77);
     const decoded = decodeRecipe(legacyCode);
     useGameStore.getState().loadCarRecipe(decoded);
     const loaded = useGameStore.getState();

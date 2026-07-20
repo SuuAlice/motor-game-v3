@@ -1,7 +1,6 @@
 import { useState } from 'react'
 import { useGameStore } from './store/gameStore'
-import { SandboxMode } from './modes/SandboxMode'
-import { ChallengeMode } from './modes/ChallengeMode'
+import { LabMode } from './modes/LabMode'
 import { DiagnosisMode } from './modes/DiagnosisMode'
 import { AssemblyMode } from './modes/AssemblyMode'
 import { TestRunMode } from './modes/TestRunMode'
@@ -51,17 +50,10 @@ function TitleScreen({ onOpenGlossary, onOpenNotebook }: { onOpenGlossary: () =>
         </button>
         <button
           type="button"
-          onClick={() => setMode('sandbox')}
+          onClick={() => setMode('lab')}
           className="rounded-lg bg-amber-600 px-4 py-3 font-bold text-white"
         >
-          実験室(サンドボックス)
-        </button>
-        <button
-          type="button"
-          onClick={() => setMode('challenge')}
-          className="rounded-lg bg-slate-700 px-4 py-3 font-bold text-white"
-        >
-          調整チャレンジ
+          実験室
         </button>
         <button
           type="button"
@@ -113,8 +105,7 @@ function App() {
         <>
           {mode === 'title' && <TitleScreen onOpenGlossary={() => setUtilityPage('glossary')} onOpenNotebook={() => setUtilityPage('notebook')} />}
           {mode === 'garage' && <GarageMode />}
-          {mode === 'sandbox' && <SandboxMode />}
-          {mode === 'challenge' && <ChallengeMode />}
+          {mode === 'lab' && <LabMode />}
           {mode === 'diagnosis' && <DiagnosisMode />}
           {mode === 'assembly' && <AssemblyMode />}
           {mode === 'testRun' && <TestRunMode />}

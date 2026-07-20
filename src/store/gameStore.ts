@@ -8,7 +8,6 @@ import {
   type CarConfig,
   type VehicleSimState,
 } from '../engine/vehiclePhysics';
-import type { Challenge } from '../data/challenges';
 import type { BrokenCar } from '../data/brokenCars';
 import { TRACK_BY_ID } from '../data/tracks';
 import { stepTrackRun } from '../engine/trackPhysics';
@@ -114,12 +113,6 @@ const HISTORY_SAMPLE_INTERVAL_SEC = 0.1;
 const HISTORY_WINDOW_SEC = 32;
 const MAX_HISTORY_SAMPLES = Math.round(HISTORY_WINDOW_SEC / HISTORY_SAMPLE_INTERVAL_SEC);
 
-interface ChallengeProgress {
-  completed: boolean;
-  bestRpm: number;
-  bestAverageCurrentA: number;
-}
-
 export interface CourseRunRecord {
   status: VehicleSimState['status'];
   elapsedTimeS: number;
@@ -164,7 +157,7 @@ interface GameStore {
   config: MotorConfig;
   simState: SimState;
   history: MeasurementSample[];
-  mode: 'title' | 'garage' | 'testRun' | 'course' | 'sandbox' | 'challenge' | 'diagnosis' | 'assembly';
+  mode: 'title' | 'garage' | 'testRun' | 'course' | 'lab' | 'diagnosis' | 'assembly';
   garageSelection: GarageSelection;
   selectedTrackId: string;
   carConfig: CarConfig;
@@ -176,13 +169,11 @@ interface GameStore {
   courseRunHistory: TestRunSample[];
   courseRunSpeed: CourseRunSpeed;
   courseProgress: Record<string, CourseProgress>;
-  activeChallengeId: string | null;
   activeBrokenMotorId: string | null;
   lockedKeys: ReadonlySet<keyof MotorConfig>;
   // Phase3バランス調整で追加。coilTurns最小化のような自由パラメータの極端な振り方を
   // チャレンジごとに制限する(lockedKeysとは別に、可動域だけを狭める仕組み)
   paramRanges: Partial<Record<keyof MotorConfig, [number, number]>>;
-  progress: Record<string, ChallengeProgress>;
   diagnosisProgress: Record<string, boolean>;
   diagnosisRepairableCarKeys: ReadonlySet<keyof CarConfig>;
   recipeSeed: number;
@@ -207,8 +198,9 @@ interface GameStore {
   flickStart: () => void;
   resetSim: () => void;
   // トップレベルのモード切替(App.tsxのモード選択画面用)。進行中のチャレンジ状態を破棄する
-  setMode: (mode: 'title' | 'garage' | 'testRun' | 'course' | 'sandbox' | 'challenge' | 'diagnosis' | 'assembly') => void;
+  setMode: (mode: 'title' | 'garage' | 'testRun' | 'course' | 'lab' | 'diagnosis' | 'assembly') => void;
   setGarageSelection: (partial: Partial<GarageSelection>) => void;
+  setLabCarConfig: (partial: Partial<CarConfig>) => void;
   selectTrack: (trackId: string) => void;
   startTestRun: () => void;
   stepTestRun: (dt: number) => void;
@@ -219,11 +211,7 @@ interface GameStore {
   abortCourseRun: () => void;
   resetCourseRun: () => void;
   setCourseRunSpeed: (speed: CourseRunSpeed) => void;
-  startChallenge: (challenge: Challenge) => void;
-  // チャレンジのプレイ画面からチャレンジ一覧に戻る(modeは'challenge'のまま)
-  stopChallenge: () => void;
-  recordChallengeResult: (challengeId: string, rpm: number, averageCurrentA: number) => void;
-  // 診断モード: repairableParam以外を全てロックする(ChallengeModeのlockedKeys機構を転用)
+  // 診断モード: 故障車データで許可された項目以外をロックする
   startDiagnosis: (brokenCar: BrokenCar) => void;
   setDiagnosisCarConfig: (partial: Partial<CarConfig>) => void;
   stopDiagnosis: () => void;
@@ -251,11 +239,9 @@ export const useGameStore = create<GameStore>()(
       courseRunHistory: [],
       courseRunSpeed: 1,
       courseProgress: {},
-      activeChallengeId: null,
       activeBrokenMotorId: null,
       lockedKeys: new Set(),
       paramRanges: {},
-      progress: {},
       diagnosisProgress: {},
       diagnosisRepairableCarKeys: new Set(),
       recipeSeed: createSessionSeed(),
@@ -291,6 +277,16 @@ export const useGameStore = create<GameStore>()(
           carConfig,
           config: applyGarageBattery(s.config, garageSelection),
           vehicleState: createInitialVehicleState(applyGarageBattery(s.config, garageSelection), carConfig),
+        };
+      }),
+
+      setLabCarConfig: (partial) => set((s) => {
+        const carConfig = { ...s.carConfig, ...partial };
+        return {
+          carConfig,
+          vehicleState: createInitialVehicleState(s.config, carConfig),
+          testRunPhase: 'ready',
+          testRunHistory: [],
         };
       }),
 
@@ -427,7 +423,6 @@ export const useGameStore = create<GameStore>()(
       setMode: (mode) =>
         (finishActiveSession(get()), set({
           mode,
-          activeChallengeId: null,
           activeBrokenMotorId: null,
           diagnosisRepairableCarKeys: new Set(),
           lockedKeys: new Set(),
@@ -616,50 +611,6 @@ export const useGameStore = create<GameStore>()(
         _vehicleSampleAccumulatorSec: 0,
       })),
 
-      startChallenge: (challenge) =>
-        set((s) => {
-          const paramRanges = challenge.paramRanges ?? {};
-          const config = clampToCoilWindow(
-            clampToRanges({ ...s.config, ...challenge.lockedParams }, paramRanges),
-          );
-          return {
-            mode: 'challenge',
-            activeChallengeId: challenge.id,
-            lockedKeys: new Set(Object.keys(challenge.lockedParams) as (keyof MotorConfig)[]),
-            paramRanges,
-            config,
-            simState: { ...REST_STATE },
-            history: [],
-            _elapsedSec: 0,
-            _sampleAccumulatorSec: 0,
-          };
-        }),
-
-      stopChallenge: () => {
-        finishActiveSession(get());
-        set({
-          activeChallengeId: null,
-          lockedKeys: new Set(),
-          paramRanges: {},
-          simState: { ...REST_STATE },
-          history: [],
-          _elapsedSec: 0,
-          _sampleAccumulatorSec: 0,
-          _sessionSeed: null, _sessionStartedAt: null, _sessionConfig: null, _sessionSamples: [],
-        });
-      },
-
-      recordChallengeResult: (challengeId, rpm, averageCurrentA) => {
-        const existing = get().progress[challengeId];
-        if (existing && rpm <= existing.bestRpm) return;
-        set((s) => ({
-          progress: {
-            ...s.progress,
-            [challengeId]: { completed: true, bestRpm: rpm, bestAverageCurrentA: averageCurrentA },
-          },
-        }));
-      },
-
       // 診断データが許可した項目だけを調整可能にする。
       startDiagnosis: (brokenCar) =>
         set({
@@ -732,7 +683,6 @@ export const useGameStore = create<GameStore>()(
       // 「localStorage以外の永続化・外部通信は行わない」に従い、進捗のみ保存する。
       name: 'v15:progress',
       partialize: (s) => ({
-        progress: s.progress,
         diagnosisProgress: s.diagnosisProgress,
         courseProgress: s.courseProgress,
         selectedTrackId: s.selectedTrackId,

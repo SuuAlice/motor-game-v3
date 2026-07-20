@@ -5,7 +5,7 @@ This file provides guidance to coding agents working with this repository. `AGEN
 
 ## プロジェクトの現状
 
-v1.5が完了しています。物理エンジン拡張、SI単位UI、ObservationPanel、実験ノート、レシピコード、クラシック/EXチャレンジを実装済みです。テスト66件、`npm run test && npm run build && npm run lint` 通過、`v1.5`タグで公開済みです。
+v2 Phase 4まで実装済みです。反射慣性による車体連成、5コース、ガレージ、工作工程、車体対応診断、実験ノート、車体込みレシピコード、実験室を実装しています。現在の正確なテスト件数と検証結果は直近コミットおよび`docs/handoff.md`を参照してください。
 
 - `src/engine/` — 純粋な物理エンジン(`constants.ts`・`commutator.ts`・`motorPhysics.ts`・`scoring.ts`・`failures.ts`・`__tests__/`)
 - `src/store/gameStore.ts` — zustandストア(config/simState/history/モード別ロック)
@@ -38,7 +38,7 @@ v1.5が完了しています。物理エンジン拡張、SI単位UI、Observati
 - `src/store/gameStore.ts` — `MotorConfig` / `CarConfig` / `SimState` / モード / 進捗を保持する zustand ストア
 - `src/render/` — Canvas 2D 描画(`MotorCanvas.tsx`・`RaceCanvas.tsx` が requestAnimationFrame ループを駆動し、`drawMotor.ts`・`drawRace.ts` は純粋な描画関数)
 - `src/components/` — UI(`garage/`、`assembly/`(モーター工程のみ)、`meters/`、`MeasurementPanel.tsx`、`ResultPanel.tsx`)
-- `src/modes/` — `GarageMode` / `TestRunMode` / `ChallengeMode` / `DiagnosisMode` / `LabMode` の5モード(v1.5由来のAssembly/Challenge/Diagnosis/Sandboxは参考資料。削除はPhase 4完了ゲート後に単一コミットで行う方針)
+- `src/modes/` — `GarageMode` / `AssemblyMode` / `TestRunMode` / `CourseMode` / `DiagnosisMode` / `LabMode`。v1.5由来の旧Challenge/Sandbox画面はPhase 4完了ゲートで削除済み
 - `src/data/` — 静的データ:`tracks.ts`、`challenges.ts`、`partPresets.ts`、`brokenCars.ts`
 
 ### 物理モデル(仕様書§4)
