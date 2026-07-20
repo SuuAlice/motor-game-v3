@@ -4,7 +4,7 @@
 // エンジンには接続しない(ダミーデータのみ、物理固定dtループを新設しない)。
 import { PALETTE } from '../../retro/palette';
 import { computeCarSpriteGeometry } from './carSprite';
-import { getTallObjectColors } from './tallObjectStyle';
+import { computeTallObjectRects, getTallObjectColors } from './tallObjectStyle';
 import { TRACK_HALF_WIDTH, TRACK_STRAIGHT_LENGTH, offsetPerpendicular, snapTo16Directions, type TrackPoint } from './track';
 
 const WALL_HEIGHT_PX = 3;
@@ -71,14 +71,21 @@ function drawCar(ctx: CanvasRenderingContext2D, screenX: number, screenY: number
   const geo = computeCarSpriteGeometry(dirIndex);
 
   // 側面(wall): 3/4視点の立ち上がり。真横視で最大幅・最大高になる
+  // geoの各フィールドは既に整数(carSprite.ts)。ここでの追加演算(/2, *0.4, *0.6)は
+  // 最終座標をMath.roundで丸め、fillRectへ渡す全引数を整数に保つ(art-spec §2.2)。
   ctx.fillStyle = PALETTE.R0;
-  ctx.fillRect(screenX - geo.wallWidthPx / 2, screenY - geo.wallHeightPx, geo.wallWidthPx, geo.wallHeightPx);
+  ctx.fillRect(
+    Math.round(screenX - geo.wallWidthPx / 2),
+    Math.round(screenY - geo.wallHeightPx),
+    geo.wallWidthPx,
+    geo.wallHeightPx,
+  );
 
   // 上面(roof): wallより明るい色で一段小さく重ね、車体上面を示す
   ctx.fillStyle = PALETTE.R1;
   ctx.fillRect(
-    screenX - geo.roofWidthPx / 2,
-    screenY - geo.wallHeightPx - geo.roofHeightPx * 0.4,
+    Math.round(screenX - geo.roofWidthPx / 2),
+    Math.round(screenY - geo.wallHeightPx - geo.roofHeightPx * 0.4),
     geo.roofWidthPx,
     geo.roofHeightPx,
   );
@@ -86,21 +93,20 @@ function drawCar(ctx: CanvasRenderingContext2D, screenX: number, screenY: number
   // 前部マーカー: 進行方向ベクトルのオフセットをそのまま使い、前後方向を示す
   ctx.fillStyle = PALETTE.Y1;
   ctx.fillRect(
-    screenX + geo.frontMarkerOffsetXPx - 1,
-    screenY + geo.frontMarkerOffsetYPx - geo.wallHeightPx * 0.6 - 1,
+    Math.round(screenX + geo.frontMarkerOffsetXPx - 1),
+    Math.round(screenY + geo.frontMarkerOffsetYPx - geo.wallHeightPx * 0.6 - 1),
     2,
     2,
   );
 }
 
 function drawTallObject(ctx: CanvasRenderingContext2D, obj: TallObject, camX: number, camY: number): void {
-  const sx = Math.round(obj.x - camX);
-  const sy = Math.round(obj.y - camY);
   const colors = getTallObjectColors();
+  const rects = computeTallObjectRects(obj, camX, camY);
   ctx.fillStyle = colors.groundBand;
-  ctx.fillRect(sx - obj.widthPx / 2, sy - obj.heightPx * 0.15, obj.widthPx, obj.heightPx * 0.2);
+  ctx.fillRect(rects.groundBand.x, rects.groundBand.y, rects.groundBand.widthPx, rects.groundBand.heightPx);
   ctx.fillStyle = colors.base;
-  ctx.fillRect(sx - obj.widthPx / 2, sy - obj.heightPx, obj.widthPx, obj.heightPx);
+  ctx.fillRect(rects.base.x, rects.base.y, rects.base.widthPx, rects.base.heightPx);
 }
 
 export interface OverheadViewState {

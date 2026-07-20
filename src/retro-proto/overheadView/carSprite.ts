@@ -21,21 +21,25 @@ export interface CarSpriteGeometry {
   frontMarkerOffsetYPx: number;
 }
 
+// PHASE1-UNITD-REVIEW追加指摘: art-spec §2.2「描画座標は常に整数ピクセル。
+// サブピクセル描画禁止」に適合させるため、返り値はすべて整数へ丸める。
+// 丸め後も16方位の(frontMarkerOffsetXPx, frontMarkerOffsetYPx)の組は互いに
+// 異なる(単位円上の等間隔16点を半径5pxへ丸めた結果、重複しないことをテストで確認)。
 export function computeCarSpriteGeometry(dirIndex: number): CarSpriteGeometry {
   const angle = (dirIndex * Math.PI * 2) / 16;
   const dx = Math.cos(angle);
   const dy = Math.sin(angle);
   const profileAmount = Math.abs(dx); // 1=真横(側面最大), 0=真上/真下(前後面寄り)
 
-  const wallWidthPx = BODY_WIDTH_PX + (BODY_LENGTH_PX - BODY_WIDTH_PX) * profileAmount;
-  const wallHeightPx = WALL_HEIGHT_MIN_PX + (WALL_HEIGHT_MAX_PX - WALL_HEIGHT_MIN_PX) * profileAmount;
+  const wallWidthPx = Math.round(BODY_WIDTH_PX + (BODY_LENGTH_PX - BODY_WIDTH_PX) * profileAmount);
+  const wallHeightPx = Math.round(WALL_HEIGHT_MIN_PX + (WALL_HEIGHT_MAX_PX - WALL_HEIGHT_MIN_PX) * profileAmount);
 
   return {
     wallWidthPx,
     wallHeightPx,
-    roofWidthPx: wallWidthPx * 0.68,
-    roofHeightPx: wallWidthPx * 0.5,
-    frontMarkerOffsetXPx: dx * FRONT_MARKER_RADIUS_PX,
-    frontMarkerOffsetYPx: dy * FRONT_MARKER_RADIUS_PX,
+    roofWidthPx: Math.round(wallWidthPx * 0.68),
+    roofHeightPx: Math.round(wallWidthPx * 0.5),
+    frontMarkerOffsetXPx: Math.round(dx * FRONT_MARKER_RADIUS_PX),
+    frontMarkerOffsetYPx: Math.round(dy * FRONT_MARKER_RADIUS_PX),
   };
 }

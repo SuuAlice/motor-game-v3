@@ -35,4 +35,13 @@ describe('computeCarSpriteGeometry', () => {
     expect(west.wallHeightPx).toBeCloseTo(east.wallHeightPx);
     expect(west.frontMarkerOffsetXPx).toBeCloseTo(-east.frontMarkerOffsetXPx);
   });
+
+  it('art-spec §2.2(整数ピクセル規律): 全16方位の全フィールドが整数になる', () => {
+    for (let i = 0; i < 16; i++) {
+      const geo = computeCarSpriteGeometry(i);
+      for (const [key, value] of Object.entries(geo)) {
+        expect(Number.isInteger(value), `方位${i}の${key}が整数ではない: ${value}`).toBe(true);
+      }
+    }
+  });
 });
