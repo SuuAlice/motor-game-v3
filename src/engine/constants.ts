@@ -118,3 +118,48 @@ export const R_BATTERY_INTERNAL_3V = 0.3; // Ω(1.5Vの2倍)
 // 持って設定した。
 export const HEAT_DISSIPATION = 3.0; // W相当(この値未満のP_battery_lossなら発熱は下がる)
 export const BATTERY_HEAT_LIMIT = 1.0; // これに達すると発熱失敗
+
+// ============================================================
+// ここから車体物理(v2 Phase2)で追加。spec.md §11の車体定数のうち、Phase2の
+// コードパス(平坦10m直線、カーブ・省エネ予算なし)で実際に使うもののみを追加する。
+// BASE_STABILITY(カーブ安定性、§4.7)とBATTERY_CAPACITY_J_1_5V/3_0V(省エネ
+// コースのエネルギー予算、§4.8)はPhase3で追加する。
+// ============================================================
+
+export const G = 9.8; // m/s²(重力加速度、物理定数そのもの)
+
+// 小型車輪のゴム転がり抵抗係数の一般値を出発点に、「標準構成で10m直線を
+// 5〜10秒で完走」(spec §11)という設計目標へ数値実験で調整する。
+export const C_ROLL = 0.02;
+
+// 0.5・ρ_air・Cd・Aの概算(小型車体の前面投影面積を仮定)から出発。低速域
+// (数m/s)では影響が小さいことを確認しつつ調整する。
+export const C_AIR = 0.001; // N·s²/m²
+
+// wheelAlignmentMm=0の通常構成では効果0。診断モード(Phase4)の故障プリセットで
+// 使う値のプレースホルダとしてPhase2では仮値を置き、Phase4で校正する。
+export const C_ALIGN = 0.01; // N·s/(m·mm)
+
+// 「標準構成では空転せず、強トルク×低グリップで空転する」(spec §11)を満たす
+// よう数値実験で調整する、タイヤ摩擦係数の範囲。
+export const MU_TIRE_MIN = 0.3;
+export const MU_TIRE_MAX = 0.9;
+
+// 押し出し始動の初速(spec §4.6・§11)。拘束式ω=v・gearRatio/wheelRadiusによる
+// 初期モーター角速度が、モーター単体の実績値MAX_FLICK_OMEGA(40rad/s)程度を
+// 超えないことを数値実験で確認しながら調整する。標準構成(gearRatio=4、
+// wheelDiameterMm=30)ではω=0.12*4/0.015=32rad/sとなり、FLICK_INITIAL_OMEGA
+// (15rad/s)とMAX_FLICK_OMEGA(40rad/s)の間に収まる。ギヤ比が大きく車輪が
+// 小さい極端な構成ではωがさらに大きくなりうるため、実装時の数値実験で
+// 幅広い構成を確認する。
+export const START_PUSH_VELOCITY_MPS = 0.12; // m/s
+
+// 完全停止を失速と確定する時間。押し出し直後の一時的な低速を誤ってstalledと
+// 判定しないための猶予と、実際に停止した際の応答性のバランスから調整する。
+export const STALL_DETECTION_TIME_S = 1.0; // s
+
+// コイル崩壊(spec §4.1)による走行抵抗の増加係数(Phase2で新規追加)。
+// F_vibration = -sign(v)・K_VIB_DRAG・effectiveAxisOffsetMm・|ω_motor| の形で
+// 車体の抵抗力に加える。既存のvibrationNoise(motorPhysics.ts、ωへのランダム
+// 摂動)とは別に、崩壊後に平均的な走行の重さが増すことを表現するための係数。
+export const K_VIB_DRAG = 0.001; // N·s/(mm·rad)

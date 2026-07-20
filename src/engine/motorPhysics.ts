@@ -236,79 +236,190 @@ export function didShortJustHappen(prev: SimState, next: SimState): boolean {
   return !prev.shorted && next.shorted;
 }
 
-// spec docs/spec.md §4.1: 固定タイムステップdtで1ステップ積分する純関数。
+// spec docs/spec.md §4.1: モーター単体の電気状態(整流・デッドゾーン・ショート・
+// 磁束密度・逆起電力・理論電流)を計算する純関数。rngを使わず、チャタリングを
+// 考慮しない理論電流を返す(既存step()の手順0〜2の抽出、振る舞い不変)。
+export interface MotorElectricalState {
+  B: number;
+  commutationSign: 1 | -1;
+  sinTheta: number;
+  shorted: boolean;
+  deadZone: boolean;
+  backEmf: number;
+  current: number; // チャタリングを含まない理論電流
+}
+
+export function computeElectricalState(config: MotorConfig, theta: number, omega: number): MotorElectricalState {
+  const wireGaugeMm = resolveWireGaugeMm(config);
+  const parallelStrands = resolveParallelStrands(config);
+  const s = getCommutationSign(theta);
+  const sinTheta = Math.sin(theta);
+  const deadZone = isInDeadZone(theta, config.slitWidthMm);
+  const shorted = config.slitWidthMm <= 0;
+  const B = computeB(config.magnetStrength, config.magnetDistanceMm);
+  const backEmf = K_E * B * config.coilTurns * omega * sinTheta * s;
+  const rBatteryInternal = computeBatteryInternalResistance(config.batteryVoltage);
+  const rCoil = computeRCoilPerTurn(wireGaugeMm, parallelStrands) * config.coilTurns;
+  const rContact = computeContactResistance(config);
+  const iRaw = shorted || deadZone ? 0 : (config.batteryVoltage - backEmf) / (rCoil + rContact + rBatteryInternal);
+  const current = Math.max(0, iRaw);
+  return { B, commutationSign: s, sinTheta, shorted, deadZone, backEmf, current };
+}
+
+// spec §3.2: 磁気トルク(v2修正: sin(θ)を含める)。既存step()の手順4の抽出。
+// currentを引数に取ることで、チャタリング確定後の電流でも呼び直せる。
+export function computeMagneticTorque(config: MotorConfig, electrical: MotorElectricalState, current: number): number {
+  return electrical.shorted || electrical.deadZone
+    ? 0
+    : K_T * electrical.B * current * config.coilTurns * electrical.sinTheta * electrical.commutationSign;
+}
+
+// spec-v1.5.md §3.1: コギングは「近いと強く効くが、中距離〜遠距離では無視できる」
+// という、T_mag/e_backのB(下限floorあり)より急峻な減衰を必要とする(実測で
+// computeB()共有では設計目標を両立できないと判明したための構造変更)。
+function coggingFieldSquared(config: MotorConfig): number {
+  const bCog = computeCoggingB(config.magnetStrength, config.magnetDistanceMm);
+  return bCog * bCog;
+}
+
+// spec-v1.5.md §3: コギングトルク。保存力(位置エネルギーの勾配)なので、1回転で
+// 正味仕事はゼロ。T_mag/e_backのエネルギー整合性には影響しない。
+export function computeCoggingTorque(config: MotorConfig, theta: number): number {
+  return -K_COG * coggingFieldSquared(config) * Math.sin(2 * theta);
+}
+
+// Phase2(spec §4.5・§6.2)向けに追加。T_cog = -dU/dθ となるよう定義した位置
+// エネルギー(検算済み: dU/dθ = K_COG・bCog²・sin(2θ) = -T_cog)。コギングは
+// 保存力であるため、力学的エネルギー不変条件のテストにこの位置エネルギーを
+// 含めないと、電池入力なしでU_cog→KE変換だけで見かけ上KEが増加し偽陽性になる。
+export function computeCoggingPotential(config: MotorConfig, theta: number): number {
+  return -((K_COG * coggingFieldSquared(config)) / 2) * Math.cos(2 * theta);
+}
+
+// spec docs/spec.md §4.1: 固定タイムステップdtで1ステップ積分する二段API。
 // React/DOMに依存しない。rngは注入可能(テストでは決定的なモックを渡す)。
+//
+// 段階1(evaluateMotorFrame): このフレームで実際に使われる電流・トルクを
+// チャタリングまで含めて確定する。θ・ωは更新しない。rngは条件付きで0回または
+// 1回消費する(nextChatterStateはバースト継続中またはbrushPressureが閾値以上の
+// ときrngを呼ばない)。
+//
+// 段階2(advanceMotorState): 段階1の確定済み評価を使って積分する(電池発熱・
+// 静止摩擦クランプ・角速度積分・ゼロ交差クランプ・θ更新・ワニス崩壊判定・
+// RPM平滑化)。rngは軸ずれ振動のため条件付きで0回または1回消費する(静止摩擦
+// クランプで早期returnする経路では呼ばれない)。
+//
+// Phase2の車体連成(vehiclePhysics.ts)は、段階1の評価(tMag/tCog/current)を
+// 読み取ってグリップ判定(spec §4.5の拘束系ベースの必要駆動力)を行い、同じ
+// evaluationを段階2に渡す。これにより車体層はモーター層の内部式(電流・トルクの
+// 評価式)を一切複製せず、かつRNGの消費回数・順序はstep()単体呼び出しと完全に
+// 一致する(投機的な呼び出し・二重消費は発生しない)。
+//
 // loadTorque(N·m、省略時0): 外部負荷トルク。前進方向(ω>0)を基準に固定された
 // 符号付きトルクで、式は常に "-loadTorque" として加わる(spec §4.1の-T_load項)。
 // 正の値は常にωを減少させる向きに働くため、ω>0(前進)では減速だが、ω<0(後退)
 // では逆に後退を加速する点に注意(「現在の回転方向を減速」ではない、座標系固定の
 // 符号)。後退運動に抵抗する負荷(後退を減速させたい場合)を表すには、車体層は
 // 負のloadTorqueを渡すこと。
-// 注意(Fableレビュー、Phase1): loadTorqueは反射慣性J_eff(spec §4.5)を表現できない
-// (このJはモーター自身の慣性J_NAIL+線径依存項に固定)。Phase2の車体連成では、
-// 有効慣性を上書きする引数を追加するか、各トルク項を公開して車体層側で積分するかの
-// 2案から設計時に選定すること。
-export function step(
-  config: MotorConfig,
-  state: SimState,
-  dt: number,
-  rng: Rng = Math.random,
-  loadTorque: number = 0,
-): SimState {
-  const { theta, omega } = state;
-  const wireGaugeMm = resolveWireGaugeMm(config);
-  const parallelStrands = resolveParallelStrands(config);
-  const varnished = resolveVarnished(config);
+//
+// effectiveInertia(kg·m²、省略時は内部計算のモーター慣性J_NAIL+線径依存項):
+// spec §4.5の反射慣性J_eff(=J_motor+massKg·r²/(G²·η))を車体層から注入するための
+// 引数。静止摩擦クランプの判定式はJに依存しないため、effectiveInertiaの有無で
+// クランプの発動判定自体は変わらない。
+export interface MotorFrameEvaluation {
+  current: number; // チャタリング確定後の電流
+  backEmf: number;
+  tMag: number; // チャタリング確定後の磁気トルク
+  tCog: number;
+  shorted: boolean;
+  deadZone: boolean;
+  chatterFramesLeft: number; // 次状態用、そのままSimStateへ転記する
+}
 
-  // 0. 整流・デッドゾーン・ショート・磁束密度(T_magとe_backで共有)
-  const s = getCommutationSign(theta);
-  const sinTheta = Math.sin(theta);
-  const deadZone = isInDeadZone(theta, config.slitWidthMm);
-  const shorted = config.slitWidthMm <= 0;
-  const B = computeB(config.magnetStrength, config.magnetDistanceMm);
+export function evaluateMotorFrame(config: MotorConfig, state: SimState, rng: Rng = Math.random): MotorFrameEvaluation {
+  const electrical = computeElectricalState(config, state.theta, state.omega);
+  let current = electrical.current;
 
-  // 1. 逆起電力(spec §3.3、v2修正: T_magと同じsin(θ)・整流符号を掛ける)
-  const backEmf = K_E * B * config.coilTurns * omega * sinTheta * s;
-
-  // 2. 電流(spec §3.3 + spec-v1.5.md §4: 電池内部抵抗をR_coil+R_contactに直列で追加)
-  const rBatteryInternal = computeBatteryInternalResistance(config.batteryVoltage);
-  const rCoil = computeRCoilPerTurn(wireGaugeMm, parallelStrands) * config.coilTurns;
-  const rContact = computeContactResistance(config);
-  const iRaw = shorted || deadZone ? 0 : (config.batteryVoltage - backEmf) / (rCoil + rContact + rBatteryInternal);
-  let current = Math.max(0, iRaw);
-
-  // 3. チャタリング判定(rng消費①)。T_magの計算前に電流へ反映させることで、
-  //    瞬断フレームでは磁気トルクもゼロになる(ブラシ圧弱すぎ→不安定、を物理的に再現)。
+  // チャタリング判定(rng消費①、条件付き)。T_magの計算前に電流へ反映させることで、
+  // 瞬断フレームでは磁気トルクもゼロになる(ブラシ圧弱すぎ→不安定、を物理的に再現)。
   const chatterState = nextChatterState(config.brushPressure, state.chatterFramesLeft, rng);
   if (chatterState.chattering) {
     current = 0;
   }
 
-  // 4. 磁気トルク(spec §3.2、v2修正: sin(θ)を含める)
-  const tMag = shorted || deadZone ? 0 : K_T * B * current * config.coilTurns * sinTheta * s;
+  const tMag = computeMagneticTorque(config, electrical, current);
+  const tCog = computeCoggingTorque(config, state.theta);
 
-  // 4.5 コギングトルク(spec-v1.5.md §3)。保存力(位置エネルギーの勾配)なので、
-  //     1回転で正味仕事はゼロ。T_mag/e_backのエネルギー整合性には影響しない。
-  //     T_mag/e_backと共有するBではなく、専用の急峻な距離減衰(computeCoggingB)
-  //     を使う(§3.1「遠距離では無視できる」を満たすための構造変更、上記コメント参照)。
-  const bCog = computeCoggingB(config.magnetStrength, config.magnetDistanceMm);
-  const tCog = -K_COG * bCog * bCog * Math.sin(2 * theta);
-
-  // 5. 電池発熱(spec-v1.5.md §4)。静止摩擦クランプの有無によらず毎ステップ更新する。
-  const batteryHeat = nextBatteryHeat(
-    state.batteryHeat,
+  return {
     current,
-    shorted,
-    config.batteryVoltage,
-    rContact,
-    rBatteryInternal,
-    dt,
-  );
+    backEmf: electrical.backEmf,
+    tMag,
+    tCog,
+    shorted: electrical.shorted,
+    deadZone: electrical.deadZone,
+    chatterFramesLeft: chatterState.framesLeft,
+  };
+}
 
-  // 6. 静止摩擦クランプ(spec §3.4 要件1、spec-v1.5.md §3でT_cogを合算するよう拡張)。
-  //    早期リターンでもRPM表示・発熱・崩壊判定は更新する。
+// spec §3.4 要件1: 静止摩擦クランプの判定式。vehiclePhysics.tsのグリップ判定
+// (拘束系の予測)と`advanceMotorState`の本更新が同一の式でクランプを判定できる
+// よう、単独の純関数として公開する(Phase2、Fableレビュー)。
+export function isStaticFrictionClamped(
+  omega: number,
+  tMag: number,
+  tCog: number,
+  loadTorque: number,
+  brushPressure: number,
+): boolean {
+  const staticFrictionLimit = MU_BRUSH * brushPressure;
+  return Math.abs(omega) < OMEGA_EPS && Math.abs(tMag + tCog - loadTorque) <= staticFrictionLimit;
+}
+
+// 摩擦・抵抗(spec §3.4)とJ(spec §3.1、spec-v1.5.md §2.1で線径依存に拡張、
+// Phase2でeffectiveInertiaによる上書きに対応)から角速度を積分(semi-implicit
+// Euler)した、軸ずれ振動を注入する前の値。`advanceMotorState`と、Phase2の
+// 軸ずれノイズ上界テストの両方が同じ式を使うよう、単独の純関数として公開する
+// (Phase2、Fableレビュー: 「omegaDynamics/振動振幅を取得できる純関数」)。
+// 静止摩擦クランプが発動する場合はこの関数を呼ばないこと(呼び出し側で
+// isStaticFrictionClampedを先に確認する)。
+export function computeOmegaDynamics(
+  config: MotorConfig,
+  omega: number,
+  evaluation: MotorFrameEvaluation,
+  dt: number,
+  loadTorque: number = 0,
+  effectiveInertia?: number,
+): number {
+  const wireGaugeMm = resolveWireGaugeMm(config);
+  const parallelStrands = resolveParallelStrands(config);
   const staticFrictionLimit = MU_BRUSH * config.brushPressure;
-  if (Math.abs(omega) < OMEGA_EPS && Math.abs(tMag + tCog - loadTorque) <= staticFrictionLimit) {
+  const tFric = -sign(omega) * staticFrictionLimit;
+  const tDrag = -C_DRAG * omega;
+  const j = effectiveInertia ?? J_NAIL + computeKJPerTurn(wireGaugeMm, parallelStrands) * config.coilTurns;
+  return omega + ((evaluation.tMag + evaluation.tCog + tFric + tDrag - loadTorque) / j) * dt;
+}
+
+export function advanceMotorState(
+  config: MotorConfig,
+  state: SimState,
+  evaluation: MotorFrameEvaluation,
+  dt: number,
+  rng: Rng = Math.random,
+  loadTorque: number = 0,
+  effectiveInertia?: number,
+): SimState {
+  const { theta, omega } = state;
+  const varnished = resolveVarnished(config);
+  const { current, backEmf, tMag, tCog, shorted } = evaluation;
+
+  // 電池発熱(spec-v1.5.md §4)。静止摩擦クランプの有無によらず毎ステップ更新する。
+  const rBatteryInternal = computeBatteryInternalResistance(config.batteryVoltage);
+  const rContact = computeContactResistance(config);
+  const batteryHeat = nextBatteryHeat(state.batteryHeat, current, shorted, config.batteryVoltage, rContact, rBatteryInternal, dt);
+
+  // 静止摩擦クランプ(spec §3.4 要件1、spec-v1.5.md §3でT_cogを合算するよう拡張)。
+  // 早期リターンでもRPM表示・発熱・崩壊判定は更新する。
+  if (isStaticFrictionClamped(omega, tMag, tCog, loadTorque, config.brushPressure)) {
     const deform = nextDeformState(0, varnished, state.highSpeedFrameCount, state.coilCollapsed);
     return {
       theta,
@@ -318,32 +429,27 @@ export function step(
       shorted,
       running: state.running,
       rpm: updateRpm(state.rpm, 0),
-      chatterFramesLeft: chatterState.framesLeft,
+      chatterFramesLeft: evaluation.chatterFramesLeft,
       batteryHeat,
       coilCollapsed: deform.coilCollapsed,
       highSpeedFrameCount: deform.highSpeedFrameCount,
     };
   }
 
-  // 7. 摩擦・抵抗(spec §3.4)とJ(spec §3.1、spec-v1.5.md §2.1で線径依存に拡張)から
-  //    角速度を積分(semi-implicit Euler)。T_cogをトルク和に合算する(spec-v1.5.md §3)。
-  const tFric = -sign(omega) * staticFrictionLimit;
-  const tDrag = -C_DRAG * omega;
-  const j = J_NAIL + computeKJPerTurn(wireGaugeMm, parallelStrands) * config.coilTurns;
-  const omegaDynamics = omega + ((tMag + tCog + tFric + tDrag - loadTorque) / j) * dt;
+  const omegaDynamics = computeOmegaDynamics(config, omega, evaluation, dt, loadTorque, effectiveInertia);
 
-  // 8. 軸ずれ振動(spec §3.5、ω²比例)をωに注入(rng消費②)
+  // 軸ずれ振動(spec §3.5、ω²比例)をωに注入(rng消費②、条件付き)
   const vibration = K_VIB * config.axisOffsetMm * omegaDynamics * omegaDynamics;
   const omegaNoisy = omegaDynamics + vibrationNoise(vibration, rng);
 
-  // 9. ゼロ交差クランプ(spec §3.4 要件2)。ノイズ注入後の最終ωに対して、
-  //    フレーム開始時のωと符号比較する(注入によるクランプ無効化を防ぐ)。
+  // ゼロ交差クランプ(spec §3.4 要件2)。ノイズ注入後の最終ωに対して、
+  // フレーム開始時のωと符号比較する(注入によるクランプ無効化を防ぐ)。
   const omegaNew = sign(omegaNoisy) !== sign(omega) && omega !== 0 ? 0 : omegaNoisy;
 
-  // 10. θ更新(semi-implicit: 更新後のωを使う)
+  // θ更新(semi-implicit: 更新後のωを使う)
   const thetaNew = theta + omegaNew * dt;
 
-  // 11. ワニス崩壊判定(spec-v1.5.md §2.2)
+  // ワニス崩壊判定(spec-v1.5.md §2.2)
   const deform = nextDeformState(omegaNew, varnished, state.highSpeedFrameCount, state.coilCollapsed);
 
   return {
@@ -354,9 +460,23 @@ export function step(
     shorted,
     running: state.running,
     rpm: updateRpm(state.rpm, omegaNew),
-    chatterFramesLeft: chatterState.framesLeft,
+    chatterFramesLeft: evaluation.chatterFramesLeft,
     batteryHeat,
     coilCollapsed: deform.coilCollapsed,
     highSpeedFrameCount: deform.highSpeedFrameCount,
   };
+}
+
+// 既存互換のラッパー。evaluateMotorFrame→advanceMotorStateを内部で連結する。
+// シグネチャ・挙動はPhase1完了時点から完全に維持され、既存呼び出し元は無改修。
+export function step(
+  config: MotorConfig,
+  state: SimState,
+  dt: number,
+  rng: Rng = Math.random,
+  loadTorque: number = 0,
+  effectiveInertia?: number,
+): SimState {
+  const evaluation = evaluateMotorFrame(config, state, rng);
+  return advanceMotorState(config, state, evaluation, dt, rng, loadTorque, effectiveInertia);
 }
