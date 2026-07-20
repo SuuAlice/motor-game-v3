@@ -10,6 +10,7 @@ export function drawRace(
   width: number,
   height: number,
   segment?: RaceVisualSegment,
+  showHeatWarning = true,
 ): void {
   ctx.clearRect(0, 0, width, height);
 
@@ -40,7 +41,7 @@ export function drawRace(
   ctx.textAlign = 'right';
   ctx.fillText(`${Math.max(0, state.positionM).toFixed(2)} / ${courseLengthM.toFixed(0)} m  (${(progress * 100).toFixed(0)} %)`, width - 22, 47);
 
-  if (state.motor.batteryHeat >= 0.65) {
+  if (showHeatWarning && state.motor.batteryHeat >= 0.65) {
     ctx.fillStyle = 'rgba(254, 226, 226, 0.96)';
     ctx.fillRect(12, 62, 84, 28);
     ctx.fillStyle = '#b91c1c';

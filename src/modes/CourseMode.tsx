@@ -9,6 +9,11 @@ import type { ValidatedTrackDefinition } from '../engine/trackPhysics';
 import type { CarConfig, VehicleSimState } from '../engine/vehiclePhysics';
 import type { MotorConfig } from '../engine/motorPhysics';
 import type { CourseRunRecord } from '../store/gameStore';
+import type { TestRunSample } from '../store/gameStore';
+import { CourseResultGraph } from '../components/CourseResultGraph';
+import { BATTERY_HEAT_LIMIT } from '../engine/constants';
+import { useState } from 'react';
+import { useNotebookStore } from '../store/notebookStore';
 
 const TRACK_ICONS: Record<string, string> = {
   'straight-10m': '↔',
@@ -41,8 +46,13 @@ export function CourseMode() {
   const abort = useGameStore((state) => state.abortCourseRun);
   const reset = useGameStore((state) => state.resetCourseRun);
   const courseProgress = useGameStore((state) => state.courseProgress);
+  const courseRunHistory = useGameStore((state) => state.courseRunHistory);
+  const courseRunSpeed = useGameStore((state) => state.courseRunSpeed);
+  const setCourseRunSpeed = useGameStore((state) => state.setCourseRunSpeed);
   const motorConfig = useGameStore((state) => state.config);
   const carConfig = useGameStore((state) => state.carConfig);
+  const testRunCompleted = useGameStore((state) => state.testRunCompleted);
+  const coursesUnlocked = testRunCompleted || Object.keys(courseProgress).length > 0;
   const selectedTrack = TRACKS.find((track) => track.id === selectedTrackId) ?? TRACKS[0];
   const lengthM = selectedTrack.segments.reduce((sum, segment) => sum + segment.lengthM, 0);
   const features = selectedTrack.segments.map(featureLabel).filter((label): label is string => label !== null);
@@ -68,6 +78,12 @@ export function CourseMode() {
             <span className="rounded-full bg-white/10 px-3 py-1 text-sm font-black" aria-live="polite">{terminalLabel}</span>
           </div>
           <CourseRaceCanvas />
+          {phase === 'running' && <div className="flex items-center justify-between rounded-2xl bg-white px-4 py-3 shadow-sm">
+            <span className="text-sm font-black text-slate-700">走行速度</span>
+            <div className="flex gap-2" role="group" aria-label="走行速度">
+              {([{ value: 0, label: '一時停止' }, { value: 1, label: '1倍' }, { value: 2, label: '2倍' }] as const).map((item) => <button key={item.value} type="button" onClick={() => setCourseRunSpeed(item.value)} aria-pressed={courseRunSpeed === item.value} className={`rounded-lg px-3 py-2 text-sm font-black ${courseRunSpeed === item.value ? 'bg-sky-700 text-white' : 'bg-slate-100 text-slate-700'}`}>{item.label}</button>)}
+            </div>
+          </div>}
           <CourseMeasurementPanel resolved={resolved} />
           {phase === 'complete' && (
             <CourseResult
@@ -77,6 +93,7 @@ export function CourseMode() {
               carConfig={carConfig}
               previous={courseProgress[selectedTrack.id]?.previous}
               best={courseProgress[selectedTrack.id]?.best}
+              history={courseRunHistory}
             />
           )}
           <div className="flex gap-3">
@@ -97,15 +114,17 @@ export function CourseMode() {
             <button
               key={track.id}
               type="button"
-              onClick={() => selectTrack(track.id)}
+              onClick={() => coursesUnlocked && selectTrack(track.id)}
+              disabled={!coursesUnlocked}
               aria-pressed={active}
-              className={`group min-h-40 rounded-2xl border p-4 text-left transition focus:outline-none focus:ring-4 focus:ring-sky-300 ${active ? 'border-sky-600 bg-sky-700 text-white shadow-lg' : 'border-slate-200 bg-white text-slate-800 hover:border-sky-300'}`}
+              className={`group min-h-40 rounded-2xl border p-4 text-left transition focus:outline-none focus:ring-4 focus:ring-sky-300 disabled:cursor-not-allowed disabled:opacity-45 ${active && coursesUnlocked ? 'border-sky-600 bg-sky-700 text-white shadow-lg' : 'border-slate-200 bg-white text-slate-800 hover:border-sky-300'}`}
             >
               <span className={`flex h-10 w-10 items-center justify-center rounded-xl text-2xl font-black ${active ? 'bg-white/15' : 'bg-slate-100 text-slate-700'}`} aria-hidden="true">
                 {TRACK_ICONS[track.id]}
               </span>
               <span className={`mt-4 block text-[10px] font-black tracking-[0.18em] ${active ? 'text-sky-100' : 'text-slate-400'}`}>COURSE {index + 1}</span>
               <strong className="mt-1 block leading-tight">{track.name}</strong>
+              {!coursesUnlocked && <span className="mt-3 inline-block text-xs font-black">🔒 未解放</span>}
               {progress?.exCompleted ? <span className="mt-3 inline-block rounded-full bg-violet-100 px-2 py-1 text-[10px] font-black text-violet-800">EX達成</span>
                 : progress?.normalCompleted ? <span className="mt-3 inline-block rounded-full bg-emerald-100 px-2 py-1 text-[10px] font-black text-emerald-800">達成済み</span>
                   : progress ? <span className="mt-3 inline-block rounded-full bg-amber-100 px-2 py-1 text-[10px] font-black text-amber-800">挑戦中</span> : null}
@@ -113,6 +132,8 @@ export function CourseMode() {
           );
         })}
       </div>}
+
+      {phase === 'ready' && !coursesUnlocked && <p className="rounded-2xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm font-bold text-amber-900">🔒 テスト走行で10 m直線を完走すると、全コースの通常条件が解放されます。</p>}
 
       {phase === 'ready' && <section className="grid gap-4 rounded-3xl border border-slate-200 bg-white p-5 shadow-sm md:grid-cols-[1.35fr_1fr]" aria-live="polite">
         <div>
@@ -136,16 +157,16 @@ export function CourseMode() {
           <h4 className="text-sm font-black text-slate-800">通常条件</h4>
           <ul className="mt-3 space-y-2 text-sm text-slate-700">
             {selectedTrack.objectives.map((objective) => (
-              <li key={objective.id} className="flex items-center gap-2"><span aria-hidden="true">□</span>{objectiveLabel(objective.kind, objective.value)}</li>
+              <li key={objective.id} className="flex items-center gap-2"><span className={courseProgress[selectedTrack.id]?.normalCompleted || courseProgress[selectedTrack.id]?.achievedObjectiveIds?.includes(objective.id) ? 'font-black text-emerald-700' : ''} aria-hidden="true">{courseProgress[selectedTrack.id]?.normalCompleted || courseProgress[selectedTrack.id]?.achievedObjectiveIds?.includes(objective.id) ? '✓' : '□'}</span>{objectiveLabel(objective.kind, objective.value)}</li>
             ))}
           </ul>
-          <h4 className="mt-5 text-sm font-black text-violet-800">EX条件</h4>
+          <h4 className="mt-5 text-sm font-black text-violet-800">EX条件 {courseProgress[selectedTrack.id]?.normalCompleted ? '' : '🔒'}</h4>
           <ul className="mt-3 space-y-2 text-sm text-slate-700">
-            {selectedTrack.exObjectives?.map((objective) => (
-              <li key={objective.id} className="flex items-center gap-2"><span aria-hidden="true">◇</span>{objectiveLabel(objective.kind, objective.value)}</li>
-            ))}
+            {courseProgress[selectedTrack.id]?.normalCompleted ? selectedTrack.exObjectives?.map((objective) => (
+              <li key={objective.id} className="flex items-center gap-2"><span className={courseProgress[selectedTrack.id]?.exCompleted || courseProgress[selectedTrack.id]?.achievedObjectiveIds?.includes(objective.id) ? 'font-black text-violet-700' : ''} aria-hidden="true">{courseProgress[selectedTrack.id]?.exCompleted || courseProgress[selectedTrack.id]?.achievedObjectiveIds?.includes(objective.id) ? '✓' : '◇'}</span>{objectiveLabel(objective.kind, objective.value)}</li>
+            )) : <li>通常条件をすべて達成すると解放されます。</li>}
           </ul>
-          <button type="button" onClick={start} className="mt-5 w-full rounded-xl bg-emerald-700 px-4 py-3 font-black text-white focus:outline-none focus:ring-4 focus:ring-emerald-300">
+          <button type="button" onClick={start} disabled={!coursesUnlocked} className="mt-5 w-full rounded-xl bg-emerald-700 px-4 py-3 font-black text-white focus:outline-none focus:ring-4 focus:ring-emerald-300 disabled:cursor-not-allowed disabled:bg-slate-400">
             手で押してスタート
           </button>
         </div>
@@ -161,6 +182,7 @@ function CourseResult({
   carConfig,
   previous,
   best,
+  history,
 }: {
   track: ValidatedTrackDefinition;
   vehicle: VehicleSimState;
@@ -168,7 +190,11 @@ function CourseResult({
   carConfig: CarConfig;
   previous?: CourseRunRecord;
   best?: CourseRunRecord;
+  history: TestRunSample[];
 }) {
+  const [savedToNotebook, setSavedToNotebook] = useState(false);
+  const addCourseRun = useNotebookStore((state) => state.addCourseRun);
+  const courseRunSeed = useGameStore((state) => state._courseRunSeed);
   const context = { finalState: vehicle, motorConfig, carConfig, restrictions: track.restrictions };
   const normal = evaluateObjectives(track.objectives, context);
   const ex = track.exObjectives ? evaluateObjectives(track.exObjectives, context) : null;
@@ -182,6 +208,16 @@ function CourseResult({
   ] as const;
   const resultTitle = vehicle.status === 'finished' ? '完走しました' : vehicle.status === 'derailed' ? 'コースアウト'
     : vehicle.status === 'overheated' ? '過熱停止' : '途中で停止';
+  const maxRpm = Math.max(0, ...history.map((sample) => Math.abs(sample.rpm)));
+  const averageCurrent = history.length > 0 ? history.reduce((sum, sample) => sum + sample.currentA, 0) / history.length : 0;
+  const maxCurrent = Math.max(0, ...history.map((sample) => sample.currentA));
+  const heatPeak = Math.max(0, ...history.map((sample) => sample.batteryHeat)) / BATTERY_HEAT_LIMIT * 100;
+  const durationOf = (predicate: (sample: TestRunSample) => boolean) => history.reduce((duration, sample, index) => {
+    if (!predicate(sample)) return duration;
+    return duration + Math.max(0, sample.t - (history[index - 1]?.t ?? 0));
+  }, 0);
+  const slipDuration = durationOf((sample) => sample.isSlipping);
+  const stoppedDuration = durationOf((sample) => Math.abs(sample.velocityMps) < 0.001);
 
   return (
     <section className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm" aria-label="走行リザルト">
@@ -201,6 +237,17 @@ function CourseResult({
         </div>
       </div>
 
+      <div className="mt-5 grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
+        <ResultStat label="最高回転数" value={maxRpm.toFixed(0)} unit="RPM" />
+        <ResultStat label="平均電流" value={averageCurrent.toFixed(2)} unit="A" />
+        <ResultStat label="最大電流" value={maxCurrent.toFixed(2)} unit="A" />
+        <ResultStat label="発熱ピーク" value={heatPeak.toFixed(1)} unit="%" />
+        <ResultStat label="空転時間" value={slipDuration.toFixed(2)} unit="秒" />
+        <ResultStat label={vehicle.status === 'derailed' ? 'コースアウト地点' : '停止時間'} value={vehicle.status === 'derailed' ? vehicle.positionM.toFixed(2) : stoppedDuration.toFixed(2)} unit={vehicle.status === 'derailed' ? 'm' : '秒'} />
+      </div>
+
+      <CourseResultGraph history={history} track={track} />
+
       <div className="mt-5 grid gap-4 md:grid-cols-2">
         <ObjectiveResult title="通常条件" objectives={track.objectives} evaluations={normal.results} track={track} vehicle={vehicle} motorConfig={motorConfig} carConfig={carConfig} />
         {track.exObjectives && ex && <ObjectiveResult title="EX条件" objectives={track.exObjectives} evaluations={ex.results} track={track} vehicle={vehicle} motorConfig={motorConfig} carConfig={carConfig} ex />}
@@ -210,6 +257,24 @@ function CourseResult({
         <ComparisonCard title="前回との比較" record={previous} current={vehicle} />
         <ComparisonCard title="このコースのベスト" record={best} />
       </div>
+      <button type="button" disabled={savedToNotebook} onClick={() => {
+        const savedAt = new Date().toISOString();
+        addCourseRun({
+          id: `${Date.now()}-${track.id}-${courseRunSeed.toString(16)}`,
+          savedAt,
+          trackId: track.id,
+          motorConfig: { ...motorConfig },
+          carConfig: { ...carConfig },
+          seed: courseRunSeed,
+          status: vehicle.status,
+          elapsedTimeS: vehicle.elapsedTimeS,
+          positionM: vehicle.positionM,
+          energyUsedJ: vehicle.energyUsedJ,
+          energyBreakdown: { ...vehicle.energyBreakdown },
+          samples: history.map((sample) => ({ ...sample })),
+        });
+        setSavedToNotebook(true);
+      }} className="mt-4 w-full rounded-xl bg-indigo-700 px-4 py-3 font-black text-white disabled:bg-emerald-700">{savedToNotebook ? '✓ A/B比較用に保存しました' : 'A/B比較用に実験ノートへ保存'}</button>
     </section>
   );
 }
@@ -242,4 +307,8 @@ function ComparisonCard({ title, record, current }: { title: string; record?: Co
 
 function ResultNumber({ label, value, unit, compact = false }: { label: string; value: string; unit: string; compact?: boolean }) {
   return <div><p className="text-xs text-slate-500">{label}</p><p className={`${compact ? 'text-base' : 'text-xl'} font-black tabular-nums`}>{value} <span className="text-xs font-bold">{unit}</span></p></div>;
+}
+
+function ResultStat({ label, value, unit }: { label: string; value: string; unit: string }) {
+  return <div className="rounded-xl bg-slate-50 p-3"><p className="text-xs text-slate-500">{label}</p><p className="mt-1 font-black tabular-nums text-slate-900">{value} <span className="text-xs text-slate-500">{unit}</span></p></div>;
 }

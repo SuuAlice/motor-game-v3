@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import type { MotorConfig, SessionEventType } from '../engine/motorPhysics';
 import type { HistorySample } from '../engine/scoring';
+import type { CarConfig, EnergyBreakdown, VehicleSimState } from '../engine/vehiclePhysics';
 
 export const NOTEBOOK_LIMIT = 50;
 
@@ -34,20 +35,49 @@ export interface ExperimentSession {
   samples: NotebookSample[];
 }
 
+export interface CourseNotebookSample {
+  t: number;
+  positionM: number;
+  velocityMps: number;
+  rpm: number;
+  currentA: number;
+  batteryHeat: number;
+  slipRatio: number;
+  isSlipping: boolean;
+}
+
+export interface CourseRunNotebookRecord {
+  id: string;
+  savedAt: string;
+  trackId: string;
+  motorConfig: MotorConfig;
+  carConfig: CarConfig;
+  seed: number;
+  status: VehicleSimState['status'];
+  elapsedTimeS: number;
+  positionM: number;
+  energyUsedJ: number;
+  energyBreakdown: EnergyBreakdown;
+  samples: CourseNotebookSample[];
+}
+
 interface NotebookExport {
   version: 1;
   exportedAt: string;
   sessions: ExperimentSession[];
+  courseRuns?: CourseRunNotebookRecord[];
 }
 
 interface NotebookStore {
   sessions: ExperimentSession[];
+  courseRuns: CourseRunNotebookRecord[];
   pendingSession: ExperimentSession | null;
   addSession: (session: ExperimentSession) => void;
   confirmEviction: () => void;
   cancelEviction: () => void;
   replaceSessions: (sessions: ExperimentSession[]) => void;
   clear: () => void;
+  addCourseRun: (record: CourseRunNotebookRecord) => void;
 }
 
 function mean(values: number[]): number {
@@ -137,6 +167,7 @@ export const useNotebookStore = create<NotebookStore>()(
   persist(
     (set, get) => ({
       sessions: [],
+      courseRuns: [],
       pendingSession: null,
       addSession: (session) => {
         const { sessions } = get();
@@ -153,11 +184,12 @@ export const useNotebookStore = create<NotebookStore>()(
       },
       cancelEviction: () => set({ pendingSession: null }),
       replaceSessions: (sessions) => set({ sessions: sessions.slice(0, NOTEBOOK_LIMIT), pendingSession: null }),
-      clear: () => set({ sessions: [], pendingSession: null }),
+      clear: () => set({ sessions: [], courseRuns: [], pendingSession: null }),
+      addCourseRun: (record) => set((state) => ({ courseRuns: [record, ...state.courseRuns].slice(0, NOTEBOOK_LIMIT) })),
     }),
     {
       name: 'v15:notebook',
-      partialize: (state) => ({ sessions: state.sessions }),
+      partialize: (state) => ({ sessions: state.sessions, courseRuns: state.courseRuns }),
     },
   ),
 );

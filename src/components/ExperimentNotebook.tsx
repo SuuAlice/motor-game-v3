@@ -4,10 +4,12 @@ import {
   parseNotebookJson,
   stringifyNotebook,
   useNotebookStore,
+  type CourseRunNotebookRecord,
   type ExperimentSession,
 } from '../store/notebookStore';
 import type { MotorConfig, SimState } from '../engine/motorPhysics';
 import { drawMotor } from '../render/drawMotor';
+import { TRACK_BY_ID } from '../data/tracks';
 
 interface ExperimentNotebookProps {
   onClose: () => void;
@@ -184,17 +186,40 @@ function Comparison({ first, second }: { first: ExperimentSession; second: Exper
   );
 }
 
+function CourseComparison({ first, second }: { first: CourseRunNotebookRecord; second: CourseRunNotebookRecord }) {
+  const chartData = useMemo(() => {
+    const length = Math.max(first.samples.length, second.samples.length);
+    return Array.from({ length }, (_, index) => ({
+      t: first.samples[index]?.t ?? second.samples[index]?.t ?? index,
+      speedA: first.samples[index]?.velocityMps,
+      speedB: second.samples[index]?.velocityMps,
+    }));
+  }, [first, second]);
+  return <section className="rounded-lg border border-sky-200 bg-sky-50 p-4">
+    <h3 className="font-bold text-sky-950">コース走行 A/B比較</h3>
+    <div className="mt-3 h-52 w-full"><ResponsiveContainer width="100%" height="100%"><LineChart data={chartData}>
+      <CartesianGrid strokeDasharray="3 3" /><XAxis dataKey="t" /><YAxis /><Tooltip /><Legend />
+      <Line dataKey="speedA" name="A: 速度 (m/s)" stroke="#7c3aed" dot={false} />
+      <Line dataKey="speedB" name="B: 速度 (m/s)" stroke="#059669" dot={false} />
+    </LineChart></ResponsiveContainer></div>
+    <div className="mt-3 grid grid-cols-2 gap-3 text-sm"><div><b>A</b> {first.elapsedTimeS.toFixed(2)} 秒 / {first.energyUsedJ.toFixed(2)} J</div><div><b>B</b> {second.elapsedTimeS.toFixed(2)} 秒 / {second.energyUsedJ.toFixed(2)} J</div></div>
+  </section>;
+}
+
 export function ExperimentNotebook({ onClose }: ExperimentNotebookProps) {
   const sessions = useNotebookStore((s) => s.sessions);
+  const courseRuns = useNotebookStore((s) => s.courseRuns);
   const pendingSession = useNotebookStore((s) => s.pendingSession);
   const confirmEviction = useNotebookStore((s) => s.confirmEviction);
   const cancelEviction = useNotebookStore((s) => s.cancelEviction);
   const replaceSessions = useNotebookStore((s) => s.replaceSessions);
   const [detailId, setDetailId] = useState<string | null>(null);
   const [compareIds, setCompareIds] = useState<string[]>([]);
+  const [courseCompareIds, setCourseCompareIds] = useState<string[]>([]);
   const [importError, setImportError] = useState<string | null>(null);
   const detail = sessions.find((session) => session.id === detailId) ?? null;
   const comparison = compareIds.map((id) => sessions.find((session) => session.id === id)).filter(Boolean) as ExperimentSession[];
+  const courseComparison = courseCompareIds.map((id) => courseRuns.find((record) => record.id === id)).filter(Boolean) as CourseRunNotebookRecord[];
 
   function exportJson() {
     const blob = new Blob([stringifyNotebook(sessions)], { type: 'application/json' });
@@ -220,6 +245,16 @@ export function ExperimentNotebook({ onClose }: ExperimentNotebookProps) {
       </div>
       {importError && <p role="alert" className="rounded bg-red-50 p-2 text-sm text-red-700">{importError}</p>}
       {pendingSession && <div role="alert" className="rounded border border-amber-300 bg-amber-50 p-3 text-sm"><p>上限50件です。最も古い記録を削除して新しい記録を保存しますか？</p><div className="mt-2 flex gap-2"><button onClick={confirmEviction} className="rounded bg-amber-600 px-2 py-1 font-bold text-white">保存する</button><button onClick={cancelEviction} className="underline">破棄する</button></div></div>}
+      <section className="grid gap-2">
+        <h3 className="font-bold text-slate-900">車体付きコース走行</h3>
+        {courseComparison.length === 2 && <CourseComparison first={courseComparison[0]} second={courseComparison[1]} />}
+        {courseRuns.length === 0 && <p className="rounded bg-white p-4 text-sm text-slate-500">コース走行の保存記録はまだありません。</p>}
+        {courseRuns.map((record) => {
+          const selected = courseCompareIds.includes(record.id);
+          const trackName = TRACK_BY_ID.get(record.trackId)?.name ?? record.trackId;
+          return <article key={record.id} className="rounded-lg border border-sky-100 bg-white p-3 shadow-sm"><div className="flex items-start justify-between gap-3"><div><h4 className="font-bold">{trackName}</h4><p className="text-sm text-slate-600">{record.elapsedTimeS.toFixed(2)} 秒 / {record.energyUsedJ.toFixed(2)} J / {record.positionM.toFixed(2)} m</p><p className="text-xs text-slate-400">{new Date(record.savedAt).toLocaleString('ja-JP')} / seed {record.seed}</p></div><label className="text-sm"><input type="checkbox" checked={selected} onChange={() => setCourseCompareIds((ids) => selected ? ids.filter((id) => id !== record.id) : ids.length < 2 ? [...ids, record.id] : [ids[1], record.id])} /> 比較</label></div></article>;
+        })}
+      </section>
       {comparison.length === 2 && <Comparison first={comparison[0]} second={comparison[1]} />}
       {detail && <section className="rounded-lg bg-white p-4 shadow-sm"><div className="mb-3 flex justify-between"><h3 className="font-bold">詳細: {new Date(detail.startedAt).toLocaleString('ja-JP')}</h3><button onClick={() => setDetailId(null)} className="text-sm underline">閉じる</button></div><SessionDetail session={detail} /></section>}
       <div className="grid gap-2">

@@ -24,16 +24,11 @@ export function CourseRaceCanvas() {
     const ctx = canvas?.getContext('2d');
     if (!canvas || !ctx) return;
     let frame = 0;
-    let lastTime = performance.now();
-    let accumulator = 0;
-    const loop = (now: number) => {
-      accumulator += Math.min((now - lastTime) / 1000, 0.25);
-      lastTime = now;
-      let steps = 0;
-      while (accumulator >= FIXED_DT && steps < MAX_STEPS_PER_FRAME) {
+    const loop = () => {
+      const requestedSteps = useGameStore.getState().courseRunSpeed;
+      const stepsThisFrame = Math.min(requestedSteps, MAX_STEPS_PER_FRAME);
+      for (let steps = 0; steps < stepsThisFrame; steps += 1) {
         useGameStore.getState().stepCourseRun(FIXED_DT);
-        accumulator -= FIXED_DT;
-        steps += 1;
       }
       const state = useGameStore.getState().vehicleState;
       const activeTrack = TRACK_BY_ID.get(useGameStore.getState().selectedTrackId);
@@ -43,7 +38,7 @@ export function CourseRaceCanvas() {
           ? { ...activeSegment, roughness: Math.max(0.75, activeSegment.roughness), hasEnergyBudget: activeTrack.hasEnergyBudget }
           : { ...activeSegment, hasEnergyBudget: activeTrack?.hasEnergyBudget }
         : undefined;
-      drawRace(ctx, state, courseLengthM, canvas.width, canvas.height, activeVisualSegment);
+      drawRace(ctx, state, courseLengthM, canvas.width, canvas.height, activeVisualSegment, false);
       frame = requestAnimationFrame(loop);
     };
     frame = requestAnimationFrame(loop);
@@ -58,8 +53,11 @@ export function CourseRaceCanvas() {
     <div className="relative overflow-hidden rounded-2xl border border-slate-200 bg-sky-50 shadow-sm">
       <canvas ref={canvasRef} width={720} height={360} className="block w-full" />
       <div className="pointer-events-none absolute inset-0"><IndoorCourseDecor positionM={vehicleState.positionM} /></div>
-      <div className="pointer-events-none absolute left-3 top-[4.2rem] rounded-lg bg-slate-900/80 px-3 py-1.5 text-xs font-black text-white">
-        {currentSegment?.curveRadiusM !== undefined ? '⌁ カーブ区間' : currentSegment && currentSegment.slopeDeg > 0 ? `↗ 上り ${currentSegment.slopeDeg.toFixed(0)}°` : currentSegment && currentSegment.roughness >= 0.5 ? '≋ 波板区間' : track?.hasEnergyBudget ? '⚡ 省エネ区間' : '↔ 直線区間'}
+      <div className="pointer-events-none absolute left-3 top-[4.2rem] z-20 flex flex-col items-start gap-2">
+        <div className="rounded-lg bg-slate-900/80 px-3 py-1.5 text-xs font-black text-white">
+          {currentSegment?.curveRadiusM !== undefined ? '⌁ カーブ区間' : currentSegment && currentSegment.slopeDeg > 0 ? `↗ 上り ${currentSegment.slopeDeg.toFixed(0)}°` : currentSegment && currentSegment.roughness >= 0.5 ? '≋ 波板区間' : track?.hasEnergyBudget ? '⚡ 省エネ区間' : '↔ 直線区間'}
+        </div>
+        {vehicleState.motor.batteryHeat >= 0.65 && <div className="rounded-lg border border-red-300 bg-red-50 px-3 py-1.5 text-sm font-black text-red-800">⚠ 発熱</div>}
       </div>
       <div
         className="pointer-events-none absolute w-[48%] max-w-[350px] transition-transform duration-300"

@@ -74,6 +74,7 @@ export interface TestRunSample {
 }
 
 export type TestRunPhase = 'ready' | 'running' | 'aborted' | 'complete';
+export type CourseRunSpeed = 0 | 1 | 2;
 
 // 指定されたparamRangesの範囲へconfigの値をクランプする(startChallenge時に
 // 前のモードから持ち越した値がチャレンジの可動域外にならないようにする)
@@ -125,6 +126,7 @@ export interface CourseProgress {
   attempts: number;
   normalCompleted: boolean;
   exCompleted: boolean;
+  achievedObjectiveIds: string[];
   last: CourseRunRecord;
   previous?: CourseRunRecord;
   best?: CourseRunRecord;
@@ -160,8 +162,10 @@ interface GameStore {
   vehicleState: VehicleSimState;
   testRunPhase: TestRunPhase;
   testRunHistory: TestRunSample[];
+  testRunCompleted: boolean;
   courseRunPhase: TestRunPhase;
   courseRunHistory: TestRunSample[];
+  courseRunSpeed: CourseRunSpeed;
   courseProgress: Record<string, CourseProgress>;
   activeChallengeId: string | null;
   activeBrokenMotorId: string | null;
@@ -182,6 +186,7 @@ interface GameStore {
   _sessionConfig: MotorConfig | null;
   _sessionSamples: MeasurementSample[];
   _vehicleRngState: number;
+  _courseRunSeed: number;
   _vehicleSampleAccumulatorSec: number;
 
   setConfig: (partial: Partial<MotorConfig>) => void;
@@ -201,6 +206,7 @@ interface GameStore {
   stepCourseRun: (dt: number) => void;
   abortCourseRun: () => void;
   resetCourseRun: () => void;
+  setCourseRunSpeed: (speed: CourseRunSpeed) => void;
   startChallenge: (challenge: Challenge) => void;
   // チャレンジのプレイ画面からチャレンジ一覧に戻る(modeは'challenge'のまま)
   stopChallenge: () => void;
@@ -226,8 +232,10 @@ export const useGameStore = create<GameStore>()(
       vehicleState: createInitialVehicleState(DEFAULT_CONFIG, STANDARD_CAR_CONFIG),
       testRunPhase: 'ready',
       testRunHistory: [],
+      testRunCompleted: false,
       courseRunPhase: 'ready',
       courseRunHistory: [],
+      courseRunSpeed: 1,
       courseProgress: {},
       activeChallengeId: null,
       activeBrokenMotorId: null,
@@ -244,6 +252,7 @@ export const useGameStore = create<GameStore>()(
       _sessionConfig: null,
       _sessionSamples: [],
       _vehicleRngState: 1,
+      _courseRunSeed: 1,
       _vehicleSampleAccumulatorSec: 0,
 
       // チャレンジ中はlockedKeysに含まれるパラメータへの変更を無視し、
@@ -281,6 +290,7 @@ export const useGameStore = create<GameStore>()(
         selectedTrackId: trackId,
         vehicleState: createInitialVehicleState(s.config, s.carConfig),
         courseRunPhase: 'ready',
+        courseRunSpeed: 0,
         courseRunHistory: [],
       })),
 
@@ -372,6 +382,7 @@ export const useGameStore = create<GameStore>()(
           testRunPhase: 'ready',
           testRunHistory: [],
           courseRunPhase: 'ready',
+          courseRunSpeed: 0,
           courseRunHistory: [],
           _vehicleSampleAccumulatorSec: 0,
         })),
@@ -426,6 +437,7 @@ export const useGameStore = create<GameStore>()(
             vehicleState: nextVehicleState,
             testRunPhase: terminal ? 'complete' : 'running',
             testRunHistory,
+            testRunCompleted: s.testRunCompleted || nextVehicleState.status === 'finished',
             _vehicleRngState: rngState,
             _vehicleSampleAccumulatorSec: sampleAccumulator,
           };
@@ -445,8 +457,10 @@ export const useGameStore = create<GameStore>()(
         set((s) => ({
           vehicleState: createInitialVehicleState(s.config, s.carConfig),
           courseRunPhase: 'running',
+          courseRunSpeed: 1,
           courseRunHistory: [],
           _vehicleRngState: seed,
+          _courseRunSeed: seed,
           _vehicleSampleAccumulatorSec: 0,
         }));
       },
@@ -486,10 +500,10 @@ export const useGameStore = create<GameStore>()(
             carConfig: s.carConfig,
             restrictions: track.restrictions,
           };
-          const normalAchieved = evaluateObjectives(track.objectives, objectiveContext).allAchieved;
-          const exAchieved = track.exObjectives
-            ? evaluateObjectives(track.exObjectives, objectiveContext).allAchieved
-            : false;
+          const normalResult = evaluateObjectives(track.objectives, objectiveContext);
+          const exResult = track.exObjectives ? evaluateObjectives(track.exObjectives, objectiveContext) : null;
+          const normalAchieved = normalResult.allAchieved;
+          const exAchieved = exResult?.allAchieved ?? false;
           const previousProgress = s.courseProgress[track.id];
           const record: CourseRunRecord = {
             status: nextVehicleState.status,
@@ -510,6 +524,11 @@ export const useGameStore = create<GameStore>()(
               attempts: (previousProgress?.attempts ?? 0) + 1,
               normalCompleted: (previousProgress?.normalCompleted ?? false) || normalAchieved,
               exCompleted: (previousProgress?.exCompleted ?? false) || exAchieved,
+              achievedObjectiveIds: [...new Set([
+                ...(previousProgress?.achievedObjectiveIds ?? []),
+                ...normalResult.results.filter((result) => result.achieved).map((result) => result.id),
+                ...(exResult?.results.filter((result) => result.achieved).map((result) => result.id) ?? []),
+              ])],
               last: record,
               previous: previousProgress?.last,
               best,
@@ -528,9 +547,12 @@ export const useGameStore = create<GameStore>()(
 
       abortCourseRun: () => set((s) => s.courseRunPhase === 'running' ? { courseRunPhase: 'aborted' } : s),
 
+      setCourseRunSpeed: (courseRunSpeed) => set({ courseRunSpeed }),
+
       resetCourseRun: () => set((s) => ({
         vehicleState: createInitialVehicleState(s.config, s.carConfig),
         courseRunPhase: 'ready',
+        courseRunSpeed: 0,
         courseRunHistory: [],
         _vehicleSampleAccumulatorSec: 0,
       })),
@@ -641,6 +663,9 @@ export const useGameStore = create<GameStore>()(
         diagnosisProgress: s.diagnosisProgress,
         courseProgress: s.courseProgress,
         selectedTrackId: s.selectedTrackId,
+        testRunCompleted: s.testRunCompleted,
+        config: s.config,
+        carConfig: s.carConfig,
       }),
     },
   ),

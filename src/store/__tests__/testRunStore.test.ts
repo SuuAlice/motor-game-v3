@@ -19,7 +19,7 @@ describe('テスト走行store', () => {
   });
 
   beforeEach(() => {
-    useGameStore.setState({ courseProgress: {} });
+    useGameStore.setState({ courseProgress: {}, testRunCompleted: false, courseRunSpeed: 1 });
     useGameStore.getState().setMode('testRun');
     useGameStore.getState().resetTestRun();
   });
@@ -45,6 +45,7 @@ describe('テスト走行store', () => {
     expect(completed.vehicleState.status).toBe('finished');
     expect(completed.vehicleState.positionM).toBeGreaterThanOrEqual(TEST_RUN_COURSE_LENGTH_M);
     expect(completed.testRunHistory.length).toBeGreaterThan(0);
+    expect(completed.testRunCompleted).toBe(true);
 
     const snapshot = completed.vehicleState;
     useGameStore.getState().stepTestRun(DT);
@@ -78,6 +79,27 @@ describe('テスト走行store', () => {
     expect(state.courseRunHistory.length).toBeGreaterThan(0);
   });
 
+  it('走行速度を一時停止・1倍・2倍から選べる', () => {
+    useGameStore.getState().setCourseRunSpeed(0);
+    expect(useGameStore.getState().courseRunSpeed).toBe(0);
+    useGameStore.getState().setCourseRunSpeed(2);
+    expect(useGameStore.getState().courseRunSpeed).toBe(2);
+  });
+
+  it('テスト走行中にモードを移動してもコース走行を自動開始しない', () => {
+    useGameStore.getState().startTestRun();
+    useGameStore.getState().stepTestRun(DT);
+    useGameStore.getState().setMode('title');
+    useGameStore.getState().setMode('course');
+    useGameStore.getState().selectTrack('straight-10m');
+    const before = useGameStore.getState().vehicleState.elapsedTimeS;
+    useGameStore.getState().stepCourseRun(DT);
+    const state = useGameStore.getState();
+    expect(state.courseRunPhase).toBe('ready');
+    expect(state.courseRunSpeed).toBe(0);
+    expect(state.vehicleState.elapsedTimeS).toBe(before);
+  });
+
   it('コース変更時に走行状態と履歴を待機状態へ戻す', () => {
     useGameStore.getState().setMode('course');
     useGameStore.getState().startCourseRun();
@@ -108,5 +130,6 @@ describe('テスト走行store', () => {
     expect(progress.previous?.status).toBe('finished');
     expect(progress.best?.status).toBe('finished');
     expect(typeof progress.normalCompleted).toBe('boolean');
+    expect(progress.achievedObjectiveIds).toContain('straight-finish');
   });
 });
