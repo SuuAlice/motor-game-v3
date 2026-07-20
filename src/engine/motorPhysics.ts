@@ -236,9 +236,25 @@ export function didShortJustHappen(prev: SimState, next: SimState): boolean {
   return !prev.shorted && next.shorted;
 }
 
-// spec docs/spec.md §3: 固定タイムステップdtで1ステップ積分する純関数。
+// spec docs/spec.md §4.1: 固定タイムステップdtで1ステップ積分する純関数。
 // React/DOMに依存しない。rngは注入可能(テストでは決定的なモックを渡す)。
-export function step(config: MotorConfig, state: SimState, dt: number, rng: Rng = Math.random): SimState {
+// loadTorque(N·m、省略時0): 外部負荷トルク。前進方向(ω>0)を基準に固定された
+// 符号付きトルクで、式は常に "-loadTorque" として加わる(spec §4.1の-T_load項)。
+// 正の値は常にωを減少させる向きに働くため、ω>0(前進)では減速だが、ω<0(後退)
+// では逆に後退を加速する点に注意(「現在の回転方向を減速」ではない、座標系固定の
+// 符号)。後退運動に抵抗する負荷(後退を減速させたい場合)を表すには、車体層は
+// 負のloadTorqueを渡すこと。
+// 注意(Fableレビュー、Phase1): loadTorqueは反射慣性J_eff(spec §4.5)を表現できない
+// (このJはモーター自身の慣性J_NAIL+線径依存項に固定)。Phase2の車体連成では、
+// 有効慣性を上書きする引数を追加するか、各トルク項を公開して車体層側で積分するかの
+// 2案から設計時に選定すること。
+export function step(
+  config: MotorConfig,
+  state: SimState,
+  dt: number,
+  rng: Rng = Math.random,
+  loadTorque: number = 0,
+): SimState {
   const { theta, omega } = state;
   const wireGaugeMm = resolveWireGaugeMm(config);
   const parallelStrands = resolveParallelStrands(config);
@@ -292,7 +308,7 @@ export function step(config: MotorConfig, state: SimState, dt: number, rng: Rng 
   // 6. 静止摩擦クランプ(spec §3.4 要件1、spec-v1.5.md §3でT_cogを合算するよう拡張)。
   //    早期リターンでもRPM表示・発熱・崩壊判定は更新する。
   const staticFrictionLimit = MU_BRUSH * config.brushPressure;
-  if (Math.abs(omega) < OMEGA_EPS && Math.abs(tMag + tCog) <= staticFrictionLimit) {
+  if (Math.abs(omega) < OMEGA_EPS && Math.abs(tMag + tCog - loadTorque) <= staticFrictionLimit) {
     const deform = nextDeformState(0, varnished, state.highSpeedFrameCount, state.coilCollapsed);
     return {
       theta,
@@ -314,7 +330,7 @@ export function step(config: MotorConfig, state: SimState, dt: number, rng: Rng 
   const tFric = -sign(omega) * staticFrictionLimit;
   const tDrag = -C_DRAG * omega;
   const j = J_NAIL + computeKJPerTurn(wireGaugeMm, parallelStrands) * config.coilTurns;
-  const omegaDynamics = omega + ((tMag + tCog + tFric + tDrag) / j) * dt;
+  const omegaDynamics = omega + ((tMag + tCog + tFric + tDrag - loadTorque) / j) * dt;
 
   // 8. 軸ずれ振動(spec §3.5、ω²比例)をωに注入(rng消費②)
   const vibration = K_VIB * config.axisOffsetMm * omegaDynamics * omegaDynamics;
