@@ -2,6 +2,12 @@ import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { computeMaxTurns, step, type MotorConfig, type SimState } from '../engine/motorPhysics';
 import { FLICK_INITIAL_OMEGA, MAX_FLICK_OMEGA } from '../engine/constants';
+import {
+  createInitialVehicleState,
+  stepTestRun as stepVehicleTestRun,
+  type CarConfig,
+  type VehicleSimState,
+} from '../engine/vehiclePhysics';
 import type { Challenge } from '../data/challenges';
 import type { BrokenMotor } from '../data/brokenMotors';
 import {
@@ -38,6 +44,33 @@ const REST_STATE: SimState = {
   coilCollapsed: false,
   highSpeedFrameCount: 0,
 };
+
+export const STANDARD_CAR_CONFIG: CarConfig = {
+  massG: 150,
+  gearRatio: 4,
+  gearEfficiency: 0.8,
+  wheelDiameterMm: 30,
+  tireGrip: 0.7,
+  axleFriction: 0,
+  wheelAlignmentMm: 0,
+  centerOfMassHeightMm: 20,
+  motorMountOffsetMm: 0,
+};
+
+export const TEST_RUN_COURSE_LENGTH_M = 10;
+
+export interface TestRunSample {
+  t: number;
+  positionM: number;
+  velocityMps: number;
+  rpm: number;
+  currentA: number;
+  batteryHeat: number;
+  slipRatio: number;
+  isSlipping: boolean;
+}
+
+export type TestRunPhase = 'ready' | 'running' | 'aborted' | 'complete';
 
 // 指定されたparamRangesの範囲へconfigの値をクランプする(startChallenge時に
 // 前のモードから持ち越した値がチャレンジの可動域外にならないようにする)
@@ -99,7 +132,11 @@ interface GameStore {
   config: MotorConfig;
   simState: SimState;
   history: MeasurementSample[];
-  mode: 'title' | 'sandbox' | 'challenge' | 'diagnosis' | 'assembly';
+  mode: 'title' | 'testRun' | 'sandbox' | 'challenge' | 'diagnosis' | 'assembly';
+  carConfig: CarConfig;
+  vehicleState: VehicleSimState;
+  testRunPhase: TestRunPhase;
+  testRunHistory: TestRunSample[];
   activeChallengeId: string | null;
   activeBrokenMotorId: string | null;
   lockedKeys: ReadonlySet<keyof MotorConfig>;
@@ -118,6 +155,8 @@ interface GameStore {
   _sessionStartedAt: string | null;
   _sessionConfig: MotorConfig | null;
   _sessionSamples: MeasurementSample[];
+  _vehicleRngState: number;
+  _vehicleSampleAccumulatorSec: number;
 
   setConfig: (partial: Partial<MotorConfig>) => void;
   loadRecipe: (config: MotorConfig, seed: number) => void;
@@ -126,7 +165,11 @@ interface GameStore {
   flickStart: () => void;
   resetSim: () => void;
   // トップレベルのモード切替(App.tsxのモード選択画面用)。進行中のチャレンジ状態を破棄する
-  setMode: (mode: 'title' | 'sandbox' | 'challenge' | 'diagnosis' | 'assembly') => void;
+  setMode: (mode: 'title' | 'testRun' | 'sandbox' | 'challenge' | 'diagnosis' | 'assembly') => void;
+  startTestRun: () => void;
+  stepTestRun: (dt: number) => void;
+  abortTestRun: () => void;
+  resetTestRun: () => void;
   startChallenge: (challenge: Challenge) => void;
   // チャレンジのプレイ画面からチャレンジ一覧に戻る(modeは'challenge'のまま)
   stopChallenge: () => void;
@@ -147,6 +190,10 @@ export const useGameStore = create<GameStore>()(
       simState: REST_STATE,
       history: [],
       mode: 'title',
+      carConfig: STANDARD_CAR_CONFIG,
+      vehicleState: createInitialVehicleState(DEFAULT_CONFIG, STANDARD_CAR_CONFIG),
+      testRunPhase: 'ready',
+      testRunHistory: [],
       activeChallengeId: null,
       activeBrokenMotorId: null,
       lockedKeys: new Set(),
@@ -161,6 +208,8 @@ export const useGameStore = create<GameStore>()(
       _sessionStartedAt: null,
       _sessionConfig: null,
       _sessionSamples: [],
+      _vehicleRngState: 1,
+      _vehicleSampleAccumulatorSec: 0,
 
       // チャレンジ中はlockedKeysに含まれるパラメータへの変更を無視し、
       // paramRangesに含まれるパラメータはその範囲へクランプする
@@ -277,7 +326,75 @@ export const useGameStore = create<GameStore>()(
           _elapsedSec: 0,
           _sampleAccumulatorSec: 0,
           _sessionSeed: null, _sessionStartedAt: null, _sessionConfig: null, _sessionSamples: [],
+          vehicleState: createInitialVehicleState(get().config, get().carConfig),
+          testRunPhase: 'ready',
+          testRunHistory: [],
+          _vehicleSampleAccumulatorSec: 0,
         })),
+
+      startTestRun: () => {
+        const seed = createSessionSeed();
+        set((s) => ({
+          vehicleState: createInitialVehicleState(s.config, s.carConfig),
+          testRunPhase: 'running',
+          testRunHistory: [],
+          _vehicleRngState: seed,
+          _vehicleSampleAccumulatorSec: 0,
+        }));
+      },
+
+      stepTestRun: (dt) =>
+        set((s) => {
+          if (s.testRunPhase !== 'running') return s;
+          let rngState = s._vehicleRngState;
+          const nextVehicleState = stepVehicleTestRun(
+            s.config,
+            s.carConfig,
+            s.vehicleState,
+            dt,
+            TEST_RUN_COURSE_LENGTH_M,
+            () => {
+              const [value, nextState] = nextRandom(rngState);
+              rngState = nextState;
+              return value;
+            },
+          );
+          let sampleAccumulator = s._vehicleSampleAccumulatorSec + dt;
+          let testRunHistory = s.testRunHistory;
+          if (sampleAccumulator >= 0.05) {
+            sampleAccumulator -= 0.05;
+            testRunHistory = [...testRunHistory, {
+              t: nextVehicleState.elapsedTimeS,
+              positionM: nextVehicleState.positionM,
+              velocityMps: nextVehicleState.velocityMps,
+              rpm: nextVehicleState.motor.rpm,
+              currentA: nextVehicleState.motor.current,
+              batteryHeat: nextVehicleState.motor.batteryHeat,
+              slipRatio: nextVehicleState.slipRatio,
+              isSlipping: nextVehicleState.isSlipping,
+            }];
+          }
+          const terminal = nextVehicleState.status === 'finished'
+            || nextVehicleState.status === 'stalled'
+            || nextVehicleState.status === 'overheated'
+            || nextVehicleState.status === 'derailed';
+          return {
+            vehicleState: nextVehicleState,
+            testRunPhase: terminal ? 'complete' : 'running',
+            testRunHistory,
+            _vehicleRngState: rngState,
+            _vehicleSampleAccumulatorSec: sampleAccumulator,
+          };
+        }),
+
+      abortTestRun: () => set((s) => s.testRunPhase === 'running' ? { testRunPhase: 'aborted' } : s),
+
+      resetTestRun: () => set((s) => ({
+        vehicleState: createInitialVehicleState(s.config, s.carConfig),
+        testRunPhase: 'ready',
+        testRunHistory: [],
+        _vehicleSampleAccumulatorSec: 0,
+      })),
 
       startChallenge: (challenge) =>
         set((s) => {

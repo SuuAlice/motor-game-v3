@@ -4,6 +4,7 @@ import { SandboxMode } from './modes/SandboxMode'
 import { ChallengeMode } from './modes/ChallengeMode'
 import { DiagnosisMode } from './modes/DiagnosisMode'
 import { AssemblyMode } from './modes/AssemblyMode'
+import { TestRunMode } from './modes/TestRunMode'
 import { Glossary } from './components/Glossary'
 import { LegacyDataNotice } from './components/LegacyDataNotice'
 import { ExperimentNotebook } from './components/ExperimentNotebook'
@@ -15,9 +16,16 @@ function TitleScreen({ onOpenGlossary, onOpenNotebook }: { onOpenGlossary: () =>
   return (
     <div className="mx-auto flex max-w-md flex-col items-center gap-6 p-8">
       <p className="text-center text-sm text-slate-600">
-        線径、巻き方、整流子、ブラシ圧を追い込み、手巻きDCモーターの性能を測定するチューニングシミュレーター。
+        手巻きDCモーターと車体の釣り合いを追い込み、10 m直線で負荷性能を測るチューニングシミュレーター。
       </p>
       <div className="flex w-full flex-col gap-3">
+        <button
+          type="button"
+          onClick={() => setMode('testRun')}
+          className="rounded-lg bg-sky-700 px-4 py-3 font-bold text-white"
+        >
+          標準車体でテスト走行
+        </button>
         <button
           type="button"
           onClick={onOpenNotebook}
@@ -73,7 +81,7 @@ function App() {
   return (
     <main className="min-h-svh bg-slate-50">
       <div className="mx-auto flex max-w-md items-center justify-between px-4 pt-4">
-        <h1 className="text-xl font-bold text-slate-800">回れ!手作りモーター EX</h1>
+        <h1 className="text-xl font-bold text-slate-800">走れ!手作りモーターカー</h1>
         {!utilityPage && mode !== 'title' && (
           <button type="button" onClick={() => setMode('title')} className="text-sm text-slate-500 underline">
             モード選択
@@ -92,6 +100,7 @@ function App() {
           {mode === 'challenge' && <ChallengeMode />}
           {mode === 'diagnosis' && <DiagnosisMode />}
           {mode === 'assembly' && <AssemblyMode />}
+          {mode === 'testRun' && <TestRunMode />}
         </>
       )}
     </main>
