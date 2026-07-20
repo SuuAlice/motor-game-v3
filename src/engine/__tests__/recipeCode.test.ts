@@ -4,7 +4,6 @@ import { describe, expect, it } from 'vitest';
 import { decodeRecipe, encodeRecipe, RecipeCodeError, type CarAppearance, type CarRecipe } from '../recipeCode';
 import { computeMaxTurns, type MotorConfig } from '../motorPhysics';
 import type { CarConfig } from '../vehiclePhysics';
-import { encodeRecipe as encodeRecipeV15 } from '../../data/recipeCodec';
 
 function fullMotorConfig(overrides: Partial<MotorConfig> = {}): MotorConfig {
   return {
@@ -76,6 +75,38 @@ function buildRawMc2Code(rawJson: string): string {
   return `MC2-${payload}.${testChecksum(payload)}`;
 }
 
+function testClamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, Number.isFinite(value) ? value : min));
+}
+
+// v1.5(M15-)フィクスチャ生成専用のヘルパー。src/data/recipeCodec.tsは
+// Phase4完了ゲートで削除される参考資料のため、テストからはimportせず、
+// 同一の位置固定JSON配列・クランプ・base64url+チェックサムのロジックを
+// 自己完結で再実装する(engine/のテストはdata/に依存しない)
+function buildV15Code(config: MotorConfig, seed: number): string {
+  const wireGaugeMm = Math.round(testClamp(config.wireGaugeMm ?? 0.4, 0.2, 0.8) * 10) / 10;
+  const parallelStrands = (config.parallelStrands ?? 1) >= 1.5 ? 2 : 1;
+  const maxTurns = computeMaxTurns(wireGaugeMm, parallelStrands);
+  const batteryVoltage = config.batteryVoltage < 2.25 ? 1.5 : 3.0;
+  const serialized = JSON.stringify([
+    1,
+    Math.round(testClamp(config.coilTurns, 10, maxTurns)),
+    testClamp(config.slitWidthMm, 0, 5),
+    testClamp(config.sandingQuality, 0, 1),
+    testClamp(config.brushPressure, 0, 1),
+    testClamp(config.magnetStrength, 0, 1),
+    testClamp(config.magnetDistanceMm, 2, 30),
+    batteryVoltage,
+    testClamp(config.axisOffsetMm, 0, 3),
+    wireGaugeMm,
+    parallelStrands,
+    config.varnished ?? true,
+    seed >>> 0,
+  ]);
+  const payload = testEncodeBase64Url(serialized);
+  return `M15-${payload}.${testChecksum(payload)}`;
+}
+
 const validRawFields = {
   m: { ct: 80, sw: 1.5, sq: 0.9, bp: 0.3, ms: 0.9, md: 10, bv: 3, ao: 0, wg: 0.4, ps: 1, vn: true },
   c: { mg: 150, gr: 4, ge: 0.8, wd: 30, tg: 0.7, af: 0, wa: 0, ch: 20, mo: 0 },
@@ -121,7 +152,7 @@ describe('recipeCode(v2・MC2-)', () => {
 
   it('5. v1.5(M15-)コードを読み込み、モーター部分が一致し車体・外観がフォールバックになる', () => {
     const v15Config = fullMotorConfig();
-    const v15Code = encodeRecipeV15({ config: v15Config, seed: 42 });
+    const v15Code = buildV15Code(v15Config, 42);
     const decoded = decodeRecipe(v15Code);
     expect(decoded.motorConfig).toEqual(v15Config);
     expect(decoded.seed).toBe(42);
@@ -133,7 +164,7 @@ describe('recipeCode(v2・MC2-)', () => {
   });
 
   it('5b. defaultCarConfig/defaultAppearanceを渡すとv1.5読み込みでそちらが使われる', () => {
-    const v15Code = encodeRecipeV15({ config: fullMotorConfig(), seed: 1 });
+    const v15Code = buildV15Code(fullMotorConfig(), 1);
     const injectedCar = fullCarConfig({ massG: 200, gearRatio: 7 });
     const injectedAppearance = fullAppearance({ bodyColorId: 'red', accentColorId: 'orange' });
     const decoded = decodeRecipe(v15Code, injectedCar, injectedAppearance);
@@ -142,7 +173,7 @@ describe('recipeCode(v2・MC2-)', () => {
   });
 
   it('6. v1.5コードを読み込んだ結果をMC2-として書き出し直し、再度往復できる', () => {
-    const v15Code = encodeRecipeV15({ config: fullMotorConfig({ magnetDistanceMm: 3 }), seed: 7 });
+    const v15Code = buildV15Code(fullMotorConfig({ magnetDistanceMm: 3 }), 7);
     const decodedFromV15 = decodeRecipe(v15Code);
     const rewritten = encodeRecipe(decodedFromV15);
     expect(rewritten.startsWith('MC2-')).toBe(true);
@@ -176,14 +207,14 @@ describe('recipeCode(v2・MC2-)', () => {
   });
 
   it('10. defaultCarConfig/defaultAppearance省略時はエンジン内蔵フォールバックが使われる', () => {
-    const v15Code = encodeRecipeV15({ config: fullMotorConfig(), seed: 1 });
+    const v15Code = buildV15Code(fullMotorConfig(), 1);
     const decoded = decodeRecipe(v15Code);
     expect(decoded.carConfig.massG).toBe(150);
     expect(decoded.appearance.bodyColorId).toBe('kraft');
   });
 
   it('10b. default省略時に返されるcarConfig/appearanceは呼び出しごとに新規オブジェクトで、変更してもモジュール内既定値を汚染しない', () => {
-    const v15Code = encodeRecipeV15({ config: fullMotorConfig(), seed: 1 });
+    const v15Code = buildV15Code(fullMotorConfig(), 1);
     const decodedA = decodeRecipe(v15Code);
     decodedA.carConfig.massG = 999;
     decodedA.appearance.bodyColorId = 'mutated';
@@ -195,7 +226,7 @@ describe('recipeCode(v2・MC2-)', () => {
   });
 
   it('10c. 注入したdefaultCarConfig/defaultAppearanceは複製されて返り、変更しても注入元オブジェクトを汚染しない', () => {
-    const v15Code = encodeRecipeV15({ config: fullMotorConfig(), seed: 1 });
+    const v15Code = buildV15Code(fullMotorConfig(), 1);
     const injectedCar = fullCarConfig({ massG: 200 });
     const injectedAppearance = fullAppearance({ bodyColorId: 'red' });
     const decoded = decodeRecipe(v15Code, injectedCar, injectedAppearance);
@@ -268,7 +299,7 @@ describe('recipeCode(v2・MC2-)', () => {
     const decodedHigh = decodeRecipe(encodeRecipe(fullRecipe({ motorConfig: fullMotorConfig({ magnetDistanceMm: 999 }) })));
     expect(decodedHigh.motorConfig.magnetDistanceMm).toBe(30);
 
-    const v15Code = encodeRecipeV15({ config: fullMotorConfig({ magnetDistanceMm: 3 }), seed: 1 });
+    const v15Code = buildV15Code(fullMotorConfig({ magnetDistanceMm: 3 }), 1);
     const decodedFromV15 = decodeRecipe(v15Code);
     expect(decodedFromV15.motorConfig.magnetDistanceMm).toBe(3);
     const rewritten = encodeRecipe(decodedFromV15);
