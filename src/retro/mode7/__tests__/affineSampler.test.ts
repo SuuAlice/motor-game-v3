@@ -95,6 +95,59 @@ describe('computePerspectiveRowTransforms', () => {
       computePerspectiveRowTransforms(160, 120, { zoom: 1, centerXPx: 80, centerYPx: 60, horizonOffsetPx: -5 }),
     ).toThrow();
   });
+
+  // PHASE1-UNITF-REVIEW追加指摘: 縦方向(srcY=d)が退化していないことを検査する。
+  it('上端(row0)と基準行(referenceRow)のsrcY差は有意な範囲になる(退化しない、既知値)', () => {
+    const transforms = computePerspectiveRowTransforms(160, 120, {
+      zoom: 1,
+      centerXPx: 80,
+      centerYPx: 120,
+      sourceDepthSpanPx: 60,
+    });
+    const topD = transforms[0].d;
+    const referenceD = transforms[119].d;
+    // 修正前の実装では差が約2pxに潰れていた。修正後は出力縦解像度(120)に見合う
+    // 有意な範囲(半分の60px以上)を確保することを検査する。
+    expect(Math.abs(referenceD - topD)).toBeGreaterThan(60);
+    expect(topD).toBeCloseTo(1, 0);
+    expect(referenceD).toBe(120);
+  });
+
+  it('sourceDepthSpanPxを指定しない場合も既定値により有意なsrcY範囲になる', () => {
+    const transforms = computePerspectiveRowTransforms(160, 120, { zoom: 1, centerXPx: 80, centerYPx: 120 });
+    const range = Math.abs(transforms[119].d - transforms[0].d);
+    expect(range).toBeGreaterThan(60);
+  });
+
+  it('zoomを変えてもsrcYは全行で有限値になり、範囲(最大-最小)は正のまま変わらない', () => {
+    const ranges: number[] = [];
+    for (const zoom of [0.5, 1, 2, 3]) {
+      const transforms = computePerspectiveRowTransforms(160, 120, {
+        zoom,
+        centerXPx: 80,
+        centerYPx: 120,
+        sourceDepthSpanPx: 60,
+      });
+      const dValues = transforms.map((t) => t.d);
+      expect(dValues.every((d) => Number.isFinite(d))).toBe(true);
+      ranges.push(Math.max(...dValues) - Math.min(...dValues));
+    }
+    for (const range of ranges) {
+      expect(range).toBeGreaterThan(0);
+    }
+  });
+
+  it('srcYは基準行から地平線側へ向けて単調に変化する(往復・振動しない)', () => {
+    const transforms = computePerspectiveRowTransforms(160, 120, {
+      zoom: 1,
+      centerXPx: 80,
+      centerYPx: 120,
+      sourceDepthSpanPx: 60,
+    });
+    for (let row = 1; row < transforms.length; row++) {
+      expect(transforms[row].d).toBeGreaterThanOrEqual(transforms[row - 1].d);
+    }
+  });
 });
 
 describe('sampleRow', () => {

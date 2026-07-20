@@ -46,24 +46,50 @@ export interface PerspectiveRowTransformOptions {
   zoom: number;
   /** 基準行での水平サンプリング中心(ソース座標)。 */
   centerXPx: number;
-  /** 基準行での奥行きサンプリング基準(ソース座標)。 */
+  /** 基準行(referenceRow、既定=画面最下段=手前)でサンプリングする奥行き(srcY)の基準値。 */
   centerYPx: number;
   /** ズーム値がそのまま適用される基準行(既定: 画面最下段=手前)。 */
   referenceRow?: number;
   /** 地平線オフセット(正の値必須)。大きいほど遠近効果が緩やかになる。 */
   horizonOffsetPx?: number;
+  /**
+   * referenceRow(手前)からrow=0(地平線側)までにソース側で進む奥行き(srcY)の量。
+   * 正の値を渡すとrow=0側でcenterYPxより小さいsrcYへ、負の値を渡すと大きいsrcYへ
+   * スイープする(画面奥行き方向の走査方向・範囲を制御する)。
+   * 既定はoutputHeightPx * 0.5(縦方向のスイープが数px未満に潰れる退化を防ぐため、
+   * 出力縦解像度に比例した十分な既定値を持たせている)。
+   */
+  sourceDepthSpanPx?: number;
 }
 
 // 透視ズーム: 出力行ごとにサンプリング幅(a)とソースの奥行き位置(d)が変化する、
-// 床面が奥へ傾いて見える古典的なMode7透視変換。行の「奥行きdepth = row + horizonOffsetPx」
-// が地平線(depth→0の方向)に近づくほどaが大きくなり(1行が広い世界範囲を覆う=粗く見える)、
-// 手前ほどaが小さくなる(細かく見える)。cは0のまま(回転は今回使わない)。
+// 床面が奥へ傾いて見える古典的なMode7透視変換。
+//
+// 横方向(a): 行の「奥行きdepth = row + horizonOffsetPx」が地平線(depth→0の方向)に
+// 近づくほどaが大きくなり(1行が広い世界範囲を覆う=粗く見える)、手前ほどaが小さくなる
+// (細かく見える)。depthConstant = baseScale * referenceDepth により、referenceRowで
+// a === baseScale(=1/zoom)となるよう校正している。
+//
+// 縦方向(d): 「行の奥行き比 referenceDepth/depth」を横方向のスケール変化と同じ量として
+// 使うが、これをそのままcenterYPxへ加算するとreferenceDepth/depthが1に近い値同士の差に
+// なり(例: depth 60〜179の範囲では比は1〜約3で、そのままでは数px分しかsrcYが動かない)、
+// 「見取り図がほぼ2〜3行しか読めない」退化が起きる(PHASE1-UNITF-REVIEW追加指摘)。
+// これを避けるため、比の変化量(referenceDepth/depth - 1、referenceRowで0)に対して
+// 明示的なsourceDepthSpanPxを掛けることで、出力の縦解像度に見合ったsrcY範囲を
+// 独立に校正できるようにしている。cは0のまま(回転は今回使わない、将来拡張)。
 export function computePerspectiveRowTransforms(
   outputWidthPx: number,
   outputHeightPx: number,
   options: PerspectiveRowTransformOptions,
 ): AffineRowTransform[] {
-  const { zoom, centerXPx, centerYPx, referenceRow = outputHeightPx - 1, horizonOffsetPx = outputHeightPx * 0.5 } = options;
+  const {
+    zoom,
+    centerXPx,
+    centerYPx,
+    referenceRow = outputHeightPx - 1,
+    horizonOffsetPx = outputHeightPx * 0.5,
+    sourceDepthSpanPx = outputHeightPx * 0.5,
+  } = options;
 
   if (zoom <= 0) {
     throw new Error(`zoom must be positive, got ${zoom}`);
@@ -77,18 +103,19 @@ export function computePerspectiveRowTransforms(
   if (referenceDepth <= 0) {
     throw new Error(`referenceRow + horizonOffsetPx must be positive, got ${referenceDepth}`);
   }
-  // referenceRowでrowScale===baseScaleとなるよう校正する定数。
+  // referenceRowでrowScale===baseScaleとなるよう校正する定数(横方向)。
   const depthConstant = baseScale * referenceDepth;
 
   const transforms: AffineRowTransform[] = [];
   for (let row = 0; row < outputHeightPx; row++) {
     const depth = row + horizonOffsetPx;
     const rowScale = depthConstant / depth;
+    const depthRatio = referenceDepth / depth; // referenceRowで1、地平線側で1より大きい
     transforms.push({
       a: rowScale,
       b: centerXPx - rowScale * (outputWidthPx / 2),
       c: 0,
-      d: centerYPx + depthConstant * (1 / depth - 1 / referenceDepth),
+      d: centerYPx - sourceDepthSpanPx * (depthRatio - 1),
     });
   }
   return transforms;

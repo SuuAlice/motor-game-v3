@@ -17,10 +17,14 @@ export function drawMode7Perspective(
 ): void {
   ctx.clearRect(0, 0, outputWidthPx, outputHeightPx);
 
+  // 手前(referenceRow=画面最下段)は見取り図の下端付近を、奥(row=0=地平線側)は
+  // 見取り図の上端付近をサンプリングするよう校正する(縦方向のスイープが数px分に
+  // 潰れる退化を避け、複数の部屋配置を読めるだけの奥行き範囲を確保する)。
   const transforms = computePerspectiveRowTransforms(outputWidthPx, outputHeightPx, {
     zoom,
     centerXPx: FLOOR_PLAN_WIDTH_PX / 2,
-    centerYPx: FLOOR_PLAN_HEIGHT_PX / 2,
+    centerYPx: FLOOR_PLAN_HEIGHT_PX,
+    sourceDepthSpanPx: FLOOR_PLAN_HEIGHT_PX / 2,
   });
 
   for (let row = 0; row < outputHeightPx; row++) {
