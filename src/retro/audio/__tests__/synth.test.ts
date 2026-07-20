@@ -10,6 +10,7 @@ const BASE: InstrumentParams = {
   decaySec: 0.2,
   sustainLevel: 0.5,
   releaseSec: 0.2,
+  pitched: true,
 };
 
 describe('validateInstrumentParams', () => {

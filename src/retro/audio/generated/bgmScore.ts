@@ -6,6 +6,11 @@
 // 人間試遊レビュー時に既視感のある旋律でないことの確認を依頼する。
 import type { Score } from '../score';
 
+// ループ再生時の周期(拍数)。最後の音の終了時刻ではなくこの拍数を明示的に使う
+// ことで、最終ノートが拍の途中で終わっていてもループ境界がずれない
+// (PHASE1-UNITG-REVIEW追加指摘3、score.tsのcomputeLoopDurationSecで秒に変換する)。
+export const BGM_LOOP_BEATS = 8;
+
 export const BGM_SCORE: Score = {
   bpm: 100,
   channels: [

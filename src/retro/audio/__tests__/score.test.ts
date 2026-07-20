@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { computeScheduledNotes, computeScoreDurationSec, validateScore, type Score } from '../score';
+import { computeLoopDurationSec, computeScheduledNotes, computeScoreDurationSec, validateScore, type Score } from '../score';
 
 const SIMPLE_SCORE: Score = {
   bpm: 120,
@@ -32,6 +32,38 @@ describe('validateScore', () => {
     const bad: Score = { bpm: 120, channels: [{ instrument: 'kick', notes: [{ time: 0, pitchHz: 55, durationBeats: 1, velocity: 1.5 }] }] };
     expect(() => validateScore(bad)).toThrow();
   });
+
+  // PHASE1-UNITG-REVIEW追加指摘6: 有限値検証(NaN/Infinityの伝播を防ぐ)
+  it('bpmがNaN/Infinityは拒否する', () => {
+    expect(() => validateScore({ ...SIMPLE_SCORE, bpm: NaN })).toThrow();
+    expect(() => validateScore({ ...SIMPLE_SCORE, bpm: Infinity })).toThrow();
+  });
+
+  it('note.pitchHzが0以下・NaN・Infinityは拒否する', () => {
+    const mk = (pitchHz: number): Score => ({
+      bpm: 120,
+      channels: [{ instrument: 'bass', notes: [{ time: 0, pitchHz, durationBeats: 1, velocity: 1 }] }],
+    });
+    expect(() => validateScore(mk(0))).toThrow();
+    expect(() => validateScore(mk(-1))).toThrow();
+    expect(() => validateScore(mk(NaN))).toThrow();
+    expect(() => validateScore(mk(Infinity))).toThrow();
+  });
+
+  it('note.time/durationBeatsがNaN/Infinityは拒否する', () => {
+    const mkTime = (time: number): Score => ({
+      bpm: 120,
+      channels: [{ instrument: 'kick', notes: [{ time, pitchHz: 55, durationBeats: 1, velocity: 1 }] }],
+    });
+    expect(() => validateScore(mkTime(NaN))).toThrow();
+    expect(() => validateScore(mkTime(Infinity))).toThrow();
+    const mkDuration = (durationBeats: number): Score => ({
+      bpm: 120,
+      channels: [{ instrument: 'kick', notes: [{ time: 0, pitchHz: 55, durationBeats, velocity: 1 }] }],
+    });
+    expect(() => validateScore(mkDuration(NaN))).toThrow();
+    expect(() => validateScore(mkDuration(Infinity))).toThrow();
+  });
 });
 
 describe('computeScheduledNotes', () => {
@@ -60,5 +92,25 @@ describe('computeScoreDurationSec', () => {
 
   it('空の譜面は長さ0を返す', () => {
     expect(computeScoreDurationSec({ bpm: 120, channels: [] })).toBe(0);
+  });
+});
+
+describe('computeLoopDurationSec', () => {
+  it('bpm=100・8拍なら4.8秒になる(既知値、BGM_SCOREの設計値)', () => {
+    expect(computeLoopDurationSec({ bpm: 100, channels: [] }, 8)).toBeCloseTo(4.8, 5);
+  });
+
+  it('bpm=120・4拍なら2秒になる(既知値)', () => {
+    expect(computeLoopDurationSec({ bpm: 120, channels: [] }, 4)).toBeCloseTo(2, 5);
+  });
+
+  it('loopBeatsが0以下・NaN・Infinityは拒否する', () => {
+    expect(() => computeLoopDurationSec({ bpm: 120, channels: [] }, 0)).toThrow();
+    expect(() => computeLoopDurationSec({ bpm: 120, channels: [] }, -1)).toThrow();
+    expect(() => computeLoopDurationSec({ bpm: 120, channels: [] }, NaN)).toThrow();
+  });
+
+  it('bpmが不正な場合も拒否する', () => {
+    expect(() => computeLoopDurationSec({ bpm: 0, channels: [] }, 8)).toThrow();
   });
 });

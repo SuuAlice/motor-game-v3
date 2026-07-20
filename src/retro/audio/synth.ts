@@ -17,6 +17,13 @@ export interface InstrumentParams {
   decaySec: number;
   sustainLevel: number; // 0..1
   releaseSec: number;
+  /**
+   * trueなら譜面のnote.pitchHzに応じてplaybackRateを変える(bass/chord/lead)。
+   * falseなら常に基準rateのまま再生する打楽器(kick/snare、音高ではなく音色の
+   * 一撃として扱う)。PHASE1-UNITG-REVIEW指摘: playScoreが音高を無視していた
+   * 不具合の修正でsequencer.ts側の再生計画がこのフラグを参照する。
+   */
+  pitched: boolean;
 }
 
 export function validateInstrumentParams(params: InstrumentParams): void {
@@ -73,6 +80,7 @@ export const INSTRUMENT_PRESETS: Record<string, InstrumentParams> = {
     decaySec: 0.1,
     sustainLevel: 0.15,
     releaseSec: 0.1,
+    pitched: false,
   },
   snare: {
     name: 'snare',
@@ -83,6 +91,7 @@ export const INSTRUMENT_PRESETS: Record<string, InstrumentParams> = {
     decaySec: 0.06,
     sustainLevel: 0.1,
     releaseSec: 0.1,
+    pitched: false,
   },
   bass: {
     name: 'bass',
@@ -93,6 +102,7 @@ export const INSTRUMENT_PRESETS: Record<string, InstrumentParams> = {
     decaySec: 0.1,
     sustainLevel: 0.6,
     releaseSec: 0.2,
+    pitched: true,
   },
   chord: {
     name: 'chord',
@@ -103,6 +113,7 @@ export const INSTRUMENT_PRESETS: Record<string, InstrumentParams> = {
     decaySec: 0.15,
     sustainLevel: 0.4,
     releaseSec: 0.3,
+    pitched: true,
   },
   lead: {
     name: 'lead',
@@ -113,6 +124,7 @@ export const INSTRUMENT_PRESETS: Record<string, InstrumentParams> = {
     decaySec: 0.08,
     sustainLevel: 0.5,
     releaseSec: 0.2,
+    pitched: true,
   },
 };
 

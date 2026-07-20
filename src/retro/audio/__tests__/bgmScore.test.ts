@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { BGM_SCORE } from '../generated/bgmScore';
-import { computeScheduledNotes, computeScoreDurationSec, validateScore } from '../score';
+import { BGM_LOOP_BEATS, BGM_SCORE } from '../generated/bgmScore';
+import { computeLoopDurationSec, computeScheduledNotes, computeScoreDurationSec, validateScore } from '../score';
 
 describe('BGM_SCORE', () => {
   it('妥当な譜面である(8ch以内、bpm>0、全ノートが範囲内)', () => {
@@ -19,5 +19,11 @@ describe('BGM_SCORE', () => {
     const duration = computeScoreDurationSec(BGM_SCORE);
     expect(duration).toBeGreaterThan(0);
     expect(Number.isFinite(duration)).toBe(true);
+  });
+
+  it('ループ長は8拍(bpm100で4.8秒)になり、譜面の最終ノート終了時刻以上になる', () => {
+    const loopDurationSec = computeLoopDurationSec(BGM_SCORE, BGM_LOOP_BEATS);
+    expect(loopDurationSec).toBeCloseTo(4.8, 5);
+    expect(loopDurationSec).toBeGreaterThanOrEqual(computeScoreDurationSec(BGM_SCORE));
   });
 });
