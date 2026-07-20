@@ -101,16 +101,17 @@ describe('computePerspectiveRowTransforms', () => {
     const transforms = computePerspectiveRowTransforms(160, 120, {
       zoom: 1,
       centerXPx: 80,
-      centerYPx: 120,
+      centerYPx: 119,
       sourceDepthSpanPx: 60,
     });
     const topD = transforms[0].d;
     const referenceD = transforms[119].d;
     // 修正前の実装では差が約2pxに潰れていた。修正後は出力縦解像度(120)に見合う
-    // 有意な範囲(半分の60px以上)を確保することを検査する。
+    // 有意な範囲(半分の60px以上)を確保することを検査する。centerYPx=119は
+    // floorPlanSourceの有効y範囲(0..119)内の最大値に合わせた値(off-by-one回避)。
     expect(Math.abs(referenceD - topD)).toBeGreaterThan(60);
-    expect(topD).toBeCloseTo(1, 0);
-    expect(referenceD).toBe(120);
+    expect(topD).toBe(0);
+    expect(referenceD).toBe(119);
   });
 
   it('sourceDepthSpanPxを指定しない場合も既定値により有意なsrcY範囲になる', () => {
@@ -125,7 +126,7 @@ describe('computePerspectiveRowTransforms', () => {
       const transforms = computePerspectiveRowTransforms(160, 120, {
         zoom,
         centerXPx: 80,
-        centerYPx: 120,
+        centerYPx: 119,
         sourceDepthSpanPx: 60,
       });
       const dValues = transforms.map((t) => t.d);
@@ -141,7 +142,7 @@ describe('computePerspectiveRowTransforms', () => {
     const transforms = computePerspectiveRowTransforms(160, 120, {
       zoom: 1,
       centerXPx: 80,
-      centerYPx: 120,
+      centerYPx: 119,
       sourceDepthSpanPx: 60,
     });
     for (let row = 1; row < transforms.length; row++) {

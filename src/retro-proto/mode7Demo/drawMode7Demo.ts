@@ -20,10 +20,13 @@ export function drawMode7Perspective(
   // 手前(referenceRow=画面最下段)は見取り図の下端付近を、奥(row=0=地平線側)は
   // 見取り図の上端付近をサンプリングするよう校正する(縦方向のスイープが数px分に
   // 潰れる退化を避け、複数の部屋配置を読めるだけの奥行き範囲を確保する)。
+  // floorPlanSourceの有効y範囲は0<=y<FLOOR_PLAN_HEIGHT_PX(0..119)のため、
+  // 手前基準はFLOOR_PLAN_HEIGHT_PXそのものではなく-1した値(範囲内の最大値)を使う
+  // (PHASE1-UNITF-REVIEW追加指摘3: off-by-oneで最下段が常にN0になる不具合の修正)。
   const transforms = computePerspectiveRowTransforms(outputWidthPx, outputHeightPx, {
     zoom,
     centerXPx: FLOOR_PLAN_WIDTH_PX / 2,
-    centerYPx: FLOOR_PLAN_HEIGHT_PX,
+    centerYPx: FLOOR_PLAN_HEIGHT_PX - 1,
     sourceDepthSpanPx: FLOOR_PLAN_HEIGHT_PX / 2,
   });
 
