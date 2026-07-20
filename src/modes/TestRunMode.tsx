@@ -1,5 +1,4 @@
 import { TestRunResult } from '../components/TestRunResult';
-import { BATTERY_HEAT_LIMIT } from '../engine/constants';
 import { RaceCanvas } from '../render/RaceCanvas';
 import { TEST_RUN_COURSE_LENGTH_M, useGameStore } from '../store/gameStore';
 
@@ -16,6 +15,11 @@ export function TestRunMode() {
   const start = useGameStore((s) => s.startTestRun);
   const abort = useGameStore((s) => s.abortTestRun);
   const reset = useGameStore((s) => s.resetTestRun);
+  const setMode = useGameStore((s) => s.setMode);
+  const returnToGarage = () => {
+    if (phase === 'running') abort();
+    setMode('garage');
+  };
   const progress = Math.min(100, (vehicle.positionM / TEST_RUN_COURSE_LENGTH_M) * 100);
 
   const terminalLabel = vehicle.status === 'finished' ? '完走'
@@ -30,7 +34,12 @@ export function TestRunMode() {
         <p className="text-xs font-bold tracking-[0.2em] text-sky-300">10 m STRAIGHT TEST</p>
         <div className="mt-2 flex flex-wrap items-end justify-between gap-3">
           <div><h2 className="text-2xl font-black">標準車体テスト走行</h2><p className="mt-1 text-sm text-slate-300">手でそっと押し出し、現在のモーターを負荷ありで測定します。</p></div>
-          <span className="rounded-full bg-white/10 px-3 py-1 text-sm font-bold" aria-live="polite">{terminalLabel}</span>
+          <div className="flex items-center gap-2">
+            <span className="rounded-full bg-white/10 px-3 py-1 text-sm font-bold" aria-live="polite">{terminalLabel}</span>
+            <button type="button" onClick={returnToGarage} className="rounded-lg border border-white/30 px-3 py-1.5 text-sm font-bold hover:bg-white/10">
+              ← ガレージへ戻る
+            </button>
+          </div>
         </div>
       </header>
 
@@ -48,11 +57,7 @@ export function TestRunMode() {
           <div className="flex justify-between text-xs text-slate-500"><span>進行度</span><span>{progress.toFixed(0)} %</span></div>
           <div className="mt-1 h-2 overflow-hidden rounded-full bg-slate-200"><div className="h-full bg-sky-600 transition-[width]" style={{ width: `${progress}%` }} /></div>
         </div>
-        <div className="mt-3 flex items-center gap-2 text-sm">
-          <span aria-hidden="true">{vehicle.motor.batteryHeat >= 0.65 ? '⚠' : '♨'}</span>
-          <span>電池発熱 {(vehicle.motor.batteryHeat / BATTERY_HEAT_LIMIT * 100).toFixed(1)} %</span>
-          {vehicle.isSlipping && <strong className="ml-auto text-amber-700">〰 車輪空転中</strong>}
-        </div>
+        {vehicle.isSlipping && <strong className="mt-3 block text-right text-sm text-amber-700">〰 車輪空転中</strong>}
       </section>
 
       <div className="flex gap-3">

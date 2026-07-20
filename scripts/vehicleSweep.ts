@@ -122,6 +122,10 @@ for (const track of TRACKS) {
   console.log(`status=${best.state.status} time=${best.state.elapsedTimeS.toFixed(3)}s energy=${best.state.energyUsedJ.toFixed(3)}J slip=${best.state.slipRatio.toFixed(3)}`);
   console.log(`motor=${JSON.stringify(best.motor)}`);
   console.log(`car=${JSON.stringify(best.car)}`);
+  if (track.id === 'hill-climb') {
+    const gearScores = perParameter.get('gearRatio');
+    console.log(`ギヤ別最良 ${[2, 4, 7].map((ratio) => `${ratio}:1=${gearScores?.get(ratio)?.toFixed(3) ?? '完走なし'}`).join(' / ')}`);
+  }
   if (track.restrictions) {
     const exViable = viable.filter((run) => validateBuildRestrictions(run.motor, run.car, track.restrictions ?? {}).valid);
     const exBest = exViable[0];

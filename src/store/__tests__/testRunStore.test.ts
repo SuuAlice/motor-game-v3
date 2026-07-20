@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { TEST_RUN_COURSE_LENGTH_M, useGameStore } from '../gameStore';
+import { DEFAULT_GARAGE_SELECTION } from '../../data/partPresets';
 
 const DT = 1 / 120;
 
@@ -20,6 +21,7 @@ describe('テスト走行store', () => {
 
   beforeEach(() => {
     useGameStore.setState({ courseProgress: {}, testRunCompleted: false, courseRunSpeed: 1 });
+    useGameStore.getState().setGarageSelection(DEFAULT_GARAGE_SELECTION);
     useGameStore.getState().setMode('testRun');
     useGameStore.getState().resetTestRun();
   });
@@ -84,6 +86,30 @@ describe('テスト走行store', () => {
     expect(useGameStore.getState().courseRunSpeed).toBe(0);
     useGameStore.getState().setCourseRunSpeed(2);
     expect(useGameStore.getState().courseRunSpeed).toBe(2);
+  });
+
+  it('ガレージ選択を車体・電池・走行初期状態へ反映する', () => {
+    useGameStore.getState().setGarageSelection({
+      chassisId: 'light',
+      gearId: 'torque',
+      wheelId: 'large',
+      tireId: 'grip',
+      batteryId: 'single',
+      batteryPosition: 'rear',
+      bodyColorId: 'blue',
+      accentColorId: 'orange',
+    });
+    const state = useGameStore.getState();
+    expect(state.config.batteryVoltage).toBe(1.5);
+    expect(state.carConfig).toMatchObject({
+      massG: 85,
+      gearRatio: 7,
+      wheelDiameterMm: 45,
+      tireGrip: 1,
+      centerOfMassHeightMm: 16,
+    });
+    expect(state.vehicleState.positionM).toBe(0);
+    expect(state.garageSelection.bodyColorId).toBe('blue');
   });
 
   it('テスト走行中にモードを移動してもコース走行を自動開始しない', () => {

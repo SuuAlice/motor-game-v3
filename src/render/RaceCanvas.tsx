@@ -3,6 +3,7 @@ import { TEST_RUN_COURSE_LENGTH_M, useGameStore } from '../store/gameStore';
 import { drawRace } from './drawRace';
 import { CarSprite } from './CarSprite';
 import { IndoorCourseDecor } from './IndoorCourseDecor';
+import { resolveGarageColors } from '../data/partPresets';
 
 const FIXED_DT = 1 / 120;
 const MAX_STEPS_PER_FRAME = 2;
@@ -38,6 +39,8 @@ export function RaceCanvas() {
   const vehicleState = useGameStore((s) => s.vehicleState);
   const carConfig = useGameStore((s) => s.carConfig);
   const config = useGameStore((s) => s.config);
+  const garageSelection = useGameStore((s) => s.garageSelection);
+  const colors = resolveGarageColors(garageSelection);
   const launchTravel = Math.min(1, Math.max(0, vehicleState.positionM / 0.8));
 
   return (
@@ -46,14 +49,19 @@ export function RaceCanvas() {
       <div className="pointer-events-none absolute inset-0">
         <IndoorCourseDecor positionM={vehicleState.positionM} />
       </div>
+      {vehicleState.motor.batteryHeat >= 0.65 && (
+        <div className="pointer-events-none absolute left-3 top-[4.2rem] z-20 rounded-lg border border-red-300 bg-red-50 px-3 py-1.5 text-sm font-black text-red-800">
+          ⚠ 発熱
+        </div>
+      )}
       <div
         className="pointer-events-none absolute w-[48%] max-w-[350px]"
         style={{ left: `${5 + launchTravel * 18}%`, bottom: '8%' }}
       >
         <CarSprite
           wheelDiameterMm={carConfig.wheelDiameterMm}
-          batteryPositionPreset="center"
-          appearance={{ chassisColor: '#cfa368', accentColor: '#14b8a6' }}
+          batteryPositionPreset={garageSelection.batteryPosition}
+          appearance={colors}
           wheelAngleRad={vehicleState.motor.theta / carConfig.gearRatio}
           motorAngleRad={vehicleState.motor.theta}
           isSlipping={vehicleState.isSlipping}

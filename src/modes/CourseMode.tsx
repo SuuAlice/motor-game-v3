@@ -30,10 +30,16 @@ function featureLabel(segment: TrackSegment): string | null {
   return null;
 }
 
-function objectiveLabel(kind: string, value?: number): string {
+function objectiveLabel(kind: string, value?: number, track?: ValidatedTrackDefinition): string {
   if (kind === 'finish') return '完走';
   if (kind === 'targetTimeS') return `${value?.toFixed(2)}秒以内`;
   if (kind === 'maxEnergyJ') return `${value?.toFixed(2)} J以下`;
+  const restrictions = track?.restrictions;
+  if (restrictions?.maxBatteryVoltage !== undefined) return `電池電圧 ${restrictions.maxBatteryVoltage.toFixed(1)} V以下`;
+  if (restrictions?.lockedMotorParams?.axisOffsetMm !== undefined) return `軸ずれ ${restrictions.lockedMotorParams.axisOffsetMm.toFixed(1)} mm`;
+  if (restrictions?.lockedMotorParams?.wireGaugeMm !== undefined) return `線径 ${restrictions.lockedMotorParams.wireGaugeMm.toFixed(1)} mm`;
+  const wheelRange = restrictions?.carParamRanges?.wheelDiameterMm;
+  if (wheelRange) return `車輪径 ${wheelRange.min.toFixed(0)}〜${wheelRange.max.toFixed(0)} mm`;
   return '制約を守る';
 }
 
@@ -157,13 +163,13 @@ export function CourseMode() {
           <h4 className="text-sm font-black text-slate-800">通常条件</h4>
           <ul className="mt-3 space-y-2 text-sm text-slate-700">
             {selectedTrack.objectives.map((objective) => (
-              <li key={objective.id} className="flex items-center gap-2"><span className={courseProgress[selectedTrack.id]?.normalCompleted || courseProgress[selectedTrack.id]?.achievedObjectiveIds?.includes(objective.id) ? 'font-black text-emerald-700' : ''} aria-hidden="true">{courseProgress[selectedTrack.id]?.normalCompleted || courseProgress[selectedTrack.id]?.achievedObjectiveIds?.includes(objective.id) ? '✓' : '□'}</span>{objectiveLabel(objective.kind, objective.value)}</li>
+              <li key={objective.id} className="flex items-center gap-2"><span className={courseProgress[selectedTrack.id]?.normalCompleted || courseProgress[selectedTrack.id]?.achievedObjectiveIds?.includes(objective.id) ? 'font-black text-emerald-700' : ''} aria-hidden="true">{courseProgress[selectedTrack.id]?.normalCompleted || courseProgress[selectedTrack.id]?.achievedObjectiveIds?.includes(objective.id) ? '✓' : '□'}</span>{objectiveLabel(objective.kind, objective.value, selectedTrack)}</li>
             ))}
           </ul>
           <h4 className="mt-5 text-sm font-black text-violet-800">EX条件 {courseProgress[selectedTrack.id]?.normalCompleted ? '' : '🔒'}</h4>
           <ul className="mt-3 space-y-2 text-sm text-slate-700">
             {courseProgress[selectedTrack.id]?.normalCompleted ? selectedTrack.exObjectives?.map((objective) => (
-              <li key={objective.id} className="flex items-center gap-2"><span className={courseProgress[selectedTrack.id]?.exCompleted || courseProgress[selectedTrack.id]?.achievedObjectiveIds?.includes(objective.id) ? 'font-black text-violet-700' : ''} aria-hidden="true">{courseProgress[selectedTrack.id]?.exCompleted || courseProgress[selectedTrack.id]?.achievedObjectiveIds?.includes(objective.id) ? '✓' : '◇'}</span>{objectiveLabel(objective.kind, objective.value)}</li>
+              <li key={objective.id} className="flex items-center gap-2"><span className={courseProgress[selectedTrack.id]?.exCompleted || courseProgress[selectedTrack.id]?.achievedObjectiveIds?.includes(objective.id) ? 'font-black text-violet-700' : ''} aria-hidden="true">{courseProgress[selectedTrack.id]?.exCompleted || courseProgress[selectedTrack.id]?.achievedObjectiveIds?.includes(objective.id) ? '✓' : '◇'}</span>{objectiveLabel(objective.kind, objective.value, selectedTrack)}</li>
             )) : <li>通常条件をすべて達成すると解放されます。</li>}
           </ul>
           <button type="button" onClick={start} disabled={!coursesUnlocked} className="mt-5 w-full rounded-xl bg-emerald-700 px-4 py-3 font-black text-white focus:outline-none focus:ring-4 focus:ring-emerald-300 disabled:cursor-not-allowed disabled:bg-slate-400">
@@ -295,7 +301,7 @@ function ObjectiveResult({ title, objectives, evaluations, track, vehicle, motor
       ? validateBuildRestrictions(motorConfig, carConfig, track.restrictions)
       : null;
     const unevaluable = validation !== null && !validation.evaluable;
-    return <li key={objective.id} className="flex items-center justify-between gap-3 text-sm"><span>{objectiveLabel(objective.kind, objective.value)}</span><span className={`rounded-full px-2 py-1 text-xs font-black ${unevaluable ? 'bg-slate-200 text-slate-700' : achieved ? 'bg-emerald-700 text-white' : 'bg-rose-100 text-rose-800'}`}>{unevaluable ? '判定不能' : achieved ? '達成' : '未達成'}</span></li>;
+    return <li key={objective.id} className="flex items-center justify-between gap-3 text-sm"><span>{objectiveLabel(objective.kind, objective.value, track)}</span><span className={`rounded-full px-2 py-1 text-xs font-black ${unevaluable ? 'bg-slate-200 text-slate-700' : achieved ? 'bg-emerald-700 text-white' : 'bg-rose-100 text-rose-800'}`}>{unevaluable ? '判定不能' : achieved ? '達成' : '未達成'}</span></li>;
   })}</ul></div>;
 }
 

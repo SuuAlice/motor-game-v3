@@ -14,6 +14,12 @@ import { TRACK_BY_ID } from '../data/tracks';
 import { stepTrackRun } from '../engine/trackPhysics';
 import { evaluateObjectives } from '../engine/scoring';
 import {
+  DEFAULT_GARAGE_SELECTION,
+  applyGarageBattery,
+  resolveGarageBuild,
+  type GarageSelection,
+} from '../data/partPresets';
+import {
   createExperimentSession,
   useNotebookStore,
   type NotebookSample,
@@ -156,7 +162,8 @@ interface GameStore {
   config: MotorConfig;
   simState: SimState;
   history: MeasurementSample[];
-  mode: 'title' | 'testRun' | 'course' | 'sandbox' | 'challenge' | 'diagnosis' | 'assembly';
+  mode: 'title' | 'garage' | 'testRun' | 'course' | 'sandbox' | 'challenge' | 'diagnosis' | 'assembly';
+  garageSelection: GarageSelection;
   selectedTrackId: string;
   carConfig: CarConfig;
   vehicleState: VehicleSimState;
@@ -196,7 +203,8 @@ interface GameStore {
   flickStart: () => void;
   resetSim: () => void;
   // トップレベルのモード切替(App.tsxのモード選択画面用)。進行中のチャレンジ状態を破棄する
-  setMode: (mode: 'title' | 'testRun' | 'course' | 'sandbox' | 'challenge' | 'diagnosis' | 'assembly') => void;
+  setMode: (mode: 'title' | 'garage' | 'testRun' | 'course' | 'sandbox' | 'challenge' | 'diagnosis' | 'assembly') => void;
+  setGarageSelection: (partial: Partial<GarageSelection>) => void;
   selectTrack: (trackId: string) => void;
   startTestRun: () => void;
   stepTestRun: (dt: number) => void;
@@ -227,6 +235,7 @@ export const useGameStore = create<GameStore>()(
       simState: REST_STATE,
       history: [],
       mode: 'title',
+      garageSelection: DEFAULT_GARAGE_SELECTION,
       selectedTrackId: 'straight-10m',
       carConfig: STANDARD_CAR_CONFIG,
       vehicleState: createInitialVehicleState(DEFAULT_CONFIG, STANDARD_CAR_CONFIG),
@@ -267,6 +276,17 @@ export const useGameStore = create<GameStore>()(
           const ranged = clampToRanges({ ...s.config, ...filtered }, s.paramRanges);
           return { config: clampToCoilWindow(ranged) };
         }),
+
+      setGarageSelection: (partial) => set((s) => {
+        const garageSelection = { ...s.garageSelection, ...partial };
+        const { carConfig } = resolveGarageBuild(garageSelection);
+        return {
+          garageSelection,
+          carConfig,
+          config: applyGarageBattery(s.config, garageSelection),
+          vehicleState: createInitialVehicleState(applyGarageBattery(s.config, garageSelection), carConfig),
+        };
+      }),
 
       loadRecipe: (config, seed) => {
         finishActiveSession(get());
@@ -666,6 +686,7 @@ export const useGameStore = create<GameStore>()(
         testRunCompleted: s.testRunCompleted,
         config: s.config,
         carConfig: s.carConfig,
+        garageSelection: s.garageSelection,
       }),
     },
   ),

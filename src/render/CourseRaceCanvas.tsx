@@ -5,6 +5,7 @@ import { CarSprite } from './CarSprite';
 import { drawRace } from './drawRace';
 import { IndoorCourseDecor } from './IndoorCourseDecor';
 import { resolveSegmentAt } from '../engine/trackPhysics';
+import { resolveGarageColors } from '../data/partPresets';
 
 const FIXED_DT = 1 / 120;
 const MAX_STEPS_PER_FRAME = 2;
@@ -15,6 +16,8 @@ export function CourseRaceCanvas() {
   const vehicleState = useGameStore((state) => state.vehicleState);
   const carConfig = useGameStore((state) => state.carConfig);
   const config = useGameStore((state) => state.config);
+  const garageSelection = useGameStore((state) => state.garageSelection);
+  const colors = resolveGarageColors(garageSelection);
   const track = TRACK_BY_ID.get(selectedTrackId);
   const courseLengthM = track?.segments.reduce((sum, segment) => sum + segment.lengthM, 0) ?? 10;
   const currentSegment = track ? resolveSegmentAt(track, vehicleState.positionM)?.segment : undefined;
@@ -65,8 +68,8 @@ export function CourseRaceCanvas() {
       >
         <CarSprite
           wheelDiameterMm={carConfig.wheelDiameterMm}
-          batteryPositionPreset="center"
-          appearance={{ chassisColor: '#cfa368', accentColor: '#14b8a6' }}
+          batteryPositionPreset={garageSelection.batteryPosition}
+          appearance={colors}
           wheelAngleRad={vehicleState.motor.theta / carConfig.gearRatio}
           motorAngleRad={vehicleState.motor.theta}
           isSlipping={vehicleState.isSlipping}

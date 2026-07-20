@@ -16,9 +16,9 @@ interface CarSpriteProps {
 }
 
 const BATTERY_X: Record<BatteryPositionPreset, number> = {
-  rear: 390,
+  rear: 410,
   center: 445,
-  front: 500,
+  front: 480,
 };
 
 export function CarSprite({
@@ -91,12 +91,15 @@ export function CarSprite({
           <path d="M430 196h-14l-8 4M430 208h-14l-8-4" fill="none" stroke="#94a3b8" strokeWidth="3" strokeLinecap="round" />
         </g>
 
+        <g data-part="battery-wires" fill="none" strokeWidth="3" strokeLinecap="round">
+          <path d={`M${batteryX - 10} 185 C${batteryX - 28} 182 444 190 430 196`} stroke="#dc2626" />
+          <path d={`M${batteryX + 91} 187 C${batteryX + 105} 222 468 222 430 208`} stroke="#1f2937" />
+        </g>
         <g data-part="battery" transform={`translate(${batteryX - 445} 0)`}>
           <rect x="435" y="173" width="94" height="29" rx="9" fill="#e5e7eb" stroke="#9ca3af" strokeWidth="2" />
           <rect x="468" y="173" width="31" height="29" fill={appearance.accentColor} />
           <rect x="529" y="181" width="7" height="13" fill="#9ca3af" />
-          <path d="M435 185c-18-4-4 17-9 17" fill="none" stroke="#dc2626" strokeWidth="3" />
-          <path d="M535 187c18 30-57 36-105 22" fill="none" stroke="#1f2937" strokeWidth="3" />
+          <circle cx="435" cy="185" r="3" fill="#dc2626" />
         </g>
 
         <g data-part="flag">
