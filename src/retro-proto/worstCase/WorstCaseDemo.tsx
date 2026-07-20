@@ -7,8 +7,13 @@
 // DevToolsのCPU 4倍スロットリングは人間が手動で有効化する必要があり、実際の
 // p50/p95/p99・欠落フレーム数・メモリ推移は「人間実測待ち」として記録する
 // (推測値で埋めない、docs/phase1-plan.md §9.1)。
+//
+// PHASE1-UNITH-REVIEW指摘対応: 縦持ち(コンテナが縦長)では内部解像度を270×480へ
+// 転置し、Mode7/色演算インセットは横並びが入らない幅のとき縦積みへ切り替える
+// (常に整数座標で成立させる)。停止ボタンで計測(FrameProbe)も確実に止める。
 import { useEffect, useRef, useState } from 'react';
 import { computeIntegerScale } from '../../retro/canvas/integerScale';
+import { selectOrientedResolution } from '../../retro/canvas/orientation';
 import { buildDummyTrackLoop } from '../overheadView/track';
 import { drawOverheadView } from '../overheadView/drawOverheadView';
 import { computePerspectiveRowTransforms, sampleRow } from '../../retro/mode7/affineSampler';
@@ -20,14 +25,22 @@ import { INSTRUMENT_PRESETS, renderInstrumentSample, type InstrumentParams } fro
 import { BGM_LOOP_BEATS, BGM_SCORE } from '../../retro/audio/generated/bgmScore';
 import { playScore, type PlaybackHandle, type SampleBank } from '../../retro/audio/sequencer';
 import { MOTOR_SAMPLE_PARAMS, MOTOR_SOUND_PARAMS, applyMotorGain, applyMotorPlaybackRate } from '../../retro/audio/motorSound';
+import { computeInsetLayout } from './insetLayout';
 
 const TRACK_POINTS = buildDummyTrackLoop();
-const CONTENT_W = 480;
-const CONTENT_H = 270;
+const LANDSCAPE_CONTENT = { w: 480, h: 270 };
 const MODE7_INSET_W = 120;
 const MODE7_INSET_H = 90;
 const COLOROPS_INSET_W = 140;
 const COLOROPS_INSET_H = 60;
+const INSET_MARGIN = 4;
+const INSET_SIZES = {
+  colorOpsWidthPx: COLOROPS_INSET_W,
+  colorOpsHeightPx: COLOROPS_INSET_H,
+  mode7WidthPx: MODE7_INSET_W,
+  mode7HeightPx: MODE7_INSET_H,
+  marginPx: INSET_MARGIN,
+};
 const DUMMY_SPEED_POINTS_PER_SEC = 18;
 const INSTRUMENT_SEED = 20260721;
 const WARMUP_MS = 2000;
@@ -48,7 +61,9 @@ export function WorstCaseDemo() {
   const motorSourceRef = useRef<AudioBufferSourceNode | null>(null);
   const motorGainRef = useRef<GainNode | null>(null);
 
-  const scaleResult = computeIntegerScale(containerSize.w, containerSize.h, CONTENT_W, CONTENT_H);
+  const contentRes = selectOrientedResolution(containerSize.w, containerSize.h, LANDSCAPE_CONTENT);
+  const scaleResult = computeIntegerScale(containerSize.w, containerSize.h, contentRes.w, contentRes.h);
+  const insetLayout = computeInsetLayout(contentRes.w, INSET_SIZES);
 
   useEffect(() => {
     const el = containerRef.current;
@@ -112,14 +127,20 @@ export function WorstCaseDemo() {
     motorGainRef.current = null;
   }
 
+  function stopMeasurement() {
+    probeRef.current?.stop();
+    probeRef.current = null;
+    setMeasuring(false);
+  }
+
   useEffect(() => {
     if (!running || !scaleResult.fits) return;
     const canvas = canvasRef.current;
     if (!canvas) return;
 
     const offscreen = document.createElement('canvas');
-    offscreen.width = CONTENT_W;
-    offscreen.height = CONTENT_H;
+    offscreen.width = contentRes.w;
+    offscreen.height = contentRes.h;
     const offCtx = offscreen.getContext('2d');
     const ctx = canvas.getContext('2d');
     if (!offCtx || !ctx) return;
@@ -139,9 +160,9 @@ export function WorstCaseDemo() {
 
       // 1) 俯瞰走行ビュー(全面)
       const carIndex = Math.floor(progress) % TRACK_POINTS.length;
-      drawOverheadView(offCtx, { trackPoints: TRACK_POINTS, carIndex }, CONTENT_W, CONTENT_H);
+      drawOverheadView(offCtx, { trackPoints: TRACK_POINTS, carIndex }, contentRes.w, contentRes.h);
 
-      // 2) Mode7透視(右上インセット)
+      // 2) Mode7透視(インセット、横並び/縦積みはcomputeInsetLayoutが決める)
       const zoomPhase = (Math.sin(now / 2000) + 1) / 2;
       const zoom = 1 + zoomPhase * 1.2;
       const mode7Transforms = computePerspectiveRowTransforms(MODE7_INSET_W, MODE7_INSET_H, {
@@ -150,21 +171,19 @@ export function WorstCaseDemo() {
         centerYPx: FLOOR_PLAN_HEIGHT_PX - 1,
         sourceDepthSpanPx: FLOOR_PLAN_HEIGHT_PX / 2,
       });
-      const insetX = CONTENT_W - MODE7_INSET_W - 4;
-      const insetY = 4;
+      const { x: mode7X, y: mode7Y } = insetLayout.mode7;
       offCtx.fillStyle = PALETTE.N0;
-      offCtx.fillRect(insetX - 1, insetY - 1, MODE7_INSET_W + 2, MODE7_INSET_H + 2);
+      offCtx.fillRect(mode7X - 1, mode7Y - 1, MODE7_INSET_W + 2, MODE7_INSET_H + 2);
       for (let row = 0; row < MODE7_INSET_H; row++) {
         const pixels = sampleRow(mode7Transforms[row], MODE7_INSET_W, getFloorPlanPixel);
         for (let x = 0; x < MODE7_INSET_W; x++) {
           offCtx.fillStyle = pixels[x] ?? PALETTE.N0;
-          offCtx.fillRect(insetX + x, insetY + row, 1, 1);
+          offCtx.fillRect(mode7X + x, mode7Y + row, 1, 1);
         }
       }
 
-      // 3) 色演算(煙+発光、左上インセット)
-      const colorOpsX = 4;
-      const colorOpsY = 4;
+      // 3) 色演算(煙+発光、インセット)
+      const { x: colorOpsX, y: colorOpsY } = insetLayout.colorOps;
       offCtx.fillStyle = PALETTE.N7;
       offCtx.fillRect(colorOpsX - 1, colorOpsY - 1, COLOROPS_INSET_W + 2, COLOROPS_INSET_H + 2);
       for (const cell of buildGlowComparison(colorOpsX, colorOpsY).withOperation) {
@@ -184,13 +203,13 @@ export function WorstCaseDemo() {
       }
 
       ctx.clearRect(0, 0, canvas.width, canvas.height);
-      ctx.drawImage(offscreen, 0, 0, CONTENT_W, CONTENT_H, 0, 0, canvas.width, canvas.height);
+      ctx.drawImage(offscreen, 0, 0, contentRes.w, contentRes.h, 0, 0, canvas.width, canvas.height);
 
       raf = requestAnimationFrame(loop);
     };
     raf = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(raf);
-  }, [running, scaleResult.fits, scaleResult.contentWidthPx, scaleResult.contentHeightPx]);
+  }, [running, contentRes.w, contentRes.h, scaleResult.fits, scaleResult.contentWidthPx, scaleResult.contentHeightPx, insetLayout]);
 
   async function handleStart() {
     await ensureAudioStarted();
@@ -200,10 +219,14 @@ export function WorstCaseDemo() {
   function handleStop() {
     setRunning(false);
     stopAudio();
+    // 描画を止めたら、進行中の計測もアイドル時間を含めないよう確実に止める
+    // (PHASE1-UNITH-REVIEW指摘4)。
+    stopMeasurement();
   }
 
   function handleMeasure() {
     if (!running) return;
+    stopMeasurement(); // 既存の計測が万一残っていれば先に止める
     setMeasuring(true);
     setResult(null);
     const probe = new FrameProbe();
@@ -211,6 +234,7 @@ export function WorstCaseDemo() {
     probe.start(WARMUP_MS, COLLECT_MS, (r) => {
       setResult(r);
       setMeasuring(false);
+      probeRef.current = null;
     });
   }
 
@@ -229,9 +253,12 @@ export function WorstCaseDemo() {
         <button onClick={handleMeasure} disabled={!running || measuring} className="rounded bg-slate-800 px-3 py-1 text-white disabled:opacity-40">
           {measuring ? `計測中(ウォームアップ${WARMUP_MS / 1000}秒+計測${COLLECT_MS / 1000}秒)...` : '計測開始'}
         </button>
+        <span className="text-xs text-slate-600">
+          content: {contentRes.w}×{contentRes.h} / 倍率: {scaleResult.fits ? `${scaleResult.scale}x` : '不成立'}
+        </span>
       </div>
 
-      <div ref={containerRef} className="relative h-[360px] overflow-hidden bg-slate-800">
+      <div ref={containerRef} className="relative min-h-[500px] flex-1 overflow-hidden bg-slate-800">
         {scaleResult.fits ? (
           <canvas
             ref={canvasRef}
@@ -247,7 +274,7 @@ export function WorstCaseDemo() {
           />
         ) : (
           <div className="flex h-full items-center justify-center px-4 text-center text-white">
-            現在のviewportではcontent {CONTENT_W}×{CONTENT_H}が等倍でも収まりません(fits=false)。
+            現在のviewportではcontent {contentRes.w}×{contentRes.h}が等倍でも収まりません(fits=false)。
           </div>
         )}
       </div>
@@ -269,6 +296,14 @@ export function WorstCaseDemo() {
               {result.memoryStats.available
                 ? `開始${(result.memoryStats.startBytes / 1e6).toFixed(1)}MB → 終了${(result.memoryStats.endBytes / 1e6).toFixed(1)}MB(ピーク${(result.memoryStats.peakBytes / 1e6).toFixed(1)}MB、差分${(result.memoryStats.deltaBytes / 1e6).toFixed(1)}MB)`
                 : '取得不可(performance.memoryはChrome限定の非標準APIです)'}
+            </li>
+            <li>
+              GCらしき下降(performance.memoryからの推定、発生の断定はしません):{' '}
+              {result.gcIndicator.available
+                ? result.gcIndicator.gcLikeDropCount > 0
+                  ? `あり(${result.gcIndicator.gcLikeDropCount}回、しきい値${(result.gcIndicator.dropThresholdBytes / 1e6).toFixed(1)}MB、最大下降${(result.gcIndicator.maxDropBytes / 1e6).toFixed(2)}MB)`
+                  : 'なし'
+                : '取得不可'}
             </li>
           </ul>
         ) : (

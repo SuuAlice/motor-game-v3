@@ -68,9 +68,43 @@ export function computeMemoryStats(samples: MemorySample[]): MemoryStats {
   return { available: true, startBytes, endBytes, peakBytes, deltaBytes: endBytes - startBytes };
 }
 
+export interface GcIndicator {
+  available: boolean;
+  /** 隣接サンプル間でdropThresholdBytes以上ヒープが減少した回数。GCの断定はしない。 */
+  gcLikeDropCount: number;
+  /** 観測された最大の下降量(bytes)。 */
+  maxDropBytes: number;
+  dropThresholdBytes: number;
+}
+
+const DEFAULT_GC_DROP_THRESHOLD_BYTES = 1_000_000; // 1MB以上の下降をGCらしき挙動の目安とする
+
+// PHASE1-UNITH-REVIEW指摘3: 計画§9.1「GCの有無」を出すため、隣接メモリサンプル間の
+// 有意な下降をGCらしき挙動として検出する純関数。performance.memory自体が非標準の
+// 推定値であるため、GC発生を断定はせず「らしき下降」として報告する。
+export function computeGcIndicator(
+  samples: MemorySample[],
+  dropThresholdBytes: number = DEFAULT_GC_DROP_THRESHOLD_BYTES,
+): GcIndicator {
+  if (samples.length < 2) {
+    return { available: false, gcLikeDropCount: 0, maxDropBytes: 0, dropThresholdBytes };
+  }
+  let gcLikeDropCount = 0;
+  let maxDropBytes = 0;
+  for (let i = 1; i < samples.length; i++) {
+    const drop = samples[i - 1].usedJsHeapSizeBytes - samples[i].usedJsHeapSizeBytes;
+    if (drop > 0) {
+      maxDropBytes = Math.max(maxDropBytes, drop);
+      if (drop >= dropThresholdBytes) gcLikeDropCount++;
+    }
+  }
+  return { available: true, gcLikeDropCount, maxDropBytes, dropThresholdBytes };
+}
+
 export interface FrameProbeResult {
   frameStats: FrameStats;
   memoryStats: MemoryStats;
+  gcIndicator: GcIndicator;
 }
 
 interface PerformanceMemory {
@@ -84,39 +118,75 @@ function readUsedJsHeapSizeBytes(): number | null {
 
 // ブラウザ専用: 指定したウォームアップ時間の後、指定した計測時間だけ
 // requestAnimationFrameの間隔とメモリ使用量をサンプリングする。
+//
+// PHASE1-UNITH-REVIEW指摘2・4への対応:
+// - メモリサンプリングはwarmupMs経過後にのみ開始し(計測開始/終了の瞬間を
+//   確実にサンプリングする)、ウォームアップ中は収集しない
+// - フレーム間隔も、ウォームアップ境界をまたいだ最初の post-warmup フレームでは
+//   区間を記録せず(直前がウォームアップ中の時刻のため)、そのフレームを新たな
+//   基準点として以降の間隔だけを収集する
+// - 二重start・stop後は既存のrAF/intervalを確実に止め、古いonCompleteを呼ばない
 export class FrameProbe {
   private durationsMs: number[] = [];
   private memorySamples: MemorySample[] = [];
   private lastFrameTime: number | null = null;
+  private hasCrossedWarmup = false;
   private rafId = 0;
   private memoryIntervalId: ReturnType<typeof setInterval> | null = null;
+  private running = false;
 
   start(warmupMs: number, collectMs: number, onComplete: (result: FrameProbeResult) => void): void {
+    if (this.running) {
+      this.stop();
+    }
+    this.running = true;
     this.durationsMs = [];
     this.memorySamples = [];
     this.lastFrameTime = null;
-    const startTime = performance.now();
+    this.hasCrossedWarmup = false;
 
-    this.memoryIntervalId = setInterval(() => {
+    const startTime = performance.now();
+    let memoryIntervalStarted = false;
+
+    const sampleMemoryNow = () => {
       const bytes = readUsedJsHeapSizeBytes();
       if (bytes !== null) {
         this.memorySamples.push({ atMs: performance.now() - startTime, usedJsHeapSizeBytes: bytes });
       }
-    }, 200);
+    };
 
     const tick = (now: number) => {
+      if (!this.running) return;
       const elapsed = now - startTime;
-      if (this.lastFrameTime !== null && elapsed >= warmupMs) {
-        this.durationsMs.push(now - this.lastFrameTime);
+      const inWarmup = elapsed < warmupMs;
+
+      if (!inWarmup) {
+        if (!this.hasCrossedWarmup) {
+          // ウォームアップ境界をまたいだ最初のフレーム: 直前(ウォームアップ中)の
+          // 時刻との差分はフレーム間隔として使わず、ここを新たな基準点にする。
+          this.hasCrossedWarmup = true;
+          this.lastFrameTime = now;
+        } else if (this.lastFrameTime !== null) {
+          this.durationsMs.push(now - this.lastFrameTime);
+          this.lastFrameTime = now;
+        }
+
+        if (!memoryIntervalStarted) {
+          memoryIntervalStarted = true;
+          sampleMemoryNow(); // 計測開始時点のサンプルを確実に含める
+          this.memoryIntervalId = setInterval(sampleMemoryNow, 200);
+        }
       }
-      this.lastFrameTime = now;
 
       if (elapsed >= warmupMs + collectMs) {
-        this.stop();
-        onComplete({
+        sampleMemoryNow(); // 計測終了時点のサンプルを確実に含める
+        const result: FrameProbeResult = {
           frameStats: computeFrameStats(this.durationsMs),
           memoryStats: computeMemoryStats(this.memorySamples),
-        });
+          gcIndicator: computeGcIndicator(this.memorySamples),
+        };
+        this.stop();
+        onComplete(result);
         return;
       }
       this.rafId = requestAnimationFrame(tick);
@@ -125,10 +195,15 @@ export class FrameProbe {
   }
 
   stop(): void {
+    this.running = false;
     cancelAnimationFrame(this.rafId);
     if (this.memoryIntervalId !== null) {
       clearInterval(this.memoryIntervalId);
       this.memoryIntervalId = null;
     }
+  }
+
+  isRunning(): boolean {
+    return this.running;
   }
 }

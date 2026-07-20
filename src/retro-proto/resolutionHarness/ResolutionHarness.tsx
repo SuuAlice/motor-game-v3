@@ -4,6 +4,7 @@
 // ブリット拡大する(整数拡大の実装方針、Unit A)。
 import { useEffect, useRef, useState } from 'react';
 import { computeIntegerScale, computeIntegerScalePhysical } from '../../retro/canvas/integerScale';
+import { selectOrientedResolution } from '../../retro/canvas/orientation';
 import { loadPixelFonts } from '../../retro/text/pixelFonts';
 import { generateDummyWindingRecord } from './dummyWindingRecord';
 import { drawWindingTrace } from './drawWindingTrace';
@@ -58,7 +59,9 @@ export function ResolutionHarness() {
 
   const candidate = CANDIDATES.find((c) => c.id === candidateId) ?? CANDIDATES[2];
   const material = MATERIALS.find((m) => m.id === materialId) ?? MATERIALS[0];
-  const contentRes = material.layer === 'ui' ? candidate.ui : candidate.world;
+  const landscapeRes = material.layer === 'ui' ? candidate.ui : candidate.world;
+  // art-spec §2.1: スマホ縦画面は内部解像度を縦持ち用に転置する(PHASE1-UNITH-REVIEW指摘)。
+  const contentRes = selectOrientedResolution(containerSize.w, containerSize.h, landscapeRes);
 
   const dpr = typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1;
   const scaleResult = usePhysical

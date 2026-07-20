@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { computeFrameStats, computeMemoryStats } from '../frameProbe';
+import { computeFrameStats, computeGcIndicator, computeMemoryStats } from '../frameProbe';
 
 describe('computeFrameStats', () => {
   it('空配列は全項目0を返す', () => {
@@ -59,5 +59,54 @@ describe('computeMemoryStats', () => {
     ]);
     expect(stats.peakBytes).toBe(5000);
     expect(stats.deltaBytes).toBe(-1000);
+  });
+});
+
+// PHASE1-UNITH-REVIEW指摘3: GCらしき下降の検出(GC発生の断定はしない)。
+describe('computeGcIndicator', () => {
+  it('サンプルが2件未満はavailable=falseを返す', () => {
+    expect(computeGcIndicator([])).toMatchObject({ available: false });
+    expect(computeGcIndicator([{ atMs: 0, usedJsHeapSizeBytes: 1000 }])).toMatchObject({ available: false });
+  });
+
+  it('しきい値以上の下降を1回だけ含む場合、既定しきい値(1MB)で既知値どおり検出する', () => {
+    const samples = [
+      { atMs: 0, usedJsHeapSizeBytes: 5_000_000 },
+      { atMs: 200, usedJsHeapSizeBytes: 5_500_000 }, // 上昇(GCではない)
+      { atMs: 400, usedJsHeapSizeBytes: 2_000_000 }, // 3.5MB下降 → GCらしき下降
+      { atMs: 600, usedJsHeapSizeBytes: 2_100_000 }, // 上昇
+    ];
+    const indicator = computeGcIndicator(samples);
+    expect(indicator).toMatchObject({ available: true, gcLikeDropCount: 1, maxDropBytes: 3_500_000 });
+  });
+
+  it('しきい値未満の下降はgcLikeDropCountへ数えないが、maxDropBytesには反映する', () => {
+    const samples = [
+      { atMs: 0, usedJsHeapSizeBytes: 1_000_000 },
+      { atMs: 200, usedJsHeapSizeBytes: 900_000 }, // 10万byte下降(1MB未満)
+    ];
+    const indicator = computeGcIndicator(samples, 1_000_000);
+    expect(indicator.gcLikeDropCount).toBe(0);
+    expect(indicator.maxDropBytes).toBe(100_000);
+  });
+
+  it('しきい値を明示指定できる', () => {
+    const samples = [
+      { atMs: 0, usedJsHeapSizeBytes: 1_000_000 },
+      { atMs: 200, usedJsHeapSizeBytes: 800_000 }, // 20万byte下降
+    ];
+    expect(computeGcIndicator(samples, 100_000).gcLikeDropCount).toBe(1);
+    expect(computeGcIndicator(samples, 500_000).gcLikeDropCount).toBe(0);
+  });
+
+  it('単調増加するメモリはgcLikeDropCount=0・maxDropBytes=0になる', () => {
+    const samples = [
+      { atMs: 0, usedJsHeapSizeBytes: 1_000_000 },
+      { atMs: 200, usedJsHeapSizeBytes: 2_000_000 },
+      { atMs: 400, usedJsHeapSizeBytes: 3_000_000 },
+    ];
+    const indicator = computeGcIndicator(samples);
+    expect(indicator.gcLikeDropCount).toBe(0);
+    expect(indicator.maxDropBytes).toBe(0);
   });
 });
