@@ -154,8 +154,19 @@ Suuから「PHASE1-REVIEW-FIX承認・全文指示」で4件とも承認され�
 
 Suuから提案のあったWeb Audio ノード生成のDI化(呼び出し順序を自動テストする案)は、上記のボタン無効化だけで再現した無音の直接原因には対応済みのため、今回のスコープでは見送り、将来必要になった時点で改めて検討する。
 
-### 10.2 最悪ケースタブでモーター音がBGMより大きすぎる
-音源タブの無音問題とは別事象。WorstCaseDemo内のBGM・モーター各GainNode、チャンネルゲイン、同時発音数、RPM変化時の音量、Convolver経路を調査中。BGMの旋律が判別できつつモーターの存在感も残る基準音量案を数値で提示する予定。
+### 10.2 最悪ケースタブでモーター音がBGMより大きすぎる → 原因判明(修正は未実装、承認待ち)
+
+音源タブの無音問題(§10.1)とは別事象。`sequencer.ts`の`computeChannelMix`は「合算クリップ防止として、チャンネル数で等分したゲインを返す」設計で、BGM(`bgmScore.ts`、kick/snare/bass/chord/leadの5ch)は各chが`masterGain(既定1)/5=0.2`を基準ゲインとし、さらに`note.velocity`(0.4〜0.9)を掛ける。つまりBGMの各音は最大でも約0.18(kick: 0.2×0.9)、持続音でも約0.08〜0.14(bass: 0.2×0.7、chord: 0.2×0.4)程度に抑えられている。
+
+一方`WorstCaseDemo.tsx`の`ensureAudioStarted`はモーター用GainNodeを`audioCtx.createGain()`で生成した直後は初期値(Web Audio既定の1.0)のまま、その後アニメーションループ内で毎フレーム`applyMotorGain(motorGainRef.current, rpm)`を呼ぶ。`computeMotorGain(rpm)`は`rpm>0 ? 1 : 0`という二値のみを返す設計で、WorstCaseDemoのダミーRPM(`baseRpm*(0.4+0.6*sin)`)は常に正のため、実質的に**モーター音は常時gain=1.0固定**になる。実測したモーターサンプルの持続部振幅(sustainLevel=0.8付近)と合わせると、モーターは常時振幅約0.8で鳴り続けるのに対し、BGMの各chは間欠的に振幅0.08〜0.18程度――音量比でおおよそ4〜10倍、モーター側が優勢な設計になっている。BGM側が「合算クリップ防止のためチャンネル数で等分」という抑制を受けているのに対し、モーター側にはその種の抑制が一切ない、という設計上の非対称が根本原因。
+
+**修正案(未実装、承認待ち)**: `motorSound.ts`の`computeMotorGain`を二値(0/1)から、BGMのチャンネル予算と同程度の上限を持つ連続値へ変更する。
+- `MOTOR_MASTER_GAIN = 0.2`(BGMの1ch分の基準ゲイン0.2と同水準、bass/chordの持続音より大きくkickの瞬間最大値と同程度になるよう選定)を新設し、`computeMotorGain(rpm, baseRpm)`は`rpm<=0`で0、`rpm>0`で`MOTOR_MASTER_GAIN * Math.min(1, rpm / baseRpm)`(RPMに比例して0→上限まで連続的に増加、上限でクランプ)を返すよう変更する。二値のON/OFFではなくRPMに応じた滑らかな音量変化になるという副次効果もある。
+- 回帰テストとして、(a) `MOTOR_MASTER_GAIN <= 1 / 5`(BGMの1ch分の予算を超えない)、(b) `computeMotorGain`がrpmについて単調非減少であること、(c) `rpm=0`で厳密に0、`rpm>=baseRpm`で`MOTOR_MASTER_GAIN`ちょうどになること、を固定する。
+- `computeMotorPlaybackRate`(ピッチ)は今回のバランス問題とは無関係のため変更しない。
+- BGM側のミュート・モーター側の完全無音化は行わない(Suu指示の制約どおり)。
+
+数値の妥当性(0.2という具体値・BGMとの相対比)は試遊確認が必要なため、実装後に人間再レビューを依頼する。
 
 ### 10.3 WorstCaseDemoの性能(60fps未達)
 §9の実測値(16.7ms超過約19.2%)を受け、ボトルネック調査中。原因調査後、仕様に沿った品質低下策(描画品質を下げる、時間を飛ばさない)を提案する。
