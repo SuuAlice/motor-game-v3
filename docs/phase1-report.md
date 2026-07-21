@@ -318,7 +318,7 @@ Suu承認を受け、`insetLayout`を`useMemo(() => computeInsetLayout(contentRe
 - 共通48色の最終値: **確定(2026-07-22)**: 値変更なしで現行48色を最終凍結(§13、`docs/phase1-palette-audit.md`)
 - 1MB超過時のフォントサブセット方針: 現状超過していないため未着手
 - Phase 1ゲート後の試作画面の削除または保持: 未確定
-- BGM・モーター音の試聴承認: 未実施(残響A/B6項目は確定済み、旋律・ループ継ぎ目・音割れ・RPM追従・生成/WAV保存の試聴は未実施)
+- BGM・モーター音の試聴承認: **確定(2026-07-22)**: A〜E全項目、人間試聴「すべてOK」(詳細は本書§14)
 
 ## 12. 統合美術レビュー結果・Phase 1ゲート達成(2026-07-22)
 
@@ -335,3 +335,17 @@ Task#WINDING-AGE-RADIUS(乱巻き軌跡の半径包絡修正)・Task#GARAGE-DENS
 全48色をランプ別・添字順に並べたスウォッチ画像(`docs/phase1-submission/palette/palette-48-swatch.png`)による**人間承認: 2026-07-22、OK・問題なし**。指摘事項なし。
 
 **結論: 現行48色を値変更なしで最終凍結する**(`palette.ts`・検査script・既存testは無変更)。
+
+## 14. サンプルベース音源 最終監査・人間承認(2026-07-22)
+
+`docs/art-spec.md`冒頭チェックリストの「サンプルベース音源の技術検証」に対応する最終監査。確認対象A〜Eそれぞれについて、静的コード根拠・自動検査・人間試聴の区分は以下のとおり。診断用の一時UIは追加せず、既存のAudioDemo(音源タブ)のみで確認した。
+
+- **A) BGMの旋律・和音が自然で既存曲を想起させない**: 静的根拠は`bgmScore.ts`のオリジナル作曲コメントのみ。自動検査は不可能(既存曲比較サービスは不使用の方針のため)。**人間試聴のみで判定**: 2026-07-22「OK」。これは機械的な著作権保証ではなく、**人間による独立性確認の記録**である。
+- **B) サンプル/ループ境界のクリック・継ぎ目・音割れ**: `computeEnvelopeGain`の実際の最終サンプル時刻(durationSecちょうどではなく`(Math.ceil(durationSec*sampleRate)-1)/sampleRate`)でのgainが、release区間の一次関数から導いた解析式`sustainLevel/(releaseSec*sampleRate)`と一致し、かつクリック安全閾値0.01(-40dB相当、実測値の最大約28倍のマージン)以下であることを、INSTRUMENT_PRESETS全5種+MOTOR_SAMPLE_PARAMS×sampleRate(44100/48000)の計12件で回帰テスト化(`synth.test.ts`・`motorSound.test.ts`)。波形(正規化振幅±1)によらず実サンプル振幅がenvelope値を上界とすることを根拠とする。人間試聴でも継ぎ目・音割れなしを2026-07-22確認。
+- **C) モーター音RPM連続追従・RPM=0無音**: `computeMotorPlaybackRate`/`computeMotorGain`の単調性・境界値(rpm=0で厳密0、rpm>=baseRpmでクランプ)は既存testで検証済み(無変更)。人間試聴でRPMスライダー全域の連続追従・0無音を2026-07-22確認。
+- **D) 音源生成成功・WAV保存/再生・形式(sample rate/channels/duration)**: `wavEncoder.ts`のヘッダ構造(RIFF/WAVE/PCM16/mono)は既存testで既知値検証済み(無変更)。今回、実ブラウザ(Playwright経由headless Chromium、一時領域のみ・リポジトリ非投入)で5楽器すべてを生成・WAV保存し、RIFF/WAVE/fmt/data識別子・PCM=1・mono・sampleRate=44100・duration実測値(kick 0.300s/snare 0.200s/bass 0.500s/chord 0.800s/lead 0.600s、いずれも期待値と一致)・非無音(振幅最大0.928〜0.995)を確認した。人間試聴でも保存したWAVの再生を2026-07-22確認。
+- **E) 既合格の残響6項目を壊していないか**: `reverb.ts`/`mixLevels.ts`/`sequencer.ts`はTASK-AUDIO-REVERB-MIX-AESTHETIC(dry=0.5/wet=0.5確定)以降無変更。人間試聴で残響ON/OFF・BGM+motorバランス等6項目の体感が変わっていないことを2026-07-22再確認。
+
+**人間承認: 2026-07-22、A〜E全項目「すべてOK」**。
+
+これにより、art-spec冒頭チェックリスト(内部解像度・乱巻き軌跡・マスターパレット・色演算・Mode 7・サンプルベース音源)の**技術検証6項目すべてが[x]**になった。ただし、これはPhase 1の全作業完了を意味しない。以下は引き続き未確定・未実施のまま残る(§11参照): 性能実測の3viewport(縦390×844/横844×390/1920×1080)への正式割当と実機再測定、初回ロード転送量の実ブラウザNetworkタブ実測、キーボード操作・フォーカス視認・縦持ち表示の実機確認、Phase1ゲート後の試作画面(`retro-proto.html`等)の削除または保持判断、1MB超過時のフォントサブセット方針(現状超過なし)。
