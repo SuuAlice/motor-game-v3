@@ -77,6 +77,18 @@ export interface PerspectiveRowTransformOptions {
 // これを避けるため、比の変化量(referenceDepth/depth - 1、referenceRowで0)に対して
 // 明示的なsourceDepthSpanPxを掛けることで、出力の縦解像度に見合ったsrcY範囲を
 // 独立に校正できるようにしている。cは0のまま(回転は今回使わない、将来拡張)。
+//
+// Task#MODE7-ZOOM-FIX(Suu承認): 当初はsourceDepthSpanPxの偏差にzoomを掛けていなかった
+// ため、zoomを時間で往復させるアニメーション(見取り図ズーム、Mode7Demo補助表示)で
+// 横方向(a)だけがzoomに応じて伸縮し、縦方向(d)は完全に固定されたままになっていた。
+// 結果、画面各行が指す奥行き位置(どのsrcYを見るか)が毎フレーム不変のまま横幅だけが
+// 伸縮するため、「カメラが近づく」のではなく「床が横方向にだけ歪んで見える」不具合になった
+// (人間レビュー指摘)。修正として、横方向と同じbaseScale=1/zoomをsourceDepthSpanPxの
+// 偏差にも掛け、水平・垂直の変化率を同期させる。referenceRowではdepthRatio-1===0のため
+// zoomによらずd===centerYPxが維持される(基準行の中心座標は不変)。zoom<1(ズームアウト)
+// 側でsrcYが有効範囲外に出ることはあるが、これは通常のズームアウト(より広い範囲が
+// 見える)として許容し、本関数内ではクランプしない(クランプは行ごとの写像を潰し、
+// 透視歪みを生むため禁止)。
 export function computePerspectiveRowTransforms(
   outputWidthPx: number,
   outputHeightPx: number,
@@ -115,7 +127,7 @@ export function computePerspectiveRowTransforms(
       a: rowScale,
       b: centerXPx - rowScale * (outputWidthPx / 2),
       c: 0,
-      d: centerYPx - sourceDepthSpanPx * (depthRatio - 1),
+      d: centerYPx - sourceDepthSpanPx * baseScale * (depthRatio - 1),
     });
   }
   return transforms;

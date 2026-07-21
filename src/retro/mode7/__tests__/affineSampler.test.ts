@@ -120,7 +120,10 @@ describe('computePerspectiveRowTransforms', () => {
     expect(range).toBeGreaterThan(60);
   });
 
-  it('zoomを変えてもsrcYは全行で有限値になり、範囲(最大-最小)は正のまま変わらない', () => {
+  it('zoomを変えてもsrcYは全行で有限値になり、範囲(最大-最小)は正になる', () => {
+    // Task#MODE7-ZOOM-FIX: dの偏差にbaseScale=1/zoomを掛けるようになったため、
+    // zoomが大きいほど範囲(max-min)は縮む(横方向aの縮み方と同期する、既知の設計)。
+    // 「範囲が変わらない」ことは検査しない。有限性と正であることのみを検査する。
     const ranges: number[] = [];
     for (const zoom of [0.5, 1, 2, 3]) {
       const transforms = computePerspectiveRowTransforms(160, 120, {
@@ -138,9 +141,61 @@ describe('computePerspectiveRowTransforms', () => {
     }
   });
 
+  // Task#MODE7-ZOOM-FIX(Suu承認、テスト不変条件1・2): zoomアニメーション時に
+  // 横方向(a)だけが伸縮し縦方向(d)が固定されたまま、という不具合の回帰テスト。
+  // 修正後は、reference中心からのdの偏差もaと同じ1/zoom比で縮み、referenceRowの
+  // 中心座標(srcX/srcY)自体はzoomによらず不変であることを検査する。
+  it('zoom増加でaと、reference中心からのdの偏差が同じ1/zoom比で縮む(横縦の変化率が同期する)', () => {
+    const centerYPx = 119;
+    const row = 60;
+    const t1 = computePerspectiveRowTransforms(160, 120, {
+      zoom: 1,
+      centerXPx: 80,
+      centerYPx,
+      sourceDepthSpanPx: 60,
+    })[row];
+    const t22 = computePerspectiveRowTransforms(160, 120, {
+      zoom: 2.2,
+      centerXPx: 80,
+      centerYPx,
+      sourceDepthSpanPx: 60,
+    })[row];
+    const aRatio = t22.a / t1.a;
+    const dDeviationRatio = (t22.d - centerYPx) / (t1.d - centerYPx);
+    expect(dDeviationRatio).toBeCloseTo(aRatio, 5);
+    expect(aRatio).toBeCloseTo(1 / 2.2, 5);
+  });
+
+  it('referenceRowのsrcX/srcY中心はzoomによらず不変', () => {
+    for (const zoom of [0.5, 1, 1.5, 2.2]) {
+      const transforms = computePerspectiveRowTransforms(160, 120, {
+        zoom,
+        centerXPx: 80,
+        centerYPx: 119,
+        sourceDepthSpanPx: 60,
+      });
+      const referenceRow = 119;
+      const { srcX, srcY } = mapDestXToSource(transforms[referenceRow], 80);
+      expect(srcX).toBe(80);
+      expect(srcY).toBe(119);
+    }
+  });
+
   it('srcYは基準行から地平線側へ向けて単調に変化する(往復・振動しない)', () => {
     const transforms = computePerspectiveRowTransforms(160, 120, {
       zoom: 1,
+      centerXPx: 80,
+      centerYPx: 119,
+      sourceDepthSpanPx: 60,
+    });
+    for (let row = 1; row < transforms.length; row++) {
+      expect(transforms[row].d).toBeGreaterThanOrEqual(transforms[row - 1].d);
+    }
+  });
+
+  it.each([0.5, 1, 1.5, 2.2])('zoom=%sでもsrcYは基準行から地平線側へ向けて単調に変化する', (zoom) => {
+    const transforms = computePerspectiveRowTransforms(160, 120, {
+      zoom,
       centerXPx: 80,
       centerYPx: 119,
       sourceDepthSpanPx: 60,

@@ -20,12 +20,26 @@ function demoTransforms(zoom: number) {
 }
 
 describe('drawMode7Demoの校正値(実際のデモ条件)', () => {
-  it.each([0.5, 1, 1.5, 2.2])('zoom=%sで全出力行の中心サンプルsrcYが有効範囲(0..FLOOR_PLAN_HEIGHT_PX-1)に収まる', (zoom) => {
+  // Task#MODE7-ZOOM-FIX(Suu承認、テスト不変条件5): 実際のMode7Demo補助アニメーションは
+  // ZOOM_MIN=1〜ZOOM_MAX=2.2の範囲のみを使う(Mode7Demo.tsx)。このレンジではsrcYが
+  // 有効範囲内に収まることを検査する。
+  it.each([1, 1.5, 2.2])('zoom=%s(実デモ範囲)で全出力行の中心サンプルsrcYが有効範囲(0..FLOOR_PLAN_HEIGHT_PX-1)に収まる', (zoom) => {
     const transforms = demoTransforms(zoom);
     for (const transform of transforms) {
       const { srcY } = mapDestXToSource(transform, OUTPUT_W / 2);
       expect(srcY).toBeGreaterThanOrEqual(0);
       expect(srcY).toBeLessThanOrEqual(FLOOR_PLAN_HEIGHT_PX - 1);
+    }
+  });
+
+  // Task#MODE7-ZOOM-FIX(Suu承認、テスト不変条件6): zoom<1(ズームアウト)側でsrcYが
+  // 有効範囲外に出ることは、より広い範囲を見せる通常のズームアウトとして許容する
+  // (affineSampler.ts側でクランプしない設計のため)。範囲内であることは要求しない。
+  it('zoom=0.5(ズームアウト)では範囲外のsrcYが生じうる。有限値であることのみ検査する', () => {
+    const transforms = demoTransforms(0.5);
+    for (const transform of transforms) {
+      const { srcY } = mapDestXToSource(transform, OUTPUT_W / 2);
+      expect(Number.isFinite(srcY)).toBe(true);
     }
   });
 
