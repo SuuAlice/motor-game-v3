@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { MOTOR_SOUND_PARAMS, computeMotorGain, computeMotorPlaybackRate } from '../motorSound';
+import { MOTOR_SAMPLE_PARAMS, MOTOR_SOUND_PARAMS, computeMotorGain, computeMotorPlaybackRate } from '../motorSound';
 import { MOTOR_MASTER_GAIN } from '../mixLevels';
+import { computeEnvelopeGain } from '../synth';
 
 describe('computeMotorPlaybackRate', () => {
   it('rpm===baseRpmならplaybackRate=1になる(既知値)', () => {
@@ -74,4 +75,33 @@ describe('computeMotorGain', () => {
     expect(() => computeMotorGain(8000, 0)).toThrow();
     expect(() => computeMotorGain(8000, -1)).toThrow();
   });
+});
+
+// Task#AUDIO-FINAL-AUDIT(Suu承認、Bクリック/継ぎ目監査の補強): モーター音は
+// source.loop=trueで連続ループ再生されるため、synth.test.tsの5プリセットと同様に
+// 実際の最終サンプル時刻(durationSecちょうどではなく1サンプル手前)でのgainが
+// クリック安全閾値以下であることを検証する(根拠はsynth.test.ts側のコメント参照)。
+describe('モーター音ループ境界のクリック安全性(Task#AUDIO-FINAL-AUDIT)', () => {
+  const CLICK_SAFE_THRESHOLD = 0.01;
+  const SAMPLE_RATES = [44100, 48000];
+
+  for (const sampleRate of SAMPLE_RATES) {
+    it(`sampleRate=${sampleRate}: 実際の最終サンプル時刻でのgainがクリック安全閾値以下、かつ解析式と一致する`, () => {
+      const params = MOTOR_SAMPLE_PARAMS;
+      const sampleCount = Math.ceil(params.durationSec * sampleRate);
+      const lastSampleT = (sampleCount - 1) / sampleRate;
+
+      const firstGain = computeEnvelopeGain(0, params);
+      const lastGain = computeEnvelopeGain(lastSampleT, params);
+      const loopBoundaryDiff = Math.abs(lastGain - firstGain);
+
+      expect(firstGain).toBe(0);
+
+      const analyticLastGain = params.sustainLevel / (params.releaseSec * sampleRate);
+      expect(lastGain).toBeCloseTo(analyticLastGain, 6);
+
+      expect(lastGain).toBeLessThanOrEqual(CLICK_SAFE_THRESHOLD);
+      expect(loopBoundaryDiff).toBeLessThanOrEqual(CLICK_SAFE_THRESHOLD);
+    });
+  }
 });
