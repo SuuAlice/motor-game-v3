@@ -172,11 +172,19 @@ Suuから提案のあったWeb Audio ノード生成のDI化(呼び出し順序�
 
 **確認結果**(実Chromium/Playwright、音源タブ): RPM=0で再生開始した直後のgain値は0(無音)、RPM=16000(baseRpmの2倍)で再生開始した直後のgain値は0.2(`MOTOR_MASTER_GAIN`ちょうど、クランプ済み)を確認。playbackRateも別途0.25/2として正しく反映されていることを確認済み。数値の妥当性(0.2という具体値・BGMとの相対比)は試遊確認が必要なため、人間再レビューを依頼する。
 
-### 10.3 WorstCaseDemoの性能(60fps未達)・追加で発見したクラッシュ
+### 10.3 WorstCaseDemoの性能(60fps未達)・初回フレームクラッシュ
 
-§9の実測値(16.7ms超過約19.2%)を受け、ボトルネック調査は未着手(Task#17)。
+**初回フレームクラッシュ → 原因判明・修正済み(コミット`84a9983`、人間再レビュー待ち)**
 
-**追加で発見した不具合(未調査・Task#17のスコープで対応予定)**: Task#18/#19の実ブラウザ確認中に、WorstCaseDemoタブで「開始」ボタンを押すと描画ループの初回フレームで確実に例外`Cannot read properties of undefined (reading 'x')`(`drawOverheadView.ts`の`const camX = Math.round(car.x - contentWidthPx / 2);`、`car = state.trackPoints[state.carIndex]`が`undefined`)が発生し、描画が完全に止まることを発見した。Playwright(headless Chromium)で3回連続再現し、いずれも初回フレームで確実に発生している。`buildDummyTrackLoop()`自体は144点の非空配列を返すことを確認済みで、`state.carIndex`が範囲外(または`NaN`)になる経路がある可能性が高い。音源(BGM・モーター音)は描画ループより前の`ensureAudioStarted()`で開始されるため今回のTask#18/#19の確認結果には影響していないが、WorstCaseDemo自体の性能測定(Task#17)を妨げる重大度の高い不具合のため、Task#17着手時に優先して原因調査する。
+**現象**: WorstCaseDemoタブで「開始」を押すと描画ループの初回フレームで例外`Cannot read properties of undefined (reading 'x')`(`drawOverheadView.ts`の`const camX = Math.round(car.x - contentWidthPx / 2);`、`car = state.trackPoints[state.carIndex]`が`undefined`)が発生し、描画が完全に止まる。Playwright(headless Chromium)で3回連続再現していた。
+
+**環境差の説明(プロジェクトリード環境で754フレームの計測が成功していた事実との整合)**: 描画ループ内で`elapsedSec = Math.min((now - lastTime) / 1000, 0.25)`(`now`=`requestAnimationFrame`のコールバック引数、`lastTime`=直前に同期的に取得した`performance.now()`)を計算し、`progress += elapsedSec * DUMMY_SPEED_POINTS_PER_SEC`でトラック上の進行度を積み上げ、`carIndex = Math.floor(progress) % TRACK_POINTS.length`で車の位置indexを求めていた。デバッグ計測の結果、headless Chromium実行時、初回コールバックで`now`が直前の`lastTime`よりわずかに(実測約12ms)小さくなる事象を確認した(`elapsedSec ≈ -0.0121`、`progress ≈ -0.218`、`carIndex = -1`)。JSの`%`演算子は負数に対して数学的な剰余ではなく符号を保持した値を返す(`-1 % 144 === -1`)ため、`TRACK_POINTS[-1]`が`undefined`になっていた。`elapsedSec`の上限(0.25秒)はクランプしていたが下限(0秒)はクランプしておらず、`now < lastTime`を想定していなかったのが直接原因。
+
+`requestAnimationFrame`のコールバックタイムスタンプは仕様上、直前の`performance.now()`呼び出しより前になることは実質的に起こらない(通常の垂直同期に基づくため)。今回observedした逆転は、headless/自動化環境固有の仮想時刻・タイマー精度丸め(セキュリティ上の理由でperformance系APIの精度が意図的に落とされていることがある)に起因すると考えられる。プロジェクトリードの実ブラウザ環境ではこの逆転が発生せず754フレームの計測に成功していたことと整合する。ただし、この一致していないタイミングの発生条件そのものを完全には特定できていない(Chromiumの内部実装への深追いはしていない)ため、断定はしていない。
+
+**修正内容**: (1) `elapsedSec`に下限0秒のクランプを追加(根本原因への直接対応)。(2) `carIndex`の算出を`computeCarIndex`(`src/retro-proto/worstCase/carIndex.ts`)という純関数へ抽出し、「`trackLength`は正の整数」「返り値は常に0以上`trackLength`未満の有限整数」という不変条件を強制する(数学的modulo `((n%m)+m)%m`で負のprogressも正しく折り返す、trackLengthが不正なら例外)。配列アクセスをoptional chainingで隠す対症療法はしていない。テスト8件(`carIndex.test.ts`)で既知値・負のprogress・巨大なprogress・不正なtrackLength/NaN/Infinityの拒否を固定した。Playwrightで3回連続再現していたクラッシュが解消し、241フレーム連続で例外なく描画が継続することを確認済み。
+
+**性能測定(60fps未達)のボトルネック調査**: 上記クラッシュにより自動計測ができていなかったため未着手。次のセッションで着手する。
 
 ## 11. 未決事項(人間/Suu判断待ち、docs/phase1-plan.md §13より継承)
 
