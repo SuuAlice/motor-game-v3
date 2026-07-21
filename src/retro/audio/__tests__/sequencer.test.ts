@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { computeChannelMix, computePlaybackPlan } from '../sequencer';
+import { BGM_MASTER_GAIN } from '../mixLevels';
 import type { InstrumentParams } from '../synth';
 import type { Score } from '../score';
 
@@ -58,6 +59,15 @@ describe('computeChannelMix', () => {
   it('masterGainが負の場合は拒否する', () => {
     expect(() => computeChannelMix(2, -1)).toThrow();
   });
+
+  // Task#19: BGMとモーター音の合算クリップ防止のため、既定のmasterGainは
+  // 1ではなくBGM_MASTER_GAIN(mixLevels.ts)を使う。
+  it('masterGainを省略した場合はBGM_MASTER_GAINを使う(既知値)', () => {
+    const mix = computeChannelMix(4);
+    for (const c of mix) {
+      expect(c.gain).toBeCloseTo(BGM_MASTER_GAIN / 4, 5);
+    }
+  });
 });
 
 // PHASE1-UNITG-REVIEW追加指摘: playScoreがpitchHz/velocity/durationSecを
@@ -90,9 +100,10 @@ describe('computePlaybackPlan', () => {
       ],
     };
     const plan = computePlaybackPlan(score, TEST_PRESETS);
-    // channelCount=2 → channel gain=0.5ずつ
-    expect(plan[0].gain).toBeCloseTo(0.5 * 0.8, 5);
-    expect(plan[1].gain).toBeCloseTo(0.5 * 0.4, 5);
+    // channelCount=2 → channel gain=BGM_MASTER_GAIN/2ずつ(Task#19以降の既定予算)
+    const channelGain = BGM_MASTER_GAIN / 2;
+    expect(plan[0].gain).toBeCloseTo(channelGain * 0.8, 5);
+    expect(plan[1].gain).toBeCloseTo(channelGain * 0.4, 5);
   });
 
   it('stopTimeSecはstartTimeSec+durationSec(拍→秒換算後)になる(既知値)', () => {

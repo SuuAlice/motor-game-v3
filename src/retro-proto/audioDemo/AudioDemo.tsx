@@ -21,6 +21,7 @@ import {
   applyMotorPlaybackRate,
 } from '../../retro/audio/motorSound';
 import { encodeWavMono } from '../../retro/audio/wavEncoder';
+import { computeAudioTabUiState, type GenerationStatus } from './audioTabUiState';
 
 const INSTRUMENT_SEED = 20260721;
 
@@ -36,11 +37,14 @@ function downloadWav(buffer: AudioBuffer, filename: string): void {
 }
 
 export function AudioDemo() {
-  const [status, setStatus] = useState('未生成');
+  const [genStatus, setGenStatus] = useState<GenerationStatus>('idle');
+  const [genDetail, setGenDetail] = useState<string | undefined>(undefined);
   const [reverbOn, setReverbOn] = useState(true);
   const [bgmPlaying, setBgmPlaying] = useState(false);
   const [motorPlaying, setMotorPlaying] = useState(false);
   const [rpm, setRpm] = useState<number>(MOTOR_SOUND_PARAMS.baseRpm);
+
+  const uiState = computeAudioTabUiState(genStatus, genDetail);
 
   const audioCtxRef = useRef<AudioContext | null>(null);
   const sampleBankRef = useRef<SampleBank>({});
@@ -49,11 +53,26 @@ export function AudioDemo() {
   const motorSourceRef = useRef<AudioBufferSourceNode | null>(null);
   const motorGainNodeRef = useRef<GainNode | null>(null);
   const motorBufferRef = useRef<AudioBuffer | null>(null);
+  const isMountedRef = useRef(true);
+  // 二重生成防止のガードはRef(同期的・即時反映)で行う。genStatus(state)は
+  // Reactの再レンダーを経て初めてボタンのdisabled属性に反映されるため、
+  // 同一tick内で複数回呼ばれた場合はstateのクロージャが古い値を読んでしまい
+  // 防げない(Task#18)。
+  const isGeneratingRef = useRef(false);
 
   // アンマウント時にBGM・モーター音を停止し、AudioContextを解放する
-  // (PHASE1-UNITG-REVIEW追加指摘4)。
+  // (PHASE1-UNITG-REVIEW追加指摘4)。isMountedRefは生成処理の途中で
+  // アンマウントされた場合に、閉じたAudioContextへ触れないためのガード
+  // (Task#18修正)。
   useEffect(() => {
+    // StrictMode(開発時)はmount→effectクリーンアップ→再mountを合成的に
+    // 実行するため、クリーンアップでfalseにした値をここで明示的にtrueへ
+    // 戻さないと、実際のマウント後もisMountedRef.currentがfalseのまま
+    // 固定され、生成処理が`if (!isMountedRef.current) return`で無限に
+    // 「生成中です…」から進まなくなる(実ブラウザ確認で発見)。
+    isMountedRef.current = true;
     return () => {
+      isMountedRef.current = false;
       bgmHandleRef.current?.stop();
       motorSourceRef.current?.stop();
       audioCtxRef.current?.close();
@@ -67,27 +86,47 @@ export function AudioDemo() {
     return audioCtxRef.current;
   }
 
+  // Task#18修正: 生成完了前に再生系ボタンを押すと`if (!buffer) return`で
+  // 完全に無反応・無音のまま何もフィードバックが出ない不具合があった。
+  // 生成中の二重生成防止(先頭でgenerating中なら早期return)、失敗時に
+  // generatingへ固定されないようのエラー状態への遷移、アンマウント後は
+  // 状態更新も閉じたAudioContextへの接続も行わないガードを追加した。
   async function handleGenerateInstruments() {
-    setStatus('生成中...');
-    const audioCtx = getAudioContext();
-    const sampleRate = audioCtx.sampleRate;
+    if (isGeneratingRef.current) return;
+    isGeneratingRef.current = true;
+    setGenStatus('generating');
+    setGenDetail(undefined);
 
-    for (const [name, params] of Object.entries(INSTRUMENT_PRESETS)) {
-      const offlineCtx = new OfflineAudioContext(1, Math.ceil(params.durationSec * sampleRate), sampleRate);
-      const buffer = await renderInstrumentSample(offlineCtx, params as InstrumentParams, INSTRUMENT_SEED);
-      sampleBankRef.current[name] = buffer;
+    try {
+      const audioCtx = getAudioContext();
+      const sampleRate = audioCtx.sampleRate;
+
+      for (const [name, params] of Object.entries(INSTRUMENT_PRESETS)) {
+        const offlineCtx = new OfflineAudioContext(1, Math.ceil(params.durationSec * sampleRate), sampleRate);
+        const buffer = await renderInstrumentSample(offlineCtx, params as InstrumentParams, INSTRUMENT_SEED);
+        sampleBankRef.current[name] = buffer;
+      }
+      if (!isMountedRef.current) return;
+
+      // ConvolverNodeはここで一度だけ作成・接続する(再生のたびに重複connectしない)。
+      const irSamples = generateImpulseResponseSamples(DEFAULT_REVERB_PARAMS);
+      const reverbNode = createConvolverFromSamples(audioCtx, irSamples, DEFAULT_REVERB_PARAMS.sampleRate);
+      reverbNode.connect(audioCtx.destination);
+      reverbNodeRef.current = reverbNode;
+
+      const motorOfflineCtx = new OfflineAudioContext(1, Math.ceil(MOTOR_SAMPLE_PARAMS.durationSec * sampleRate), sampleRate);
+      motorBufferRef.current = await renderInstrumentSample(motorOfflineCtx, MOTOR_SAMPLE_PARAMS, MOTOR_SOUND_PARAMS.seed);
+      if (!isMountedRef.current) return;
+
+      setGenStatus('ready');
+      setGenDetail(`生成完了(楽器${Object.keys(INSTRUMENT_PRESETS).length}種+残響IR+モーター音)`);
+    } catch (err) {
+      if (!isMountedRef.current) return;
+      setGenStatus('error');
+      setGenDetail(`生成に失敗しました: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      isGeneratingRef.current = false;
     }
-
-    // ConvolverNodeはここで一度だけ作成・接続する(再生のたびに重複connectしない)。
-    const irSamples = generateImpulseResponseSamples(DEFAULT_REVERB_PARAMS);
-    const reverbNode = createConvolverFromSamples(audioCtx, irSamples, DEFAULT_REVERB_PARAMS.sampleRate);
-    reverbNode.connect(audioCtx.destination);
-    reverbNodeRef.current = reverbNode;
-
-    const motorOfflineCtx = new OfflineAudioContext(1, Math.ceil(MOTOR_SAMPLE_PARAMS.durationSec * sampleRate), sampleRate);
-    motorBufferRef.current = await renderInstrumentSample(motorOfflineCtx, MOTOR_SAMPLE_PARAMS, MOTOR_SOUND_PARAMS.seed);
-
-    setStatus(`生成完了(楽器${Object.keys(INSTRUMENT_PRESETS).length}種+残響IR+モーター音)`);
   }
 
   function handlePlayInstrument(name: string) {
@@ -138,7 +177,7 @@ export function AudioDemo() {
     applyMotorPlaybackRate(source, rpm, MOTOR_SOUND_PARAMS.baseRpm);
 
     const gainNode = audioCtx.createGain();
-    applyMotorGain(gainNode, rpm);
+    applyMotorGain(gainNode, rpm, MOTOR_SOUND_PARAMS.baseRpm);
 
     source.connect(gainNode).connect(audioCtx.destination);
     source.start();
@@ -153,7 +192,7 @@ export function AudioDemo() {
       applyMotorPlaybackRate(motorSourceRef.current, next, MOTOR_SOUND_PARAMS.baseRpm);
     }
     if (motorGainNodeRef.current) {
-      applyMotorGain(motorGainNodeRef.current, next);
+      applyMotorGain(motorGainNodeRef.current, next, MOTOR_SOUND_PARAMS.baseRpm);
     }
   }
 
@@ -164,20 +203,32 @@ export function AudioDemo() {
       </p>
 
       <div className="flex items-center gap-3">
-        <button onClick={handleGenerateInstruments} className="rounded bg-slate-800 px-3 py-1 text-white">
+        <button
+          onClick={handleGenerateInstruments}
+          disabled={uiState.generateButtonDisabled}
+          className="rounded bg-slate-800 px-3 py-1 text-white disabled:opacity-40"
+        >
           楽器サンプル+残響IR+モーター音を生成
         </button>
-        <span className="text-xs">{status}</span>
+        <span className="text-xs font-bold">{uiState.statusMessage}</span>
       </div>
 
       <div className="flex flex-wrap gap-2">
         {Object.keys(INSTRUMENT_PRESETS).map((name) => (
           <div key={name} className="flex items-center gap-1 rounded border px-2 py-1">
             <span className="text-xs font-bold">{name}</span>
-            <button onClick={() => handlePlayInstrument(name)} className="rounded bg-slate-200 px-2 py-0.5 text-xs">
+            <button
+              onClick={() => handlePlayInstrument(name)}
+              disabled={uiState.playbackControlsDisabled}
+              className="rounded bg-slate-200 px-2 py-0.5 text-xs disabled:opacity-40"
+            >
               再生
             </button>
-            <button onClick={() => handleDownloadInstrument(name)} className="rounded bg-slate-200 px-2 py-0.5 text-xs">
+            <button
+              onClick={() => handleDownloadInstrument(name)}
+              disabled={uiState.playbackControlsDisabled}
+              className="rounded bg-slate-200 px-2 py-0.5 text-xs disabled:opacity-40"
+            >
               WAV保存
             </button>
           </div>
@@ -185,7 +236,11 @@ export function AudioDemo() {
       </div>
 
       <div className="flex items-center gap-3">
-        <button onClick={handleToggleBgm} className="rounded bg-slate-800 px-3 py-1 text-white">
+        <button
+          onClick={handleToggleBgm}
+          disabled={uiState.playbackControlsDisabled}
+          className="rounded bg-slate-800 px-3 py-1 text-white disabled:opacity-40"
+        >
           {bgmPlaying ? 'BGM停止' : `BGM再生(${BGM_LOOP_BEATS}拍ループ、8ch以内)`}
         </button>
         <label className="flex items-center gap-1 text-xs">
@@ -195,7 +250,11 @@ export function AudioDemo() {
       </div>
 
       <div className="flex items-center gap-3">
-        <button onClick={handleToggleMotor} className="rounded bg-slate-800 px-3 py-1 text-white">
+        <button
+          onClick={handleToggleMotor}
+          disabled={uiState.playbackControlsDisabled}
+          className="rounded bg-slate-800 px-3 py-1 text-white disabled:opacity-40"
+        >
           {motorPlaying ? 'モーター音停止' : 'モーター音再生'}
         </button>
         <label className="flex items-center gap-2 text-xs">

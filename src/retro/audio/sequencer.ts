@@ -8,6 +8,7 @@
 // 発音/停止時刻)への変換をcomputePlaybackPlan純関数として分離し、
 // playScoreはその結果をAudioBufferSourceNode/GainNodeへ適用するだけにする。
 import { MAX_CHANNELS, computeLoopDurationSec, computeScheduledNotes, type Score } from './score';
+import { BGM_MASTER_GAIN } from './mixLevels';
 import type { InstrumentParams } from './synth';
 
 export interface ChannelMixConfig {
@@ -16,7 +17,11 @@ export interface ChannelMixConfig {
 }
 
 // 単純な合算クリップ防止として、チャンネル数で等分したゲインを返す。
-export function computeChannelMix(channelCount: number, masterGain = 1): ChannelMixConfig[] {
+// 既定のmasterGainはBGM_MASTER_GAIN(mixLevels.ts)を使う。BGMとモーター音が
+// 同時に鳴る画面(最悪ケースタブ・音源タブ)でも合算がクリップ(絶対値1.0)を
+// 超えないよう、モーター側の予算(MOTOR_MASTER_GAIN)と合計して1.0以下になる
+// よう校正されている(Task#19)。
+export function computeChannelMix(channelCount: number, masterGain = BGM_MASTER_GAIN): ChannelMixConfig[] {
   if (channelCount < 1) {
     throw new Error(`channelCount must be at least 1, got ${channelCount}`);
   }

@@ -3,6 +3,7 @@
 // 純関数として実装し、実際のAudioBufferSourceNode.playbackRate制御(ブラウザ専用)
 // から分離する(PHASE1-PLAN-01-REV2【9】(e))。
 import { validateInstrumentParams, type InstrumentParams } from './synth';
+import { MOTOR_MASTER_GAIN } from './mixLevels';
 
 const MIN_PLAYBACK_RATE = 0.25;
 const MAX_PLAYBACK_RATE = 4;
@@ -25,11 +26,22 @@ export function computeMotorPlaybackRate(rpm: number, baseRpm: number): number {
 // rpm<=0(停止中の物理状態)ではモーター音を無音化する。playbackRateの下限
 // クランプ(0.25倍)を維持したまま、音量側でミュートすることで「止まっているのに
 // 音が鳴り続ける」不整合を避ける。
-export function computeMotorGain(rpm: number): number {
+//
+// Task#19修正: 旧実装はrpm>0で常時ゲイン1.0固定(二値)だったため、BGM側
+// (sequencer.ts computeChannelMix、チャンネル数で等分する合算クリップ防止)と
+// 違って音量に上限がなく、最悪ケースタブでモーター音がBGMをかき消していた。
+// MOTOR_MASTER_GAIN(mixLevels.ts、BGM_MASTER_GAINと合計して1.0を超えない値)を
+// 上限としてrpmに比例させ、rpm>=baseRpmで上限にクランプする連続値へ変更した。
+export function computeMotorGain(rpm: number, baseRpm: number): number {
   if (rpm < 0) {
     throw new Error(`rpm must be non-negative, got ${rpm}`);
   }
-  return rpm > 0 ? 1 : 0;
+  if (baseRpm <= 0) {
+    throw new Error(`baseRpm must be positive, got ${baseRpm}`);
+  }
+  if (rpm <= 0) return 0;
+  const ratio = Math.min(1, rpm / baseRpm);
+  return MOTOR_MASTER_GAIN * ratio;
 }
 
 export const MOTOR_SOUND_PARAMS = {
@@ -62,7 +74,7 @@ export function applyMotorPlaybackRate(source: AudioBufferSourceNode, rpm: numbe
   source.playbackRate.value = computeMotorPlaybackRate(rpm, baseRpm);
 }
 
-// ブラウザ専用: モーター音のGainNodeへRPM連動の無音化を適用する。
-export function applyMotorGain(gainNode: GainNode, rpm: number): void {
-  gainNode.gain.value = computeMotorGain(rpm);
+// ブラウザ専用: モーター音のGainNodeへRPM連動の無音化・音量上限を適用する。
+export function applyMotorGain(gainNode: GainNode, rpm: number, baseRpm: number): void {
+  gainNode.gain.value = computeMotorGain(rpm, baseRpm);
 }

@@ -112,6 +112,10 @@ export function WorstCaseDemo() {
       source.buffer = motorBuffer;
       source.loop = true;
       const gainNode = audioCtx.createGain();
+      // GainNodeの既定値(1.0)のまま最初のrAFフレームを待つと、RPM連動の
+      // ゲインが適用されるまでの一瞬だけ最大音量で鳴ってしまう(Task#19)。
+      // 描画ループが最初の値を設定するまでは無音にしておく。
+      applyMotorGain(gainNode, 0, MOTOR_SOUND_PARAMS.baseRpm);
       source.connect(gainNode).connect(audioCtx.destination);
       source.start();
       motorSourceRef.current = source;
@@ -199,7 +203,7 @@ export function WorstCaseDemo() {
       if (motorSourceRef.current && motorGainRef.current) {
         const rpm = MOTOR_SOUND_PARAMS.baseRpm * (0.4 + 0.6 * ((Math.sin(now / 1500) + 1) / 2));
         applyMotorPlaybackRate(motorSourceRef.current, rpm, MOTOR_SOUND_PARAMS.baseRpm);
-        applyMotorGain(motorGainRef.current, rpm);
+        applyMotorGain(motorGainRef.current, rpm, MOTOR_SOUND_PARAMS.baseRpm);
       }
 
       ctx.clearRect(0, 0, canvas.width, canvas.height);
