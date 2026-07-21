@@ -310,20 +310,32 @@ const CANDIDATE_CIT_PA6_DENSITY: Citation = {
   accessedOn: '2026-07-22',
 };
 
-const CANDIDATE_CIT_PEEK_DENSITY: Citation = {
-  literatureName:
-    'PEEK(未充填)の複数樹脂物性データベースで報告される密度候補。Victrex公式ドメイン(victrex.com)にデータシート群は確認したが個別グレードの数値ページは今回未直接確認',
-  publisher: 'Victrex plc(公式ドメインの存在は確認、個別数値ページ未直接確認)',
-  sourceKind: 'メーカー製品データシート候補値(未直接確認)',
-  url: 'https://www.victrex.com/en/datasheets',
+// WebFetchでVictrex公式データシートページ本文を直接確認できた(2026-07-22)。
+// 密度は原文g/cm³表記のためkg/m³へ換算する(×1000)。既知値換算はmaterials.test.tsで固定する。
+const CIT_PEEK_DENSITY: Citation = {
+  // ページ内表記「Last updated 17 March 2026」(文書自体の更新日、WebFetchで確認した
+  // accessedOn 2026-07-22とは別の日付であることに注意)。
+  literatureName: 'VICTREX™ PEEK POLYMER 450G™ Datasheet(密度1.30 g/cm³、ISO 1183。ページ更新日2026-03-17)',
+  publisher: 'Victrex plc',
+  sourceKind: 'メーカー公式製品データシート',
+  documentIdOrGrade: '450G(未充填・unreinforced granules)',
+  url: 'https://www.victrex.com/en/downloads/datasheets/victrex-peek-450g',
   accessedOn: '2026-07-22',
 };
 
+// WebFetchで到達できたのはTMS Titanium(チタン販売代理店。原材料メーカー/ミルではない)の
+// 技術資料で、ASTM B265本文が密度を規定しているとは明記されていない「参考値」との記載を
+// 確認した(2026-07-22)。manufacturerDatasheet origin(実発行主体の公式文書限定)の要件を
+// 満たさない。Suuレビューにより、新規origin区分(supplierTechnicalDocument等)は追加せず、
+// 販売代理店資料のみを物理写像に使うverified根拠としないことが決定済み(docs/phase2-plan.md
+// §13、Suu指摘6)。原材料メーカー/ミル・学術標準資料・公的資料・本文を直接確認できる規格
+// 資料が見つかるまでpendingのまま維持する(Step 2以降で必要になる前に別途探索する)。
 const CANDIDATE_CIT_TITANIUM_ALLOY_DENSITY: Citation = {
   literatureName:
-    'Ti-6Al-4V合金(ASTM B265 Grade 5組成)の複数金属サプライヤー資料で報告される密度候補。ASTM B265規格文書本文が密度を規定しているかは有償文書のため今回未確認。純チタンではなく構造用チタン合金の値であることに注意',
-  publisher: '(規格発行元ASTM Internationalの規格文書本文は未確認)',
-  sourceKind: '複数サプライヤー資料の集計候補値(規格本文未確認)',
+    'TMS Titanium(チタン販売代理店)技術資料に記載のTi-6Al-4V(Grade 5)密度参考値。同資料はASTM B265本文がこの値を規定するとは明記していない。原材料メーカー/ミルの公式文書には今回到達できなかった',
+  publisher: 'TMS Titanium(販売代理店。原材料メーカー/ミルではない)',
+  sourceKind: '販売代理店の技術資料(メーカー公式データシートではない、規格本文未確認)',
+  url: 'https://tmstitanium.com/page/grade-5-titanium',
   accessedOn: '2026-07-22',
 };
 
@@ -537,7 +549,8 @@ export const GEAR_MATERIALS = [
     descriptionJa: '軽量・自己潤滑・高耐熱の優等生。高価',
     isBaselineAnchor: false,
     priceProvisionalG: 500,
-    density: pending('メーカー公式ドメイン(victrex.com)は確認したが、個別グレードの数値ページを直接確認できなかった', CANDIDATE_CIT_PEEK_DENSITY),
+    // 1.30 g/cm³ × 1000 = 1300 kg/m³(g/cm³→kg/m³の換算式)。既知値はmaterials.test.tsで固定。
+    density: verified(1300, 'manufacturerDatasheet', CIT_PEEK_DENSITY),
   },
   {
     id: 'gear-titanium',
@@ -547,7 +560,10 @@ export const GEAR_MATERIALS = [
     descriptionJa: '砕けない代わりに重い(J増で加速鈍化)。金属同士は無潤滑でかじる',
     isBaselineAnchor: false,
     priceProvisionalG: 1200,
-    density: pending('規格発行元(ASTM International)の規格文書本文(有償)を直接確認できなかった', CANDIDATE_CIT_TITANIUM_ALLOY_DENSITY),
+    density: pending(
+      '販売代理店(TMS Titanium)の技術資料には到達したが、原材料メーカー/ミルの公式文書ではなく、規格発行元(ASTM International)の規格文書本文(有償)も未確認。販売代理店資料のみのためverified化せず、一次性の高い資料確認までpendingを維持する',
+      CANDIDATE_CIT_TITANIUM_ALLOY_DENSITY,
+    ),
   },
 ] as const satisfies readonly GearMaterial[];
 

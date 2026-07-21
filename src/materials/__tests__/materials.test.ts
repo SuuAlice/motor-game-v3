@@ -177,12 +177,21 @@ describe('materials.ts 9ファミリー静的検査', () => {
       // 導線: 抵抗率4(projectSpec)+密度3(verified: Al/Cu/Ag)+密度1(pending: 銀メッキ)
       // 被膜: 耐熱クラス4(projectSpec)
       // 磁石: Br4+使用上限温度4(projectSpec)+密度4(verified: 全ティア manufacturerDatasheet)
-      // ギヤ: 密度4(pending: 全ティア)
+      // ギヤ: 密度4(verified: PEEKのみVictrex公式データシート確認済み。POM/PA6/チタンはpending)
       // 台紙: 密度3(pending: 全ティア)
       // ボディ: 密度3(pending: 全ティア、tier1-3)
-      expect(verifiedCount).toBe(23);
-      expect(pendingCount).toBe(11);
+      expect(verifiedCount).toBe(24);
+      expect(pendingCount).toBe(10);
       expect(verifiedCount + pendingCount).toBe(properties.length);
+    });
+
+    it('PEEKの密度は原文1.30 g/cm³をkg/m³へ換算(×1000)した既知値と一致する(docs/phase2-plan.md §13条件2)', () => {
+      const peek = GEAR_MATERIALS.find((m) => m.id === 'gear-peek');
+      expect(peek).toBeDefined();
+      expect(peek!.density.verifiedForPhysics).toBe(true);
+      const knownValueGCm3 = 1.3;
+      const gCm3ToKgM3 = 1000;
+      expect(peek!.density.value).toBeCloseTo(knownValueGCm3 * gCm3ToKgM3, 10);
     });
   });
 
