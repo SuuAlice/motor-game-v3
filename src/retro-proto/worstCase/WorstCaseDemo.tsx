@@ -11,7 +11,7 @@
 // PHASE1-UNITH-REVIEW指摘対応: 縦持ち(コンテナが縦長)では内部解像度を270×480へ
 // 転置し、Mode7/色演算インセットは横並びが入らない幅のとき縦積みへ切り替える
 // (常に整数座標で成立させる)。停止ボタンで計測(FrameProbe)も確実に止める。
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { computeIntegerScale } from '../../retro/canvas/integerScale';
 import { selectOrientedResolution } from '../../retro/canvas/orientation';
 import { buildDummyTrackLoop } from '../overheadView/track';
@@ -98,7 +98,14 @@ export function WorstCaseDemo() {
 
   const contentRes = selectOrientedResolution(containerSize.w, containerSize.h, LANDSCAPE_CONTENT);
   const scaleResult = computeIntegerScale(containerSize.w, containerSize.h, contentRes.w, contentRes.h);
-  const insetLayout = computeInsetLayout(contentRes.w, INSET_SIZES);
+  // Task#17 10.3調査で判明した不具合の修正: computeInsetLayoutは毎レンダー
+  // 新しいオブジェクトを返すため、メモ化せずに描画ループのuseEffect依存配列へ
+  // 渡すと、insetLayoutの値自体は変わっていなくても参照が変わるたびにeffectが
+  // 再マウントされる。品質モニタ(qualityState)はこのeffectのローカル変数の
+  // ためeffect再マウントで初期化し直され、表示ラベル(mode7Quality)が凍結
+  // されたまま更新されなくなる(docs/phase1-report.md §10.3)。contentRes.wが
+  // 実際に変わらない限り同一参照を保つことで、無関係な再マウントを防ぐ。
+  const insetLayout = useMemo(() => computeInsetLayout(contentRes.w, INSET_SIZES), [contentRes.w]);
 
   useEffect(() => {
     const el = containerRef.current;

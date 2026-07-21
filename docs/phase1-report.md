@@ -298,7 +298,17 @@ Suu承認(2026-07-21 03:32:42)を受け、以下を実装・確認済み。
 
 **結論**: 「負荷が12ms未満にならなかった」のではない。EMA+ヒステリシスによる品質判定ロジック自体(`updateQualityMonitor`)は正しく機能しており、実際の描画負荷・実際の描画品質は数秒で正常に復帰している。不具合は**状態更新(表示同期)側**にある: `WorstCaseDemo.tsx`内で毎レンダー新規生成される`insetLayout`が描画ループ`useEffect`の依存配列に入っているため、品質遷移がトリガーした再レンダーの直後にその効果自身が再マウントされ、品質モニタのローカル状態(と、それに連動するはずの表示ラベル)が凍結されてしまう。これはheadless固有の一過性事象ではなく、CPU throttling rate=25の条件下で3/3回、決定論的に再現した。
 
-**修正案(未実装、承認待ち)**: `insetLayout`を`useMemo(() => computeInsetLayout(contentRes.w, INSET_SIZES), [contentRes.w])`でメモ化し、`contentRes.w`が実際に変化しない限り同一参照を保つようにする。これにより、品質遷移由来の再レンダーで描画ループが無関係に再マウントされることを防げる(`contentRes.w`が実際に変わったとき=解像度変更時は、従来どおりeffectが再マウントされ描画ループが正しく作り直される想定)。実装前にご確認をお願いします。
+**修正実装・検証完了(Suu承認2026-07-21 05:47、コミット未実施→実装後コミット、人間再レビュー待ち)**
+
+Suu承認を受け、`insetLayout`を`useMemo(() => computeInsetLayout(contentRes.w, INSET_SIZES), [contentRes.w])`でメモ化した(`WorstCaseDemo.tsx`)。`contentRes.w`が実際に変化しない限り同一参照を保つため、品質遷移由来の無関係な再マウントが起きなくなる。
+
+受け入れ条件ごとの確認結果:
+1. **品質遷移だけを原因とする再マウントが発生しないこと**: 一時診断コード(effectマウント回数記録、検証後に削除・`git diff`空を確認済み)で、rate=25によるfull→reduced→負荷解除を3回実施し、3回ともマウント回数は1のまま(再マウントなし)。
+2. **実描画品質とDOM表示がともにfullへ復帰すること(実Chromium3回)**: 3回とも、reduced到達(約3.8〜4.1秒)後、負荷解除から約1795〜1796msで DOM表示が「通常(1px)」へ復帰し、内部`qualityState.quality`も同時に'full'・emaMs≈1.2〜1.4ms(修正前は表示のみ凍結、内部はfullなのに表示がreducedのまま不一致だったが、修正後は一致)。
+3. **contentRes.wが実際に変わる解像度変更時はinsetLayout再計算・描画ループ再構築が維持されること**: viewportを1280×720→1600×900へ変更(整数倍率が変わりscaleResult.contentWidthPx/Heightが変化)したところ、effectは正しく再マウントされた(マウント回数1→2、content解像度480×270自体は同一orientationのため不変)。これは`scaleResult.contentWidthPx`/`contentHeightPx`など他の依存項目の変化によるもので、想定どおりの挙動。
+4. **停止→再開始時はfull初期化されること**: 「停止」→「開始」を実行し、両時点でMode7描画品質ラベルが「通常(1px)」であることを確認(既存の`handleStop`内`setMode7Quality('full')`は変更していない)。
+5. **回帰テストの追加**: このプロジェクトにはReactコンポーネントレベルのテスト基盤(React Testing Library等)が導入されておらず(既存の全demoも同様、`.test.tsx`は0件)、今回のバグはReactのeffect再マウント挙動に起因するため、既存のvitest純関数テストだけでは再現・固定できない。新規テスト依存の追加は「依存パッケージは最小限に保つ」方針との兼ね合いがあるため、今回はコミットに含めず、上記1〜4の実Chromium確認(Playwright、一時スクリプト・コミット外)を回帰確認の代わりとした。メモ化の依存配列は`[contentRes.w]`のみとし、不必要に広げていない。
+6. **test/build/lint/RGB検査・engine/UI凍結範囲**: `npm run test`(494件成功)・`npm run build`・`npm run lint`(oxlint、エラーなし)・`npx vite-node scripts/checkPaletteUsage.ts src/retro src/retro-proto`(RGB直値0件)すべて成功。`src/engine`・V2凍結UI(`src/store`・`src/render`・`src/components`・`src/modes`・`src/data`)は無変更。調査・検証用の一時診断コードはすべて削除済み(`git diff`で残存なしを確認)。
 
 ## 11. 未決事項(人間/Suu判断待ち、docs/phase1-plan.md §13より継承)
 
