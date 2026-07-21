@@ -136,9 +136,9 @@ Suuから「PHASE1-REVIEW-FIX承認・全文指示」で4件とも承認され�
 
 この条件下では16.7ms超過率約19.2%であり、60fps目標に対して未達として扱う。原因分析(ボトルネック調査)と、仕様(非機能要件「遅延時は時間を飛ばさず描画品質を下げる」)に沿った品質低下策は測定条件確定後に提示する(§10.3で追跡)。
 
-## 10. 追加調査中の不具合(2026-07-21人間レビュー起因、調査中・原因未確定)
+## 10. 追加調査中の不具合(2026-07-21人間レビュー起因)
 
-### 10.1 音源タブでモーター音が鳴らない → 原因判明・再現確認済み(修正は未実装、承認待ち)
+### 10.1 音源タブでモーター音が鳴らない → 実装済み(コミット`b9fd843`、人間再レビュー待ち)
 
 **再現手順**: 音源タブを開き、「楽器サンプル+残響IR+モーター音を生成」ボタンを押さずに(または生成中に)「モーター音再生」を押す。
 
@@ -146,30 +146,37 @@ Suuから「PHASE1-REVIEW-FIX承認・全文指示」で4件とも承認され�
 
 **原因**: `AudioDemo.tsx`の「モーター音再生」(および「BGM再生」・各楽器の「再生」)ボタンには生成完了状態と連動した`disabled`制御が一切ない。`handleToggleMotor`は`motorBufferRef.current`が`null`なら`if (!buffer) return;`で即座に抜けるだけで、ボタンラベルも変化せず、コンソールエラーも画面上のメッセージも一切出ない。生成未実施(または生成中、5楽器+残響IR+モーター音の複数回`await`のため体感できる時間がかかる)の状態で押すと、完全に無反応・無音のまま何も起きない。人間レビューの「モーター音が鳴らない」はこの経路で再現することを確認した(Playwrightで生成ボタンを押さず「モーター音再生」を押すケースを実行し、`AudioBufferSourceNode.start()`が一度も呼ばれないこと、ボタンラベルが変化しないこと、画面上にエラー表示が一切出ないことを確認済み)。
 
-**修正案(未実装、承認待ち)**:
-1. 生成状態を文字列表示用の`status`とは別に`'idle' | 'generating' | 'ready'`の判別可能な状態として保持し、「モーター音再生」「BGM再生」・各楽器の「再生」「WAV保存」ボタンすべてに`disabled={status !== 'ready'}`を付与する(`WorstCaseDemo.tsx`の「計測開始」ボタンが既に`disabled={!running || measuring}`を使っており、同じ規律に揃える)。
-2. 「生成」ボタン自体も`generating`中は`disabled`にし、二重クリックによる二重生成(OfflineAudioContextの重複レンダリング)を防ぐ。
-3. ボタンが無効な間はラベルまたは付随テキストで理由を示す(色のみに依存しない状態表示、非機能要件のキーボード/色非依存規律を維持)。
-4. 回帰テストとして、コンポーネントの「どの生成状態でどのボタンが有効か」をReact/DOMから切り離した純関数(例: `computeAudioTabButtonEnabled(status)`)に抽出し、Node上でユニットテストする。
+**実装内容**(Suu承認済み仕様どおり):
+1. `audioTabUiState.ts`に`computeAudioTabUiState(status: 'idle'|'generating'|'ready'|'error', detailMessage?)`を純関数として新設し、モーター/BGM/各楽器の再生・保存ボタンを`disabled={uiState.playbackControlsDisabled}`で一括制御。idle時は「未生成。先に音源を生成してください」、generating時は「音源を生成中です…」、error時は日本語エラーメッセージを色以外(文言)で表示する。
+2. 「生成」ボタンも`generating`中は`disabled`にした。
+3. 二重生成防止は`isGeneratingRef`(Ref、同期的)で行う。実ブラウザ確認で、React stateのクロージャに基づくガードは同一tick内の連続呼び出しを防げないことが分かった(2回目の呼び出しが古いレンダーのクロージャを参照するため)ため、Refで即時反映されるフラグに変更した。
+4. 生成失敗時は`catch`で`error`状態+日本語エラーメッセージへ遷移し、`generating`に固定されないようにした。
+5. **実ブラウザ確認で発見した副次バグ**: アンマウント時cleanupの`isMountedRef`について、`useEffect`のsetup本体を空にしていたところ、開発時のStrictMode(mount→cleanup→再mountを合成的に実行)により実マウント後も`isMountedRef.current`が`false`に固定され、生成処理が`if (!isMountedRef.current) return;`で無限に「生成中です…」から進まなくなる不具合を作り込んでいた。`useEffect`のsetup本体で明示的に`isMountedRef.current = true`とすることで解消した。この種の不具合は`npm run test`/`build`/`lint`のいずれでも検出できず、実ブラウザでの動作確認で初めて見つかった。
 
-Suuから提案のあったWeb Audio ノード生成のDI化(呼び出し順序を自動テストする案)は、上記のボタン無効化だけで再現した無音の直接原因には対応済みのため、今回のスコープでは見送り、将来必要になった時点で改めて検討する。
+**確認結果**(実Chromium/Playwright): idle時はモーター/BGM/楽器ボタンが無効で生成ボタンが有効、生成完了後は逆に切り替わり文言も追従することを確認。生成ボタンを合成的に連打(同一tick内で2回`click()`)しても`OfflineAudioContext`の生成回数は6回(楽器5+モーター1)ちょうどで、二重生成が発生しないことを確認済み。
 
-### 10.2 最悪ケースタブでモーター音がBGMより大きすぎる → 原因判明(修正は未実装、承認待ち)
+Suuから提案のあったWeb Audio ノード生成のDI化(呼び出し順序を自動テストする案)は、上記の対応だけで無音の直接原因には対応済みのため、今回のスコープでは見送り、将来必要になった時点で改めて検討する。
+
+### 10.2 最悪ケースタブでモーター音がBGMより大きすぎる → 実装済み(コミット`b9fd843`、人間再レビュー待ち)
 
 音源タブの無音問題(§10.1)とは別事象。`sequencer.ts`の`computeChannelMix`は「合算クリップ防止として、チャンネル数で等分したゲインを返す」設計で、BGM(`bgmScore.ts`、kick/snare/bass/chord/leadの5ch)は各chが`masterGain(既定1)/5=0.2`を基準ゲインとし、さらに`note.velocity`(0.4〜0.9)を掛ける。つまりBGMの各音は最大でも約0.18(kick: 0.2×0.9)、持続音でも約0.08〜0.14(bass: 0.2×0.7、chord: 0.2×0.4)程度に抑えられている。
 
 一方`WorstCaseDemo.tsx`の`ensureAudioStarted`はモーター用GainNodeを`audioCtx.createGain()`で生成した直後は初期値(Web Audio既定の1.0)のまま、その後アニメーションループ内で毎フレーム`applyMotorGain(motorGainRef.current, rpm)`を呼ぶ。`computeMotorGain(rpm)`は`rpm>0 ? 1 : 0`という二値のみを返す設計で、WorstCaseDemoのダミーRPM(`baseRpm*(0.4+0.6*sin)`)は常に正のため、実質的に**モーター音は常時gain=1.0固定**になる。実測したモーターサンプルの持続部振幅(sustainLevel=0.8付近)と合わせると、モーターは常時振幅約0.8で鳴り続けるのに対し、BGMの各chは間欠的に振幅0.08〜0.18程度――音量比でおおよそ4〜10倍、モーター側が優勢な設計になっている。BGM側が「合算クリップ防止のためチャンネル数で等分」という抑制を受けているのに対し、モーター側にはその種の抑制が一切ない、という設計上の非対称が根本原因。
 
-**修正案(未実装、承認待ち)**: `motorSound.ts`の`computeMotorGain`を二値(0/1)から、BGMのチャンネル予算と同程度の上限を持つ連続値へ変更する。
-- `MOTOR_MASTER_GAIN = 0.2`(BGMの1ch分の基準ゲイン0.2と同水準、bass/chordの持続音より大きくkickの瞬間最大値と同程度になるよう選定)を新設し、`computeMotorGain(rpm, baseRpm)`は`rpm<=0`で0、`rpm>0`で`MOTOR_MASTER_GAIN * Math.min(1, rpm / baseRpm)`(RPMに比例して0→上限まで連続的に増加、上限でクランプ)を返すよう変更する。二値のON/OFFではなくRPMに応じた滑らかな音量変化になるという副次効果もある。
-- 回帰テストとして、(a) `MOTOR_MASTER_GAIN <= 1 / 5`(BGMの1ch分の予算を超えない)、(b) `computeMotorGain`がrpmについて単調非減少であること、(c) `rpm=0`で厳密に0、`rpm>=baseRpm`で`MOTOR_MASTER_GAIN`ちょうどになること、を固定する。
-- `computeMotorPlaybackRate`(ピッチ)は今回のバランス問題とは無関係のため変更しない。
-- BGM側のミュート・モーター側の完全無音化は行わない(Suu指示の制約どおり)。
+**実装内容**(Suu承認済み仕様どおり、追加条件「BGM最大予算+モーター最大予算が1.0を超えない」も反映): `src/retro/audio/mixLevels.ts`を新設し、`BGM_MASTER_GAIN = 0.8`・`MOTOR_MASTER_GAIN = 0.2`(合計1.0、クリップ防止)を一元管理する。
+- `sequencer.ts`の`computeChannelMix`の既定`masterGain`を`1`から`BGM_MASTER_GAIN`へ変更(呼び出し側で明示的に`masterGain`を渡していない`computePlaybackPlan`経由のBGM再生すべてに適用される)。
+- `motorSound.ts`の`computeMotorGain`を二値(0/1)から連続値へ変更: `rpm<=0`で0、`rpm>0`で`MOTOR_MASTER_GAIN * Math.min(1, rpm / baseRpm)`(RPMに比例して0→上限まで連続的に増加、上限でクランプ)。シグネチャに`baseRpm`引数を追加(`applyMotorGain`も同様)。
+- `WorstCaseDemo.tsx`のモーター用GainNode生成直後にも`applyMotorGain(gainNode, 0, baseRpm)`を呼び、Web Audio既定値(1.0)のまま最初の描画フレームまで一瞬だけ最大音量になる問題を予防した。
+- 回帰テスト: (a) `BGM_MASTER_GAIN + MOTOR_MASTER_GAIN <= 1.0`(`mixLevels.test.ts`)、(b) `computeMotorGain`がrpmについて単調非減少、(c) `rpm=0`で厳密に0・`rpm>=baseRpm`で`MOTOR_MASTER_GAIN`ちょうど、(d) `computeChannelMix`の既定`masterGain`が`BGM_MASTER_GAIN`になること、を固定した。
+- `computeMotorPlaybackRate`(ピッチ)は変更していない。BGM側のミュート・モーター側の完全無音化は行っていない(Suu指示の制約どおり)。
 
-数値の妥当性(0.2という具体値・BGMとの相対比)は試遊確認が必要なため、実装後に人間再レビューを依頼する。
+**確認結果**(実Chromium/Playwright、音源タブ): RPM=0で再生開始した直後のgain値は0(無音)、RPM=16000(baseRpmの2倍)で再生開始した直後のgain値は0.2(`MOTOR_MASTER_GAIN`ちょうど、クランプ済み)を確認。playbackRateも別途0.25/2として正しく反映されていることを確認済み。数値の妥当性(0.2という具体値・BGMとの相対比)は試遊確認が必要なため、人間再レビューを依頼する。
 
-### 10.3 WorstCaseDemoの性能(60fps未達)
-§9の実測値(16.7ms超過約19.2%)を受け、ボトルネック調査中。原因調査後、仕様に沿った品質低下策(描画品質を下げる、時間を飛ばさない)を提案する。
+### 10.3 WorstCaseDemoの性能(60fps未達)・追加で発見したクラッシュ
+
+§9の実測値(16.7ms超過約19.2%)を受け、ボトルネック調査は未着手(Task#17)。
+
+**追加で発見した不具合(未調査・Task#17のスコープで対応予定)**: Task#18/#19の実ブラウザ確認中に、WorstCaseDemoタブで「開始」ボタンを押すと描画ループの初回フレームで確実に例外`Cannot read properties of undefined (reading 'x')`(`drawOverheadView.ts`の`const camX = Math.round(car.x - contentWidthPx / 2);`、`car = state.trackPoints[state.carIndex]`が`undefined`)が発生し、描画が完全に止まることを発見した。Playwright(headless Chromium)で3回連続再現し、いずれも初回フレームで確実に発生している。`buildDummyTrackLoop()`自体は144点の非空配列を返すことを確認済みで、`state.carIndex`が範囲外(または`NaN`)になる経路がある可能性が高い。音源(BGM・モーター音)は描画ループより前の`ensureAudioStarted()`で開始されるため今回のTask#18/#19の確認結果には影響していないが、WorstCaseDemo自体の性能測定(Task#17)を妨げる重大度の高い不具合のため、Task#17着手時に優先して原因調査する。
 
 ## 11. 未決事項(人間/Suu判断待ち、docs/phase1-plan.md §13より継承)
 
