@@ -269,12 +269,36 @@ Suu承認(2026-07-21 03:32:42)を受け、以下を実装・確認済み。
 2. **全demoへの展開**: `ColorOpsDemo`・`Mode7Demo`(静止比較+アニメーション両方)・`OverheadViewDemo`・`ResolutionHarness`のオフスクリーン+`drawImage`ブリット拡大を廃止し、直接低解像度Canvas方式へ統一した。各demoの比較目的(Mode7の等方vs透視2枚並び、解像度4案×3題材比較等)はbacking store方式の変更による影響を受けないことを実Chromiumで確認した(全6タブ・全候補×全題材でエラーなし、スクリーンショットで描画内容を目視確認)。副次的に、`OverheadViewDemo`にもTask#17で発見した`elapsedSec`下限クランプ+`computeCarIndex`の不変条件を適用した(同種の範囲外インデックスの潜在バグを予防、`computeCarIndex`は`overheadView/carIndex.ts`へ移設)。
 3. **共通ヘルパーへの集約**: `src/retro/canvas/directCanvas.ts`に`applyDirectCanvasBackingSize`(backing storeへcontent解像度のみを設定できる型シグネチャ、ResizeObserverでのscale変更時にbacking storeを表示寸法へ拡大し直せないことを構造的に保証)と`computeDirectCanvasPhysicalCssSize`(DPR物理基準の寸法計算)を新設し、各demoが共通で使うようにした。
 4. **DPR物理基準の整理**: 旧`computeIntegerScalePhysical`(backing storeを物理スケール後サイズにする方式、Unit Aで導入)から`computeDirectCanvasPhysicalCssSize`へ置き換えた。backing storeは常にcontent解像度のまま、CSS表示寸法=content×整数physicalScale/devicePixelRatioとすることで、理論上の物理表示寸法(CSS×DPR)がcontent×整数physicalScaleに厳密一致することを保証する(実数演算上、常に成立する)。fractional DPR(1.25/1.5等)ではCSS表示寸法自体が非整数ピクセルになりうることをテスト8件で検証し(`directCanvas.test.ts`)、`cssWidthIsIntegerPx`/`cssHeightIsIntegerPx`フラグで検出、`ResolutionHarness`のUIへ「ブラウザの実レイアウトでの丸めにより物理ピクセル境界がずれる可能性がある」という警告として表示するようにした(勝手な丸めはせず、非整数のまま報告する)。実機テストではDPR=1.5・全候補(a〜d)で警告は出なかった(現行の候補寸法とDPR=1.5の組み合わせでは非整数化しない、実測で確認)。
-5. **vsync対応統計の追加**: `frameProbe.ts`に`computeVsyncAwareStats`を追加。固定16.7ms閾値(`droppedFrameCount`、互換性のため維持)とは別に、生のフレーム間隔の中央値から実際のリフレッシュ周期を推定し、その1.5倍を超えたフレームを「実質的なmissed-vsync」として数える指標を新設した(テスト5件)。`WorstCaseDemo`の計測結果表示にも追加した。**ただしこの指標を使ったCPU4倍・1x/2xの再測定はまだ実施していない(未着手、次回)。**
+5. **vsync対応統計の追加**: `frameProbe.ts`に`computeVsyncAwareStats`を追加。固定16.7ms閾値(`droppedFrameCount`、互換性のため維持)とは別に、生のフレーム間隔の中央値から実際のリフレッシュ周期を推定し、その1.5倍を超えたフレームを「実質的なmissed-vsync」として数える指標を新設した(テスト5件)。`WorstCaseDemo`の計測結果表示にも追加した。
 
-**未着手・次回に持ち越す事項**:
-- vsync対応統計を使ったCPU4倍・1x/2x再測定(残る29%の超過フレームが実質的なmissed-vsyncかどうかの切り分け)。
-- reduced→fullが18秒復帰しなかった件の切り分け調査(その期間のdrawPhaseMs・EMA・underStreakを記録し、「負荷が12ms未満にならず正しく復帰しなかった」のか「状態更新不具合」かを判別する。Suuから、headless固有と断定しないよう明示的な指示あり)。
-- 上記2点はまだ着手していない。次回セッションで、`WorstCaseDemo`の描画ループへ一時的な診断ログ(または恒常的な診断フック)を追加し、実ブラウザで再現・記録してから報告する。
+**vsync対応統計を使ったCPU4倍・1x/2x再測定(実施済み、2026-07-21)**
+
+**計測方法**: Playwright(headless Chromium)+CDP `Emulation.setCPUThrottlingRate`(rate=4)で、`WorstCaseDemo`の既存計測フロー(ウォームアップ2秒+計測10秒、`computeVsyncAwareStats`は既存実装をそのまま使用・閾値変更なし)を、viewport 1280×720(1x)・1600×900(2x)それぞれ**5回ずつ**実行した(単発計測では間欠的な欠落を見逃すため、再現性を確認する目的で複数回実施)。丸め前の生フレーム間隔(`rawFrameDurationsMs`)をブラウザから直接取得し、ヒストグラム化した。
+
+| 条件 | 実行回数 | missedVsyncCount | 収集フレーム数 | 備考 |
+|---|---|---|---|---|
+| 1x | 5/5回 | 全回0 | 全回600/600 | 欠落フレームなし |
+| 2x | 2/5回 | 0 | 600/600 | 欠落フレームなし |
+| 2x | 3/5回 | 8〜10 | 586〜592 | 実質的なmissed-vsyncあり(うち2回、33.3〜33.4ms=1回分のvsync取りこぼしが大半、さらに2回でそれぞれ1フレームだけ50.0ms・100.0msという大きな外れ値を観測、いずれも1回のみ) |
+
+生ヒストグラム例(2x、missedVsyncCountありの回): `16.5ms×7, 16.6ms×218, 16.7ms×323, 16.8ms×33, 33.3ms×4, 33.4ms×4, 50.0ms×1`(合計592、600に対し8フレーム分の間隔が欠落=missedVsyncCountの8件と一致)。
+
+**評価**: 旧来の固定16.7ms閾値による「超過」判定(1x: 26〜30%、2x: 29〜30%)は、実際には16.7ms(1 vsync)と16.8ms(境界丸め)の間の量子化ノイズをほぼすべて「超過」として数えていたための過大評価だった。`computeVsyncAwareStats`(生間隔の中央値=16.7msを基準に1.5倍=約25.0msを閾値とする)で見ると、1xは5/5回とも実質的なフレーム欠落ゼロ、2xは5回中2回は欠落ゼロ、5回中3回は8〜10件(1.3〜1.7%)の間欠的な欠落が発生しており、うち2回で50ms・100ms級の単発の大きな遅延(3〜6vsync分)も観測された。以前の§10.3で「2x条件で29%程度の超過が残っている」としていた評価は、固定閾値の量子化アーティファクトを含んでいたため過大だったと訂正する。実際の欠落は2xでも稀(間欠的)であり、1xでは今回の5回の試行では一度も発生しなかった。ただしこの計測もheadless Chromium(この検証環境)によるものであり、実ブラウザでの値ではない(既存の注記と同じ限界が残る)。
+
+**reduced→fullが18秒復帰しなかった件の切り分け(実施済み、2026-07-21) → 状態更新不具合と判明**
+
+**調査方法**: `WorstCaseDemo.tsx`へ一時的な診断コード(毎フレームのdrawPhaseMs/EMA/quality/underStreak記録、描画ループuseEffectの再マウント回数記録)を追加し、Playwright+CDPで強い負荷(rate=25、rate=10では現行実装のdrawPhaseMsが軽すぎて安定的にreducedへ落ちなかったため引き上げた)をかけてreduced状態にした後、負荷を解除してfull復帰を最大30秒待つテストを3回実施した。診断コードは計測後にすべて削除し、`git diff`で残存がないことを確認済み(コミットには含めていない)。
+
+**結果**: 3回とも同一のパターンで再現した(rate=25、reduced到達まで約3.9〜4.0秒)。
+1. full→reduced遷移が発生し、`setMode7Quality('reduced')`が呼ばれ、Reactが再レンダーする。
+2. その再レンダーにより`WorstCaseDemo.tsx`の`insetLayout`(`computeInsetLayout(contentRes.w, INSET_SIZES)`、**useMemo化されておらず毎レンダーで新しいオブジェクトを返す**)の参照が変わり、これを依存配列に含む描画ループの`useEffect`が破棄・再生成される(3回とも、reduced遷移の直後にeffectの再マウントを検出、再マウント回数1→2)。
+3. 新しいeffectのクロージャは`qualityState`を`createInitialQualityMonitorState()`(quality:'full'、ema:null)で再初期化するため、reduced状態・EMA・underStreakの蓄積がすべて失われる。
+4. 新クロージャ内では`previousQuality`もこの新しい初期値'full'を起点に比較するため、その後内部的にfullのまま推移し続ける限り(=負荷解除後は実際そうなる)、`setMode7Quality`が二度と呼ばれない。結果、React側の表示state(`mode7Quality`、DOM上「低下中」ラベル)は再マウント発生時点の値に凍結されたまま更新されなくなる。
+5. 実測で確認: 負荷解除後、内部の`qualityState.quality`は数秒以内(EMA減衰の理論値どおり約1.5〜2秒)に'full'・emaMs≈1.36msまで下がっていた(実際の描画品質=Mode7サンプリング粒度もこのクロージャの`qualityState.quality`を直接参照しているため、実描画はこの時点で既に1px精度へ復帰している)。**にもかかわらずDOM上のラベルは「低下中」のまま**で、負荷解除から10秒後に明示的に確認しても、また30秒のテスト時間いっぱい待っても「通常(1px)」表示には戻らなかった(3回とも)。
+
+**結論**: 「負荷が12ms未満にならなかった」のではない。EMA+ヒステリシスによる品質判定ロジック自体(`updateQualityMonitor`)は正しく機能しており、実際の描画負荷・実際の描画品質は数秒で正常に復帰している。不具合は**状態更新(表示同期)側**にある: `WorstCaseDemo.tsx`内で毎レンダー新規生成される`insetLayout`が描画ループ`useEffect`の依存配列に入っているため、品質遷移がトリガーした再レンダーの直後にその効果自身が再マウントされ、品質モニタのローカル状態(と、それに連動するはずの表示ラベル)が凍結されてしまう。これはheadless固有の一過性事象ではなく、CPU throttling rate=25の条件下で3/3回、決定論的に再現した。
+
+**修正案(未実装、承認待ち)**: `insetLayout`を`useMemo(() => computeInsetLayout(contentRes.w, INSET_SIZES), [contentRes.w])`でメモ化し、`contentRes.w`が実際に変化しない限り同一参照を保つようにする。これにより、品質遷移由来の再レンダーで描画ループが無関係に再マウントされることを防げる(`contentRes.w`が実際に変わったとき=解像度変更時は、従来どおりeffectが再マウントされ描画ループが正しく作り直される想定)。実装前にご確認をお願いします。
 
 ## 11. 未決事項(人間/Suu判断待ち、docs/phase1-plan.md §13より継承)
 
