@@ -138,8 +138,21 @@ Suuから「PHASE1-REVIEW-FIX承認・全文指示」で4件とも承認され�
 
 ## 10. 追加調査中の不具合(2026-07-21人間レビュー起因、調査中・原因未確定)
 
-### 10.1 音源タブでモーター音が鳴らない
-再現手順・原因は未調査。AudioContext生成/resume(ブラウザ自動再生制限を含む)、楽器サンプル生成前後の操作依存、motor用AudioBufferSourceNodeの生成・start、GainNode接続、computeMotorGain、RPM初期値とスライダー変更、停止後の再生成、タブ切替・アンマウント時cleanupを実ブラウザ経路に沿って調査中。
+### 10.1 音源タブでモーター音が鳴らない → 原因判明・再現確認済み(修正は未実装、承認待ち)
+
+**再現手順**: 音源タブを開き、「楽器サンプル+残響IR+モーター音を生成」ボタンを押さずに(または生成中に)「モーター音再生」を押す。
+
+**確認方法**: 実Chromium(Playwright経由、headless)でWeb Audio APIのAudioContext/AudioParam/AudioBufferSourceNode/AudioNode.connectをフックし、実際のノード生成・接続・gain値・バッファ内容を計測した。生成完了後に「モーター音再生」を押した場合は、AudioContext.state=`running`、GainNode.gain.value=1、AudioBufferSourceNode.loop=true・playbackRate=1・バッファ内容は無音でない(平均振幅0.33)ことを確認しており、**生成完了後の再生パス自体は正しく動作する**。
+
+**原因**: `AudioDemo.tsx`の「モーター音再生」(および「BGM再生」・各楽器の「再生」)ボタンには生成完了状態と連動した`disabled`制御が一切ない。`handleToggleMotor`は`motorBufferRef.current`が`null`なら`if (!buffer) return;`で即座に抜けるだけで、ボタンラベルも変化せず、コンソールエラーも画面上のメッセージも一切出ない。生成未実施(または生成中、5楽器+残響IR+モーター音の複数回`await`のため体感できる時間がかかる)の状態で押すと、完全に無反応・無音のまま何も起きない。人間レビューの「モーター音が鳴らない」はこの経路で再現することを確認した(Playwrightで生成ボタンを押さず「モーター音再生」を押すケースを実行し、`AudioBufferSourceNode.start()`が一度も呼ばれないこと、ボタンラベルが変化しないこと、画面上にエラー表示が一切出ないことを確認済み)。
+
+**修正案(未実装、承認待ち)**:
+1. 生成状態を文字列表示用の`status`とは別に`'idle' | 'generating' | 'ready'`の判別可能な状態として保持し、「モーター音再生」「BGM再生」・各楽器の「再生」「WAV保存」ボタンすべてに`disabled={status !== 'ready'}`を付与する(`WorstCaseDemo.tsx`の「計測開始」ボタンが既に`disabled={!running || measuring}`を使っており、同じ規律に揃える)。
+2. 「生成」ボタン自体も`generating`中は`disabled`にし、二重クリックによる二重生成(OfflineAudioContextの重複レンダリング)を防ぐ。
+3. ボタンが無効な間はラベルまたは付随テキストで理由を示す(色のみに依存しない状態表示、非機能要件のキーボード/色非依存規律を維持)。
+4. 回帰テストとして、コンポーネントの「どの生成状態でどのボタンが有効か」をReact/DOMから切り離した純関数(例: `computeAudioTabButtonEnabled(status)`)に抽出し、Node上でユニットテストする。
+
+Suuから提案のあったWeb Audio ノード生成のDI化(呼び出し順序を自動テストする案)は、上記のボタン無効化だけで再現した無音の直接原因には対応済みのため、今回のスコープでは見送り、将来必要になった時点で改めて検討する。
 
 ### 10.2 最悪ケースタブでモーター音がBGMより大きすぎる
 音源タブの無音問題とは別事象。WorstCaseDemo内のBGM・モーター各GainNode、チャンネルゲイン、同時発音数、RPM変化時の音量、Convolver経路を調査中。BGMの旋律が判別できつつモーターの存在感も残る基準音量案を数値で提示する予定。
