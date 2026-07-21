@@ -16,15 +16,7 @@ import { generateDummyWindingRecord } from './dummyWindingRecord';
 import { drawWindingTrace } from './drawWindingTrace';
 import { drawGarageIllustration } from './drawGarageIllustration';
 import { drawPostMortemReport } from './drawPostMortemReport';
-
-const CANDIDATES = [
-  { id: 'a', label: '(a) 320×180 単層', world: { w: 320, h: 180 }, ui: { w: 320, h: 180 } },
-  { id: 'b', label: '(b) 480×270 単層', world: { w: 480, h: 270 }, ui: { w: 480, h: 270 } },
-  { id: 'c', label: '(c) ワールド480×270+UI960×540(本命)', world: { w: 480, h: 270 }, ui: { w: 960, h: 540 } },
-  { id: 'd', label: '(d) 640×360 単層', world: { w: 640, h: 360 }, ui: { w: 640, h: 360 } },
-] as const;
-
-type CandidateId = (typeof CANDIDATES)[number]['id'];
+import { CANDIDATES, DEFAULT_CANDIDATE_ID, type CandidateId } from './candidates';
 
 const MATERIALS = [
   { id: 'winding', label: '乱巻き軌跡(ワールド層)', layer: 'world' },
@@ -37,7 +29,7 @@ type MaterialId = (typeof MATERIALS)[number]['id'];
 const WINDING_RECORD = generateDummyWindingRecord();
 
 export function ResolutionHarness() {
-  const [candidateId, setCandidateId] = useState<CandidateId>('c');
+  const [candidateId, setCandidateId] = useState<CandidateId>(DEFAULT_CANDIDATE_ID);
   const [materialId, setMaterialId] = useState<MaterialId>('winding');
   const [usePhysical, setUsePhysical] = useState(false);
   const [fontStatus, setFontStatus] = useState<'loading' | 'ok' | 'error'>('loading');
@@ -63,7 +55,7 @@ export function ResolutionHarness() {
     return () => observer.disconnect();
   }, []);
 
-  const candidate = CANDIDATES.find((c) => c.id === candidateId) ?? CANDIDATES[2];
+  const candidate = CANDIDATES.find((c) => c.id === candidateId) ?? CANDIDATES.find((c) => c.id === DEFAULT_CANDIDATE_ID)!;
   const material = MATERIALS.find((m) => m.id === materialId) ?? MATERIALS[0];
   const landscapeRes = material.layer === 'ui' ? candidate.ui : candidate.world;
   // art-spec §2.1: スマホ縦画面は内部解像度を縦持ち用に転置する(PHASE1-UNITH-REVIEW指摘)。

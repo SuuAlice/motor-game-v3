@@ -16,10 +16,13 @@ export interface ResolutionCandidate {
   hasUiLayer: boolean;
 }
 
+// Phase1解像度確定(2026-07-22人間承認、docs/phase1-resolution-comparison.md §7)の反映:
+// 候補bを採用、候補cは比較用として不採用になったことをラベルへ明示する。4案比較・
+// 候補cの二層整合計算ロジック自体は維持する(Suu承認、レビュー証跡として保持)。
 export const RESOLUTION_CANDIDATES: ResolutionCandidate[] = [
   { id: 'a', label: '320×180単層', worldWidthPx: 320, worldHeightPx: 180, hasUiLayer: false },
-  { id: 'b', label: '480×270単層', worldWidthPx: 480, worldHeightPx: 270, hasUiLayer: false },
-  { id: 'c', label: 'ワールド480×270+UI960×540(本命)', worldWidthPx: 480, worldHeightPx: 270, hasUiLayer: true },
+  { id: 'b', label: '480×270単層(採用)', worldWidthPx: 480, worldHeightPx: 270, hasUiLayer: false },
+  { id: 'c', label: 'ワールド480×270+UI960×540(比較用・不採用)', worldWidthPx: 480, worldHeightPx: 270, hasUiLayer: true },
   { id: 'd', label: '640×360単層', worldWidthPx: 640, worldHeightPx: 360, hasUiLayer: false },
 ];
 

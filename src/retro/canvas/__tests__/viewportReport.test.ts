@@ -57,3 +57,23 @@ describe('buildReportRows', () => {
     expect(rows[0].twoLayerPhysical).toBeNull();
   });
 });
+
+// Phase1解像度確定(2026-07-22人間承認)の回帰固定: 候補b/cのラベルが採否を明示し、
+// 「本命」が残っていないことを検証する。
+describe('RESOLUTION_CANDIDATES ラベル(Phase1解像度確定の反映)', () => {
+  it('候補bのラベルは採用を明示する', () => {
+    const b = RESOLUTION_CANDIDATES.find((c) => c.id === 'b');
+    expect(b?.label).toContain('採用');
+  });
+
+  it('候補cのラベルは不採用を明示する', () => {
+    const c = RESOLUTION_CANDIDATES.find((c) => c.id === 'c');
+    expect(c?.label).toContain('不採用');
+  });
+
+  it('どの候補ラベルにも「本命」が残っていない', () => {
+    for (const candidate of RESOLUTION_CANDIDATES) {
+      expect(candidate.label).not.toContain('本命');
+    }
+  });
+});
