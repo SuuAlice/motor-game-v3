@@ -6,11 +6,15 @@
 // 上面(roof)はwallより一段小さく重ね、前部マーカーは進行方向ベクトルを
 // そのままオフセットに使うことで前後方向を示す(art-spec §2.3の3/4視点外形)。
 
-const BODY_LENGTH_PX = 16;
-const BODY_WIDTH_PX = 9;
-const WALL_HEIGHT_MIN_PX = 2;
-const WALL_HEIGHT_MAX_PX = 6;
-const FRONT_MARKER_RADIUS_PX = 5;
+// PHASE1-REVIEW-FIX指摘3(人間レビュー「車が小さすぎる」への対応、承認済み寸法):
+// 全長16→28px・幅9→16px・側面高最大6→10px・前部マーカー半径5→8pxへ拡大。
+// トラック全幅84px(TRACK_HALF_WIDTH×2)に対し車体最大幅28pxは約33%で、
+// トラック幅に対して過大にならない範囲に収まる。
+const BODY_LENGTH_PX = 28;
+const BODY_WIDTH_PX = 16;
+const WALL_HEIGHT_MIN_PX = 3;
+const WALL_HEIGHT_MAX_PX = 10;
+const FRONT_MARKER_RADIUS_PX = 8;
 
 export interface CarSpriteGeometry {
   wallWidthPx: number;

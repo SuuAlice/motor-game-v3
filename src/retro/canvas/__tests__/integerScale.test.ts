@@ -59,4 +59,21 @@ describe('computeIntegerScalePhysical', () => {
     expect(physical.scale).toBe(css.scale);
     expect(physical.contentWidthPx).toBe(css.contentWidthPx);
   });
+
+  // PHASE1-REVIEW-FIX指摘1: 解像度比較の候補c(UI層960×540)がCSS基準では
+  // 表示不能でも、DPRを反映した物理ピクセル基準では成立しうることを示す回帰テスト。
+  it('候補cのUI層(960×540)はCSS 480×270コンテナでは収まらないが、DPR=2の物理基準では1倍で成立する(既知値)', () => {
+    const css = computeIntegerScale(480, 270, 960, 540);
+    const physical = computeIntegerScalePhysical(480, 270, 2, 960, 540);
+    expect(css.fits).toBe(false);
+    expect(physical.fits).toBe(true);
+    expect(physical.scale).toBe(1);
+    expect(physical.physicalContainerWidthPx).toBe(960);
+    expect(physical.physicalContainerHeightPx).toBe(540);
+  });
+
+  it('候補cのUI層(960×540)はDPR=1(等倍ディスプレイ)では、CSS基準と同じくCSS 480×270コンテナで収まらない(既知値)', () => {
+    const physical = computeIntegerScalePhysical(480, 270, 1, 960, 540);
+    expect(physical.fits).toBe(false);
+  });
 });

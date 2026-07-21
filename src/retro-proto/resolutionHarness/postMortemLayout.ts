@@ -2,6 +2,17 @@
 // 文字密度題材。PHASE1-UNITD-REVIEW追加指摘: art-spec §2.2(整数ピクセル規律)に
 // 適合させるため、文字位置・パネル・セグメント数値の座標算出をdrawPostMortemReport.ts
 // (canvas依存)から分離した純関数。fillTextへ渡す座標も整数化する。
+//
+// PHASE1-REVIEW-FIX指摘2: PixelMplus10/12はビットマップ内蔵TTF(10px/12pxの
+// ネイティブ解像度でのみシャープに表示される設計)のため、フォントサイズは常に
+// 固定10px/12pxとする(候補ごとに動的スケールしない)。低解像度候補では全行が
+// 収まらない場合があり、その場合は完全に収まる行だけを描画し、末尾に「残りN行」を
+// 付与する(収まる場合のみ)。これにより「同一文字サイズでどれだけ情報量が入るか」
+// という二層構成比較の本来の目的を可視化する。
+
+export const FONT_TITLE_SIZE_PX = 12;
+export const FONT_BODY_SIZE_PX = 10;
+const LINE_HEIGHT_PX = Math.round(FONT_BODY_SIZE_PX * 1.25); // 13
 
 export const BODY_LINES: readonly string[] = [
   '破壊モード: D02 エナメル焼損',
@@ -46,6 +57,8 @@ export interface PostMortemLayout {
   title: TextLine & { sizePx: number };
   bodySizePx: number;
   bodyLines: TextLine[];
+  /** 表示しきれなかった行数。0なら省略なし。 */
+  omittedLineCount: number;
   panel: IntRect;
   digitRows: DigitRow[];
 }
@@ -54,20 +67,38 @@ export function computePostMortemLayout(contentWidthPx: number, contentHeightPx:
   const w = contentWidthPx;
   const h = contentHeightPx;
 
-  const titleSizePx = Math.max(8, Math.round(h * 0.06));
-  const bodySizePx = Math.max(6, Math.round(h * 0.038));
   const marginX = Math.round(w * 0.04);
-  const lineHeight = Math.round(bodySizePx * 1.25);
+  const titleY = Math.round(h * 0.06);
+  const title = { x: marginX, y: titleY, text: '検死レポート', sizePx: FONT_TITLE_SIZE_PX };
 
-  let y = Math.round(h * 0.06);
-  const title = { x: marginX, y, text: '検死レポート', sizePx: titleSizePx };
-  y += Math.round(titleSizePx * 1.5);
+  const bodyStartY = titleY + Math.round(FONT_TITLE_SIZE_PX * 1.5);
+  const bodyBottomMarginPx = Math.round(h * 0.04);
+  const availableHeightPx = Math.max(0, h - bodyStartY - bodyBottomMarginPx);
+  const maxFullLines = Math.floor(availableHeightPx / LINE_HEIGHT_PX);
 
-  const bodyLines: TextLine[] = BODY_LINES.map((text) => {
-    const line = { x: marginX, y, text };
-    y += lineHeight;
-    return line;
-  });
+  const totalLines = BODY_LINES.length;
+  let includedCount: number;
+  let omittedLineCount = 0;
+
+  if (maxFullLines >= totalLines) {
+    includedCount = totalLines;
+  } else if (maxFullLines >= 1) {
+    // 最後の1行分を「残りN行」表示に使うため、収まる行数-1行だけ本文を描く。
+    includedCount = maxFullLines - 1;
+    omittedLineCount = totalLines - includedCount;
+  } else {
+    includedCount = 0;
+  }
+
+  const bodyLines: TextLine[] = [];
+  let y = bodyStartY;
+  for (let i = 0; i < includedCount; i++) {
+    bodyLines.push({ x: marginX, y, text: BODY_LINES[i] });
+    y += LINE_HEIGHT_PX;
+  }
+  if (omittedLineCount > 0) {
+    bodyLines.push({ x: marginX, y, text: `…残り${omittedLineCount}行` });
+  }
 
   const panelX = Math.round(w * 0.55);
   const panelY = Math.round(h * 0.06);
@@ -101,5 +132,5 @@ export function computePostMortemLayout(contentWidthPx: number, contentHeightPx:
     },
   ];
 
-  return { title, bodySizePx, bodyLines, panel, digitRows };
+  return { title, bodySizePx: FONT_BODY_SIZE_PX, bodyLines, omittedLineCount, panel, digitRows };
 }

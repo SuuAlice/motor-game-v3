@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { computeCarSpriteGeometry } from '../carSprite';
+import { TRACK_HALF_WIDTH } from '../track';
 
 describe('computeCarSpriteGeometry', () => {
   it('同じ方位インデックスなら決定論的に同じジオメトリを返す', () => {
@@ -43,5 +44,16 @@ describe('computeCarSpriteGeometry', () => {
         expect(Number.isInteger(value), `方位${i}の${key}が整数ではない: ${value}`).toBe(true);
       }
     }
+  });
+
+  // PHASE1-REVIEW-FIX指摘3(人間レビュー「車が小さすぎる」への対応、承認済み寸法)。
+  it('真横視(方位0)の側面幅は承認済みの28pxになる(既知値)', () => {
+    expect(computeCarSpriteGeometry(0).wallWidthPx).toBe(28);
+  });
+
+  it('真横視の側面幅はトラック全幅(84px)に対して過大にならない(50%未満)', () => {
+    const trackFullWidth = TRACK_HALF_WIDTH * 2;
+    const maxWallWidth = Math.max(...Array.from({ length: 16 }, (_, i) => computeCarSpriteGeometry(i).wallWidthPx));
+    expect(maxWallWidth).toBeLessThan(trackFullWidth * 0.5);
   });
 });

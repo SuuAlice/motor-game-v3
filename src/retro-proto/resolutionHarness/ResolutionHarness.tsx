@@ -152,8 +152,23 @@ export function ResolutionHarness() {
             }}
           />
         ) : (
-          <div className="flex h-full items-center justify-center px-4 text-center text-white">
-            現在のviewportではcontent {contentRes.w}×{contentRes.h}が等倍でも収まりません(fits=false)。
+          <div className="flex h-full flex-col items-center justify-center gap-1 px-4 text-center text-xs text-white">
+            {/* PHASE1-REVIEW-FIX指摘1: 必要サイズ・現在のCSS寸法・DPR・利用可能な
+                物理サイズを明示し、なぜ収まらないかを人間が即座に判断できるようにする。
+                未承認の非整数縮小(独自のfits=false救済)は行わない。 */}
+            <p className="text-sm font-bold">現在の条件ではcontent {contentRes.w}×{contentRes.h}が等倍でも収まりません(fits=false)</p>
+            <p>基準: {usePhysical ? '物理ピクセル(DPR考慮)' : 'CSSピクセル'}</p>
+            <p>
+              現在のコンテナ(CSS): {containerSize.w}×{containerSize.h}px / devicePixelRatio: {dpr}
+            </p>
+            <p>
+              利用可能な物理ピクセル(コンテナ×DPR): {Math.round(containerSize.w * dpr)}×{Math.round(containerSize.h * dpr)}px
+            </p>
+            {!usePhysical && (
+              <p className="text-yellow-300">
+                「物理ピクセル(DPR{dpr})基準」を有効にすると、DPR&gt;1の環境ではより小さいCSSコンテナでも成立する場合があります。
+              </p>
+            )}
           </div>
         )}
       </div>
