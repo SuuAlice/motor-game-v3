@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { computeFrameStats, computeGcIndicator, computeMemoryStats } from '../frameProbe';
+import { computeFrameStats, computeGcIndicator, computeMemoryStats, computeVsyncAwareStats } from '../frameProbe';
 
 describe('computeFrameStats', () => {
   it('空配列は全項目0を返す', () => {
@@ -108,5 +108,57 @@ describe('computeGcIndicator', () => {
     const indicator = computeGcIndicator(samples);
     expect(indicator.gcLikeDropCount).toBe(0);
     expect(indicator.maxDropBytes).toBe(0);
+  });
+});
+
+// Task#17(Suu指示): 固定16.7ms閾値の境界問題(60Hz実周期16.666...ms・タイマー
+// 揺れ)を避けるため、生データの中央値から実際のリフレッシュ周期を推定し、
+// その1.5倍を超えたフレームを「実質的なmissed-vsync」として数える。
+describe('computeVsyncAwareStats', () => {
+  it('空配列は全項目0を返す', () => {
+    expect(computeVsyncAwareStats([])).toMatchObject({
+      estimatedRefreshIntervalMs: 0,
+      missedVsyncCount: 0,
+      missedVsyncThresholdMs: 0,
+    });
+  });
+
+  it('ほぼ全フレームが16.666ms(60Hz)なら推定周期も16.666ms付近になり、超過は数えない(既知値)', () => {
+    const durations = Array.from({ length: 100 }, () => 16.666);
+    const stats = computeVsyncAwareStats(durations);
+    expect(stats.estimatedRefreshIntervalMs).toBeCloseTo(16.666, 5);
+    expect(stats.missedVsyncThresholdMs).toBeCloseTo(16.666 * 1.5, 5);
+    expect(stats.missedVsyncCount).toBe(0);
+  });
+
+  it('推定周期の1.5倍を超えたフレームだけをmissedVsyncCountへ数える(既知値)', () => {
+    // 中央値が16.666msになるよう大半を16.666msにし、一部だけ33.3ms(2vsync分、
+    // 1.5倍の閾値25msを超える)・20ms(1.5倍未満、超過に数えない)を混ぜる。
+    const durations = [
+      ...Array.from({ length: 20 }, () => 16.666),
+      20, // 16.666*1.5≈25ms未満なので超過に数えない
+      33.3, // 25ms超なので超過に数える
+      50, // 25ms超なので超過に数える
+    ];
+    const stats = computeVsyncAwareStats(durations);
+    expect(stats.missedVsyncCount).toBe(2);
+  });
+
+  it('固定16.7ms閾値のcomputeFrameStats.droppedFrameCountとは独立した値になりうる(60Hzより遅い環境の例)', () => {
+    // 実際の周期が30fps(約33.3ms)相当の環境では、フレーム自体は正常でも
+    // 固定16.7ms閾値だと全フレームが「超過」に見えてしまう。vsync対応版は
+    // 実際の周期(33.3ms)を基準にするため、正常なフレームは超過に数えない。
+    const durations = Array.from({ length: 50 }, () => 33.3);
+    const frameStats = computeFrameStats(durations);
+    const vsyncStats = computeVsyncAwareStats(durations);
+    expect(frameStats.droppedFrameCount).toBe(50); // 固定16.7ms基準では全件「超過」
+    expect(vsyncStats.missedVsyncCount).toBe(0); // 実周期基準では正常(欠落なし)
+  });
+
+  it('中央値は外れ値(1件だけの巨大値)に強い(既知値)', () => {
+    const durations = [...Array.from({ length: 99 }, () => 16.666), 500];
+    const stats = computeVsyncAwareStats(durations);
+    expect(stats.estimatedRefreshIntervalMs).toBeCloseTo(16.666, 5);
+    expect(stats.missedVsyncCount).toBe(1); // 500msの1件だけが超過
   });
 });

@@ -350,7 +350,13 @@ export function WorstCaseDemo() {
             <li>p99: {result.frameStats.p99Ms.toFixed(2)}ms</li>
             <li>最大: {result.frameStats.maxMs.toFixed(2)}ms</li>
             <li>
-              16.7ms超過フレーム数: {result.frameStats.droppedFrameCount} / {result.frameStats.count}
+              16.7ms超過フレーム数(固定閾値、互換性のため維持): {result.frameStats.droppedFrameCount} / {result.frameStats.count}
+            </li>
+            <li>
+              推定リフレッシュ周期(生間隔の中央値): {result.vsyncStats.estimatedRefreshIntervalMs.toFixed(3)}ms
+            </li>
+            <li>
+              実質的なmissed-vsync数(推定周期の1.5倍={result.vsyncStats.missedVsyncThresholdMs.toFixed(2)}ms超過): {result.vsyncStats.missedVsyncCount} / {result.frameStats.count}
             </li>
             <li>
               メモリ:{' '}

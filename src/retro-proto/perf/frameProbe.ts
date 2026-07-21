@@ -101,10 +101,43 @@ export function computeGcIndicator(
   return { available: true, gcLikeDropCount, maxDropBytes, dropThresholdBytes };
 }
 
+export interface VsyncAwareStats {
+  /** 生のフレーム間隔の中央値から推定した実際のリフレッシュ周期(ms)。
+   *  固定の16.7msではなく実測から推定するため、60Hzの実際の周期
+   *  16.666...msやタイマー揺れの影響を受けにくい。 */
+  estimatedRefreshIntervalMs: number;
+  /** 推定周期の1.5倍を超えたフレーム数(実質的にvsyncを1回以上取りこぼした
+   *  とみなせるフレーム)。固定16.7ms閾値の境界問題(60Hz実周期16.666...msとの
+   *  誤差・タイマー揺れ)を避けるための補助指標。 */
+  missedVsyncCount: number;
+  missedVsyncThresholdMs: number;
+}
+
+const MISSED_VSYNC_MULTIPLIER = 1.5;
+
+// Task#17(Suu指示): 固定16.7ms閾値による「超過」判定は互換性のため
+// computeFrameStats.droppedFrameCountとして維持しつつ、実際のリフレッシュ周期を
+// 生データの中央値から推定し、その1.5倍を超えたフレーム数を「実質的な
+// missed-vsync」として別途算出する純関数。丸め・閾値変更で見かけ上の合格を
+// 作らないよう、生の間隔分布から独立して計算する。
+export function computeVsyncAwareStats(frameDurationsMs: number[]): VsyncAwareStats {
+  if (frameDurationsMs.length === 0) {
+    return { estimatedRefreshIntervalMs: 0, missedVsyncCount: 0, missedVsyncThresholdMs: 0 };
+  }
+  const sorted = [...frameDurationsMs].sort((a, b) => a - b);
+  const estimatedRefreshIntervalMs = percentile(sorted, 0.5);
+  const missedVsyncThresholdMs = estimatedRefreshIntervalMs * MISSED_VSYNC_MULTIPLIER;
+  const missedVsyncCount = frameDurationsMs.filter((ms) => ms > missedVsyncThresholdMs).length;
+  return { estimatedRefreshIntervalMs, missedVsyncCount, missedVsyncThresholdMs };
+}
+
 export interface FrameProbeResult {
   frameStats: FrameStats;
   memoryStats: MemoryStats;
   gcIndicator: GcIndicator;
+  vsyncStats: VsyncAwareStats;
+  /** 丸め前の生フレーム間隔(ms)。vsyncStatsの再計算・追加分析に使う。 */
+  rawFrameDurationsMs: number[];
 }
 
 interface PerformanceMemory {
@@ -184,6 +217,8 @@ export class FrameProbe {
           frameStats: computeFrameStats(this.durationsMs),
           memoryStats: computeMemoryStats(this.memorySamples),
           gcIndicator: computeGcIndicator(this.memorySamples),
+          vsyncStats: computeVsyncAwareStats(this.durationsMs),
+          rawFrameDurationsMs: [...this.durationsMs],
         };
         this.stop();
         onComplete(result);
