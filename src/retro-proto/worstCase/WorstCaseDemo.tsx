@@ -27,6 +27,13 @@ import { playScore, type PlaybackHandle, type SampleBank } from '../../retro/aud
 import { MOTOR_SAMPLE_PARAMS, MOTOR_SOUND_PARAMS, applyMotorGain, applyMotorPlaybackRate } from '../../retro/audio/motorSound';
 import { computeInsetLayout } from './insetLayout';
 import { computeCarIndex } from './carIndex';
+import {
+  DEFAULT_QUALITY_MONITOR_CONFIG,
+  MODE7_STEP_PX,
+  createInitialQualityMonitorState,
+  updateQualityMonitor,
+  type QualityMonitorState,
+} from './qualityDegradation';
 
 const TRACK_POINTS = buildDummyTrackLoop();
 const LANDSCAPE_CONTENT = { w: 480, h: 270 };
@@ -47,11 +54,37 @@ const INSTRUMENT_SEED = 20260721;
 const WARMUP_MS = 2000;
 const COLLECT_MS = 10000;
 
+// Task#17品質低下策: stepPx=1(full)なら従来どおり1px単位、stepPx=2(reduced)
+// なら2px間隔でサンプリングし2×2ブロックを一括で塗ることでcanvas API呼び出し
+// 回数を減らす。MODE7_INSET_W/Hの端でstepPxに満たない場合はMath.minで
+// クリップし、すべての引数を整数に保つ(art-spec §2.2)。
+function drawMode7Inset(
+  offCtx: CanvasRenderingContext2D,
+  mode7X: number,
+  mode7Y: number,
+  transforms: ReturnType<typeof computePerspectiveRowTransforms>,
+  stepPx: number,
+): void {
+  for (let row = 0; row < MODE7_INSET_H; row += stepPx) {
+    const pixels = sampleRow(transforms[row], MODE7_INSET_W, getFloorPlanPixel);
+    const blockH = Math.min(stepPx, MODE7_INSET_H - row);
+    for (let x = 0; x < MODE7_INSET_W; x += stepPx) {
+      const blockW = Math.min(stepPx, MODE7_INSET_W - x);
+      offCtx.fillStyle = pixels[x] ?? PALETTE.N0;
+      offCtx.fillRect(mode7X + x, mode7Y + row, blockW, blockH);
+    }
+  }
+}
+
 export function WorstCaseDemo() {
   const [containerSize, setContainerSize] = useState({ w: 800, h: 450 });
   const [running, setRunning] = useState(false);
   const [measuring, setMeasuring] = useState(false);
   const [result, setResult] = useState<FrameProbeResult | null>(null);
+  // Mode7Quality表示用。EMA自体は毎フレーム更新されるが、Reactの再レンダーは
+  // quality(full/reduced)が実際に切り替わったときだけ行う(頻繁なstate更新を
+  // 避ける、FrameProbeの計測窓とは無関係の表示専用state)。
+  const [mode7Quality, setMode7Quality] = useState<'full' | 'reduced'>('full');
 
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -157,6 +190,9 @@ export function WorstCaseDemo() {
     let raf = 0;
     let progress = 0;
     let lastTime = performance.now();
+    // Task#17品質低下策: FrameProbe(p50/p95/p99計測用のサンプル窓)とは完全に
+    // 独立した状態。品質判定にはFrameProbeの収集配列を参照・流用しない。
+    let qualityState: QualityMonitorState = createInitialQualityMonitorState();
 
     const loop = (now: number) => {
       // Task#17: rAFのタイムスタンプが直前のperformance.now()より小さくなる
@@ -166,11 +202,18 @@ export function WorstCaseDemo() {
       lastTime = now;
       progress += elapsedSec * DUMMY_SPEED_POINTS_PER_SEC;
 
+      // 描画フェーズのみの所要時間を計測する(rAF間隔全体を計測するFrameProbeとは
+      // 別物。ブラウザ側のvsync待ち等のノイズを含めず、実際の描画コストだけを
+      // 品質判定へ反映する)。
+      const drawPhaseStart = performance.now();
+
       // 1) 俯瞰走行ビュー(全面)
       const carIndex = computeCarIndex(progress, TRACK_POINTS.length);
       drawOverheadView(offCtx, { trackPoints: TRACK_POINTS, carIndex }, contentRes.w, contentRes.h);
 
-      // 2) Mode7透視(インセット、横並び/縦積みはcomputeInsetLayoutが決める)
+      // 2) Mode7透視(インセット、横並び/縦積みはcomputeInsetLayoutが決める)。
+      // 直前フレームまでの品質判定結果(qualityState.quality)に応じて
+      // サンプリング粒度(1px/2px)を切り替える。
       const zoomPhase = (Math.sin(now / 2000) + 1) / 2;
       const zoom = 1 + zoomPhase * 1.2;
       const mode7Transforms = computePerspectiveRowTransforms(MODE7_INSET_W, MODE7_INSET_H, {
@@ -182,13 +225,7 @@ export function WorstCaseDemo() {
       const { x: mode7X, y: mode7Y } = insetLayout.mode7;
       offCtx.fillStyle = PALETTE.N0;
       offCtx.fillRect(mode7X - 1, mode7Y - 1, MODE7_INSET_W + 2, MODE7_INSET_H + 2);
-      for (let row = 0; row < MODE7_INSET_H; row++) {
-        const pixels = sampleRow(mode7Transforms[row], MODE7_INSET_W, getFloorPlanPixel);
-        for (let x = 0; x < MODE7_INSET_W; x++) {
-          offCtx.fillStyle = pixels[x] ?? PALETTE.N0;
-          offCtx.fillRect(mode7X + x, mode7Y + row, 1, 1);
-        }
-      }
+      drawMode7Inset(offCtx, mode7X, mode7Y, mode7Transforms, MODE7_STEP_PX[qualityState.quality]);
 
       // 3) 色演算(煙+発光、インセット)
       const { x: colorOpsX, y: colorOpsY } = insetLayout.colorOps;
@@ -210,8 +247,23 @@ export function WorstCaseDemo() {
         applyMotorGain(motorGainRef.current, rpm, MOTOR_SOUND_PARAMS.baseRpm);
       }
 
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      // 5) 合成blit: drawImageは毎フレーム(0,0,canvas.width,canvas.height)全域を
+      // オフスクリーン全体(常に不透明、drawFloorが全面を塗るため)で上書きする
+      // ため、直前のclearRectは冗長(Task#17品質低下策・条件(d): 全面不透明blitが
+      // 保証される箇所に限定して削除)。
       ctx.drawImage(offscreen, 0, 0, contentRes.w, contentRes.h, 0, 0, canvas.width, canvas.height);
+
+      // 描画フェーズ(1〜5、合成blitを含む自前の描画コスト全体)の所要時間を
+      // 品質判定へ渡す。§10.3の計測でblitがフレーム時間の6割を占めることが
+      // 分かっているため、blitを含めないとMode7側を下げても実際のフレーム
+      // 予算超過を検知できない。品質の切り替わりがあったときだけReact stateを
+      // 更新し、表示用テキストへ反映する(色以外の状態表示、art-spec的な規律)。
+      const drawPhaseMs = performance.now() - drawPhaseStart;
+      const previousQuality = qualityState.quality;
+      qualityState = updateQualityMonitor(qualityState, drawPhaseMs, DEFAULT_QUALITY_MONITOR_CONFIG);
+      if (qualityState.quality !== previousQuality) {
+        setMode7Quality(qualityState.quality);
+      }
 
       raf = requestAnimationFrame(loop);
     };
@@ -230,6 +282,9 @@ export function WorstCaseDemo() {
     // 描画を止めたら、進行中の計測もアイドル時間を含めないよう確実に止める
     // (PHASE1-UNITH-REVIEW指摘4)。
     stopMeasurement();
+    // 次回開始時、描画ループ内のqualityStateは新規に初期化される(full)ため、
+    // 表示用stateも合わせてリセットする(Task#17品質低下策)。
+    setMode7Quality('full');
   }
 
   function handleMeasure() {
@@ -262,7 +317,8 @@ export function WorstCaseDemo() {
           {measuring ? `計測中(ウォームアップ${WARMUP_MS / 1000}秒+計測${COLLECT_MS / 1000}秒)...` : '計測開始'}
         </button>
         <span className="text-xs text-slate-600">
-          content: {contentRes.w}×{contentRes.h} / 倍率: {scaleResult.fits ? `${scaleResult.scale}x` : '不成立'}
+          content: {contentRes.w}×{contentRes.h} / 倍率: {scaleResult.fits ? `${scaleResult.scale}x` : '不成立'} / Mode7描画品質:{' '}
+          {mode7Quality === 'full' ? '通常(1px)' : '低下中(2px、描画負荷が高いため自動的に粒度を下げています)'}
         </span>
       </div>
 
