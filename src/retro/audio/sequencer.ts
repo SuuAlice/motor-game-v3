@@ -7,7 +7,7 @@
 // 固定長で鳴らすだけだった。譜面→再生パラメータ(playbackRate・gain・
 // 発音/停止時刻)への変換をcomputePlaybackPlan純関数として分離し、
 // playScoreはその結果をAudioBufferSourceNode/GainNodeへ適用するだけにする。
-import { MAX_CHANNELS, computeLoopDurationSec, computeScheduledNotes, type Score } from './score';
+import { MAX_CHANNELS, computeLoopDurationSec, computeMaxConcurrentVoices, computeScheduledNotes, type Score } from './score';
 import { BGM_MASTER_GAIN } from './mixLevels';
 import type { InstrumentParams } from './synth';
 
@@ -16,11 +16,14 @@ export interface ChannelMixConfig {
   gain: number;
 }
 
-// 単純な合算クリップ防止として、チャンネル数で等分したゲインを返す。
-// 既定のmasterGainはBGM_MASTER_GAIN(mixLevels.ts)を使う。BGMとモーター音が
-// 同時に鳴る画面(最悪ケースタブ・音源タブ)でも合算がクリップ(絶対値1.0)を
-// 超えないよう、モーター側の予算(MOTOR_MASTER_GAIN)と合計して1.0以下になる
-// よう校正されている(Task#19)。
+// 単純な合算クリップ防止として、チャンネル数で等分したゲインを返す汎用API。
+// 既定のmasterGainはBGM_MASTER_GAIN(mixLevels.ts)を使う。
+//
+// Task#AUDIO-MIX-FIX2(Suu承認): computePlaybackPlanは「チャンネル数で均等分割」
+// (全chが同時に最大velocityで鳴るという実測ではほぼ起きない最悪ケース想定)ではなく、
+// 譜面から実測した最大同時発音voice数(computeMaxConcurrentVoices、score.ts)で
+// 分割するよう変更した。この関数自体は汎用の等分割APIとして意味を変えずに残す
+// (BGM譜面固有のvoice divisorをこの関数のchannelCount引数へ渡すような偽装はしない)。
 export function computeChannelMix(channelCount: number, masterGain = BGM_MASTER_GAIN): ChannelMixConfig[] {
   if (channelCount < 1) {
     throw new Error(`channelCount must be at least 1, got ${channelCount}`);
@@ -43,7 +46,7 @@ export interface NotePlaybackPlan {
   stopTimeSec: number;
   /** pitched楽器はnote.pitchHz/preset.frequencyHz、打楽器は1(基準rate維持)。 */
   playbackRate: number;
-  /** channel gain × note.velocity。 */
+  /** voice gain(BGM_MASTER_GAIN / 実測最大同時発音voice数) × note.velocity。 */
   gain: number;
   /** durationSecがpresetのサンプル長を超える場合、サンプルをループ再生して
    *  stopTimeSecちょうどで打ち切る必要があることを示す。 */
@@ -52,9 +55,22 @@ export interface NotePlaybackPlan {
 
 // 譜面→秒スケジュール(score.ts)の結果を、実際にAudioBufferSourceNode/GainNodeへ
 // 適用するためのパラメータへ変換する純関数。Web Audio APIには依存しない。
-export function computePlaybackPlan(score: Score, presets: Record<string, InstrumentParams>): NotePlaybackPlan[] {
+//
+// Task#AUDIO-MIX-FIX2(Suu承認): gainの分割数は「チャンネル数」ではなく、譜面から
+// 実測した最大同時発音voice数(computeMaxConcurrentVoices)を使う。loopBeatsを渡すと
+// ループ境界をまたぐ重なり(前ループ末尾の音符と次ループ冒頭の音符の同時発音)も
+// 考慮した分割数になる。省略時は単発(ループなし)区間として算出する。
+// 注意: ここで保証するのはConvolver適用前のdry段階のgain合計上限であり、
+// reverb後の最終出力ピークを保証するものではない。
+export function computePlaybackPlan(
+  score: Score,
+  presets: Record<string, InstrumentParams>,
+  loopBeats?: number,
+): NotePlaybackPlan[] {
   const scheduled = computeScheduledNotes(score);
-  const channelMix = computeChannelMix(score.channels.length);
+  const loopDurationSec = loopBeats !== undefined ? computeLoopDurationSec(score, loopBeats) : undefined;
+  const voiceDivisor = computeMaxConcurrentVoices(score, loopDurationSec);
+  const perVoiceGain = BGM_MASTER_GAIN / voiceDivisor;
 
   return scheduled.map((note) => {
     const preset = presets[note.instrument];
@@ -65,7 +81,6 @@ export function computePlaybackPlan(score: Score, presets: Record<string, Instru
     if (!Number.isFinite(playbackRate) || playbackRate <= 0) {
       throw new Error(`invalid playbackRate computed for ${note.instrument}: ${playbackRate}`);
     }
-    const channelGain = channelMix[note.channelIndex]?.gain ?? 0;
 
     return {
       channelIndex: note.channelIndex,
@@ -73,7 +88,7 @@ export function computePlaybackPlan(score: Score, presets: Record<string, Instru
       startTimeSec: note.startTimeSec,
       stopTimeSec: note.startTimeSec + note.durationSec,
       playbackRate,
-      gain: channelGain * note.velocity,
+      gain: perVoiceGain * note.velocity,
       // ループはpitched(持続音)楽器のみに適用する。打楽器(kick/snare)は
       // 一撃のサンプルであり、ループ再生すると音色が破綻するため対象外とする。
       loopSample: preset.pitched && note.durationSec > preset.durationSec,
@@ -106,7 +121,7 @@ export function playScore(
   destination: AudioNode,
   options: PlayScoreOptions = {},
 ): PlaybackHandle {
-  const plans = computePlaybackPlan(score, presets);
+  const plans = computePlaybackPlan(score, presets, options.loopBeats);
   const loopDurationSec = options.loopBeats !== undefined ? computeLoopDurationSec(score, options.loopBeats) : null;
   const lookaheadSec = options.lookaheadSec ?? 0.1;
 
