@@ -1,9 +1,15 @@
 // PHASE1-PLAN-01-REV2【1】/docs/phase1-plan.md Unit D: 解像度4案×3題材の
 // 試作ハーネス。CSSピクセル基準・物理ピクセル(DPR考慮)基準を切り替えて比較できる。
-// オフスクリーンに内部解像度のまま描画し、可視canvasへニアレストネイバーで
-// ブリット拡大する(整数拡大の実装方針、Unit A)。
+// Task#17(Suu承認)により、可視canvasのbacking storeを拡大後サイズ(物理ピクセル
+// 基準では巨大になりうる)にする方式から、常にcontent解像度に保つ「直接低解像度
+// Canvas方式」へ変更した(docs/phase1-report.md §10.3)。物理ピクセル基準は
+// computeDirectCanvasPhysicalCssSize(directCanvas.ts)で、CSS表示寸法=
+// content×整数physicalScale/DPRとして算出する(backing storeはcontent解像度の
+// まま拡大しない)。候補c(UI層960×540)がCSSコンテナに収まるかという比較目的
+// (PHASE1-REVIEW-FIX指摘1)自体は、backing store方式の変更による影響を受けない。
 import { useEffect, useRef, useState } from 'react';
-import { computeIntegerScale, computeIntegerScalePhysical } from '../../retro/canvas/integerScale';
+import { computeIntegerScale } from '../../retro/canvas/integerScale';
+import { applyDirectCanvasBackingSize, computeDirectCanvasPhysicalCssSize } from '../../retro/canvas/directCanvas';
 import { selectOrientedResolution } from '../../retro/canvas/orientation';
 import { loadPixelFonts } from '../../retro/text/pixelFonts';
 import { generateDummyWindingRecord } from './dummyWindingRecord';
@@ -64,39 +70,28 @@ export function ResolutionHarness() {
   const contentRes = selectOrientedResolution(containerSize.w, containerSize.h, landscapeRes);
 
   const dpr = typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1;
-  const scaleResult = usePhysical
-    ? computeIntegerScalePhysical(containerSize.w, containerSize.h, dpr, contentRes.w, contentRes.h)
-    : computeIntegerScale(containerSize.w, containerSize.h, contentRes.w, contentRes.h);
+  const cssScaleResult = computeIntegerScale(containerSize.w, containerSize.h, contentRes.w, contentRes.h);
+  const physicalScaleResult = computeDirectCanvasPhysicalCssSize(containerSize.w, containerSize.h, dpr, contentRes.w, contentRes.h);
+
+  const fits = usePhysical ? physicalScaleResult.fits : cssScaleResult.fits;
+  const displayWidthCss = usePhysical ? physicalScaleResult.cssWidthPx : cssScaleResult.contentWidthPx;
+  const displayHeightCss = usePhysical ? physicalScaleResult.cssHeightPx : cssScaleResult.contentHeightPx;
+  const scaleLabel = usePhysical ? `${physicalScaleResult.physicalScale}x(物理)` : `${cssScaleResult.scale}x`;
 
   useEffect(() => {
-    if (fontStatus === 'loading' || !scaleResult.fits) return;
+    if (fontStatus === 'loading' || !fits) return;
     const canvas = canvasRef.current;
     if (!canvas) return;
-
-    const offscreen = document.createElement('canvas');
-    offscreen.width = contentRes.w;
-    offscreen.height = contentRes.h;
-    const offCtx = offscreen.getContext('2d');
-    if (!offCtx) return;
-
-    if (materialId === 'winding') drawWindingTrace(offCtx, WINDING_RECORD, contentRes.w, contentRes.h);
-    else if (materialId === 'garage') drawGarageIllustration(offCtx, contentRes.w, contentRes.h);
-    else drawPostMortemReport(offCtx, contentRes.w, contentRes.h);
-
-    const scaledW = scaleResult.contentWidthPx;
-    const scaledH = scaleResult.contentHeightPx;
-    canvas.width = scaledW;
-    canvas.height = scaledH;
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
     ctx.imageSmoothingEnabled = false;
-    ctx.clearRect(0, 0, scaledW, scaledH);
-    ctx.drawImage(offscreen, 0, 0, contentRes.w, contentRes.h, 0, 0, scaledW, scaledH);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [materialId, contentRes.w, contentRes.h, fontStatus, scaleResult.fits, scaleResult.contentWidthPx, scaleResult.contentHeightPx]);
 
-  const displayWidthCss = scaleResult.fits ? scaleResult.contentWidthPx / (usePhysical ? dpr : 1) : 0;
-  const displayHeightCss = scaleResult.fits ? scaleResult.contentHeightPx / (usePhysical ? dpr : 1) : 0;
+    applyDirectCanvasBackingSize(canvas, contentRes.w, contentRes.h);
+
+    if (materialId === 'winding') drawWindingTrace(ctx, WINDING_RECORD, contentRes.w, contentRes.h);
+    else if (materialId === 'garage') drawGarageIllustration(ctx, contentRes.w, contentRes.h);
+    else drawPostMortemReport(ctx, contentRes.w, contentRes.h);
+  }, [materialId, contentRes.w, contentRes.h, fontStatus, fits]);
 
   return (
     <div className="flex h-full flex-col gap-3 p-3 text-sm">
@@ -134,11 +129,17 @@ export function ResolutionHarness() {
           物理ピクセル(DPR{dpr})基準
         </label>
         <span className="text-xs text-slate-600">
-          content: {contentRes.w}×{contentRes.h} / 倍率: {scaleResult.fits ? `${scaleResult.scale}x` : '不成立'} / フォント: {fontStatus}
+          content: {contentRes.w}×{contentRes.h} / 倍率: {fits ? scaleLabel : '不成立'} / フォント: {fontStatus}
         </span>
+        {usePhysical && fits && (!physicalScaleResult.cssWidthIsIntegerPx || !physicalScaleResult.cssHeightIsIntegerPx) && (
+          <span className="text-xs text-yellow-700">
+            注意: このDPR({dpr})とcontentの組み合わせではCSS表示寸法が非整数ピクセル({displayWidthCss.toFixed(3)}×
+            {displayHeightCss.toFixed(3)}px)になります。ブラウザの実レイアウトでの丸めにより物理ピクセル境界がずれる可能性があります(既知の制約)。
+          </span>
+        )}
       </div>
       <div ref={containerRef} className="relative flex-1 overflow-hidden bg-slate-800">
-        {scaleResult.fits ? (
+        {fits ? (
           <canvas
             ref={canvasRef}
             style={{

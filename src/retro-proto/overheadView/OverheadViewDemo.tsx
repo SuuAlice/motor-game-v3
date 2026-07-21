@@ -6,11 +6,18 @@
 // ResolutionHarnessと同様に明示表示する。
 // PHASE1-UNITH-REVIEW指摘: 縦持ち(コンテナが縦長)のときは内部解像度を270×480へ
 // 転置し、縦390×844のようなviewportでもfits=trueで表示できるようにする。
+// Task#17(Suu承認): オフスクリーン+drawImageブリット拡大を廃止し、visible
+// canvasのbacking storeをcontent解像度のまま保つ直接低解像度Canvas方式を採用
+// (docs/phase1-report.md §10.3)。carIndexの算出もTask#17調査で発見・修正した
+// 不変条件(trackLengthは正の整数、返り値は範囲内の有限整数、carIndex.ts)を
+// 同様に適用する。
 import { useEffect, useRef, useState } from 'react';
 import { computeIntegerScale } from '../../retro/canvas/integerScale';
+import { applyDirectCanvasBackingSize } from '../../retro/canvas/directCanvas';
 import { selectOrientedResolution } from '../../retro/canvas/orientation';
 import { buildDummyTrackLoop } from './track';
 import { drawOverheadView } from './drawOverheadView';
+import { computeCarIndex } from './carIndex';
 
 const TRACK_POINTS = buildDummyTrackLoop();
 const LANDSCAPE_CONTENT = { w: 480, h: 270 };
@@ -22,7 +29,6 @@ export function OverheadViewDemo() {
 
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const offscreenRef = useRef<HTMLCanvasElement | null>(null);
 
   useEffect(() => {
     const el = containerRef.current;
@@ -45,35 +51,26 @@ export function OverheadViewDemo() {
     const canvas = canvasRef.current;
     if (!canvas) return;
 
-    if (!offscreenRef.current) {
-      offscreenRef.current = document.createElement('canvas');
-    }
-    const offscreen = offscreenRef.current;
-    offscreen.width = contentRes.w;
-    offscreen.height = contentRes.h;
-    const offCtx = offscreen.getContext('2d');
     const ctx = canvas.getContext('2d');
-    if (!offCtx || !ctx) return;
-    offCtx.imageSmoothingEnabled = false;
+    if (!ctx) return;
     ctx.imageSmoothingEnabled = false;
 
-    canvas.width = scaleResult.contentWidthPx;
-    canvas.height = scaleResult.contentHeightPx;
+    applyDirectCanvasBackingSize(canvas, contentRes.w, contentRes.h);
 
     let raf = 0;
     let progress = 0;
     let lastTime = performance.now();
 
     const loop = (now: number) => {
-      const elapsedSec = Math.min((now - lastTime) / 1000, 0.25);
+      // Task#17で発見した、rAFタイムスタンプが直前のperformance.now()より
+      // 小さくなりうる事象(carIndex.ts参照)への対策として下限0秒もクランプする。
+      const elapsedSec = Math.max(0, Math.min((now - lastTime) / 1000, 0.25));
       lastTime = now;
       if (running) {
         progress += elapsedSec * DUMMY_SPEED_POINTS_PER_SEC;
       }
-      const carIndex = Math.floor(progress) % TRACK_POINTS.length;
-      drawOverheadView(offCtx, { trackPoints: TRACK_POINTS, carIndex }, contentRes.w, contentRes.h);
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-      ctx.drawImage(offscreen, 0, 0, contentRes.w, contentRes.h, 0, 0, canvas.width, canvas.height);
+      const carIndex = computeCarIndex(progress, TRACK_POINTS.length);
+      drawOverheadView(ctx, { trackPoints: TRACK_POINTS, carIndex }, contentRes.w, contentRes.h);
       raf = requestAnimationFrame(loop);
     };
     raf = requestAnimationFrame(loop);

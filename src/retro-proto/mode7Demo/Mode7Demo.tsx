@@ -2,8 +2,14 @@
 // 同様にコンテナへ整数拡大表示する。ズーム倍率は実時間ベースで往復させ、
 // 行ごとにサンプリング幅が変わる透視ズーム(床面が奥へ傾いて見える)の
 // 見え方を確認できるようにする(物理エンジンには接続しない)。
+// Task#17(Suu承認): オフスクリーン+drawImageブリット拡大を廃止し、visible
+// canvasのbacking storeをcontent解像度のまま保つ直接低解像度Canvas方式を採用
+// (docs/phase1-report.md §10.3)。静止比較(等方vs透視)の2枚並び自体は
+// drawPerspectiveComparison内部のレイアウトなので、backing store方式の変更は
+// 比較目的(同一画面上での並び)に影響しない。
 import { useEffect, useRef, useState } from 'react';
 import { computeIntegerScale } from '../../retro/canvas/integerScale';
+import { applyDirectCanvasBackingSize } from '../../retro/canvas/directCanvas';
 import { loadPixelFonts } from '../../retro/text/pixelFonts';
 import { drawMode7Demo } from './drawMode7Demo';
 import { COMPARISON_CONTENT_H, COMPARISON_CONTENT_W, drawPerspectiveComparison } from './drawPerspectiveComparison';
@@ -47,20 +53,12 @@ function PerspectiveComparisonPanel() {
     const canvas = canvasRef.current;
     if (!canvas) return;
 
-    const offscreen = document.createElement('canvas');
-    offscreen.width = COMPARISON_CONTENT_W;
-    offscreen.height = COMPARISON_CONTENT_H;
-    const offCtx = offscreen.getContext('2d');
     const ctx = canvas.getContext('2d');
-    if (!offCtx || !ctx) return;
+    if (!ctx) return;
     ctx.imageSmoothingEnabled = false;
 
-    canvas.width = scaleResult.contentWidthPx;
-    canvas.height = scaleResult.contentHeightPx;
-
-    drawPerspectiveComparison(offCtx);
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    ctx.drawImage(offscreen, 0, 0, COMPARISON_CONTENT_W, COMPARISON_CONTENT_H, 0, 0, canvas.width, canvas.height);
+    applyDirectCanvasBackingSize(canvas, COMPARISON_CONTENT_W, COMPARISON_CONTENT_H);
+    drawPerspectiveComparison(ctx);
   }, [fontStatus, scaleResult.fits, scaleResult.contentWidthPx, scaleResult.contentHeightPx]);
 
   return (
@@ -112,16 +110,11 @@ export function Mode7Demo() {
     const canvas = canvasRef.current;
     if (!canvas) return;
 
-    const offscreen = document.createElement('canvas');
-    offscreen.width = CONTENT_W;
-    offscreen.height = CONTENT_H;
-    const offCtx = offscreen.getContext('2d');
     const ctx = canvas.getContext('2d');
-    if (!offCtx || !ctx) return;
+    if (!ctx) return;
     ctx.imageSmoothingEnabled = false;
 
-    canvas.width = scaleResult.contentWidthPx;
-    canvas.height = scaleResult.contentHeightPx;
+    applyDirectCanvasBackingSize(canvas, CONTENT_W, CONTENT_H);
 
     let raf = 0;
     let startTime = performance.now();
@@ -131,9 +124,7 @@ export function Mode7Demo() {
       const phase = (Math.sin((elapsedSec / ZOOM_PERIOD_SEC) * Math.PI * 2) + 1) / 2; // 0..1
       const zoom = ZOOM_MIN + (ZOOM_MAX - ZOOM_MIN) * phase;
 
-      drawMode7Demo(offCtx, CONTENT_W, CONTENT_H, zoom);
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-      ctx.drawImage(offscreen, 0, 0, CONTENT_W, CONTENT_H, 0, 0, canvas.width, canvas.height);
+      drawMode7Demo(ctx, CONTENT_W, CONTENT_H, zoom);
       raf = requestAnimationFrame(loop);
     };
     raf = requestAnimationFrame(loop);

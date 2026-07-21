@@ -1,7 +1,10 @@
-// docs/phase1-plan.md §5.4/Unit E: 色演算許可リスト検証タブ。ResolutionHarnessと
-// 同様、オフスクリーン描画+ニアレストネイバーのブリット拡大でコンテナに収める。
+// docs/phase1-plan.md §5.4/Unit E: 色演算許可リスト検証タブ。Task#17(Suu承認)に
+// より、オフスクリーン+drawImageブリット拡大を廃止し、visible canvasの
+// backing storeをcontent解像度のまま保って直接描画する「直接低解像度Canvas
+// 方式」を採用した(合成blitのコストを削減、docs/phase1-report.md §10.3)。
 import { useEffect, useRef, useState } from 'react';
 import { computeIntegerScale } from '../../retro/canvas/integerScale';
+import { applyDirectCanvasBackingSize } from '../../retro/canvas/directCanvas';
 import { loadPixelFonts } from '../../retro/text/pixelFonts';
 import { drawColorOpsDemo } from './drawColorOpsDemo';
 
@@ -39,20 +42,11 @@ export function ColorOpsDemo() {
     const canvas = canvasRef.current;
     if (!canvas) return;
 
-    const offscreen = document.createElement('canvas');
-    offscreen.width = CONTENT_W;
-    offscreen.height = CONTENT_H;
-    const offCtx = offscreen.getContext('2d');
-    if (!offCtx) return;
-    drawColorOpsDemo(offCtx, CONTENT_W, CONTENT_H);
-
-    canvas.width = scaleResult.contentWidthPx;
-    canvas.height = scaleResult.contentHeightPx;
+    applyDirectCanvasBackingSize(canvas, CONTENT_W, CONTENT_H);
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
     ctx.imageSmoothingEnabled = false;
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    ctx.drawImage(offscreen, 0, 0, CONTENT_W, CONTENT_H, 0, 0, canvas.width, canvas.height);
+    drawColorOpsDemo(ctx, CONTENT_W, CONTENT_H);
   }, [fontStatus, scaleResult.fits, scaleResult.contentWidthPx, scaleResult.contentHeightPx]);
 
   return (

@@ -79,19 +79,12 @@ export function computeDirectCanvasPhysicalCssSize(
   };
 }
 
-// 実際のcanvas要素へ直接Canvas方式の寸法を適用する。backing store
-// (canvas.width/height)は常にcontentWidthPx/contentHeightPxのみを受け取り、
-// 拡大後のCSS表示寸法を渡す引数は存在しない(型シグネチャ自体でResizeObserver
-// によるscale変更時にbacking storeを表示寸法へ拡大し直せないようにする)。
-export function applyDirectCanvasSize(
-  canvas: HTMLCanvasElement,
-  contentWidthPx: number,
-  contentHeightPx: number,
-  cssWidthPx: number,
-  cssHeightPx: number,
-): void {
+// 実際のcanvas要素へbacking store(canvas.width/height)を設定する。常に
+// content解像度のみを受け取る型シグネチャにすることで、ResizeObserverに
+// よるscale変更時に誤ってbacking storeを表示寸法(拡大後のCSS px)へ
+// 設定し直せないようにする(CSS表示寸法側はReactのJSX style属性で
+// 宣言的に管理し、ここでは二重の管理元を作らない)。
+export function applyDirectCanvasBackingSize(canvas: HTMLCanvasElement, contentWidthPx: number, contentHeightPx: number): void {
   canvas.width = contentWidthPx;
   canvas.height = contentHeightPx;
-  canvas.style.width = `${cssWidthPx}px`;
-  canvas.style.height = `${cssHeightPx}px`;
 }

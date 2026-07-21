@@ -25,8 +25,9 @@ import { INSTRUMENT_PRESETS, renderInstrumentSample, type InstrumentParams } fro
 import { BGM_LOOP_BEATS, BGM_SCORE } from '../../retro/audio/generated/bgmScore';
 import { playScore, type PlaybackHandle, type SampleBank } from '../../retro/audio/sequencer';
 import { MOTOR_SAMPLE_PARAMS, MOTOR_SOUND_PARAMS, applyMotorGain, applyMotorPlaybackRate } from '../../retro/audio/motorSound';
+import { applyDirectCanvasBackingSize } from '../../retro/canvas/directCanvas';
 import { computeInsetLayout } from './insetLayout';
-import { computeCarIndex } from './carIndex';
+import { computeCarIndex } from '../overheadView/carIndex';
 import {
   DEFAULT_QUALITY_MONITOR_CONFIG,
   MODE7_STEP_PX,
@@ -176,18 +177,17 @@ export function WorstCaseDemo() {
     const canvas = canvasRef.current;
     if (!canvas) return;
 
-    // 【実験】Task#17性能調査: オフスクリーン中間canvas+毎フレームdrawImage
-    // 拡大コピーを廃止し、可視canvasのbacking store自体をcontent解像度
-    // (480×270、縦持ちは転置後)に保って直接描画する。拡大自体はCSS側
+    // Task#17(Suu承認・正式採用): オフスクリーン中間canvas+毎フレーム
+    // drawImage拡大コピーを廃止し、可視canvasのbacking store自体をcontent
+    // 解像度(480×270、縦持ちは転置後)に保って直接描画する。拡大自体はCSS側
     // (width/height、imageRendering:pixelated、既存)をブラウザcompositorへ
-    // 委ねる。数値上の妥当性検証のための一時的な実装(未承認、レポート後に
-    // 判断)。
+    // 委ねる。CPU4倍・2x条件でp95/p99が33.4ms→16.7〜16.8msへ改善(docs/
+    // phase1-report.md §10.3)。
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
     ctx.imageSmoothingEnabled = false;
 
-    canvas.width = contentRes.w;
-    canvas.height = contentRes.h;
+    applyDirectCanvasBackingSize(canvas, contentRes.w, contentRes.h);
 
     let raf = 0;
     let progress = 0;
