@@ -26,6 +26,7 @@ import { BGM_LOOP_BEATS, BGM_SCORE } from '../../retro/audio/generated/bgmScore'
 import { playScore, type PlaybackHandle, type SampleBank } from '../../retro/audio/sequencer';
 import { MOTOR_SAMPLE_PARAMS, MOTOR_SOUND_PARAMS, applyMotorGain, applyMotorPlaybackRate } from '../../retro/audio/motorSound';
 import { computeInsetLayout } from './insetLayout';
+import { computeCarIndex } from './carIndex';
 
 const TRACK_POINTS = buildDummyTrackLoop();
 const LANDSCAPE_CONTENT = { w: 480, h: 270 };
@@ -158,12 +159,15 @@ export function WorstCaseDemo() {
     let lastTime = performance.now();
 
     const loop = (now: number) => {
-      const elapsedSec = Math.min((now - lastTime) / 1000, 0.25);
+      // Task#17: rAFのタイムスタンプが直前のperformance.now()より小さくなる
+      // 事象(headless Chromiumで確認、carIndex.tsのコメント参照)への対策として、
+      // 上限(0.25秒)だけでなく下限(0秒)もクランプする。
+      const elapsedSec = Math.max(0, Math.min((now - lastTime) / 1000, 0.25));
       lastTime = now;
       progress += elapsedSec * DUMMY_SPEED_POINTS_PER_SEC;
 
       // 1) 俯瞰走行ビュー(全面)
-      const carIndex = Math.floor(progress) % TRACK_POINTS.length;
+      const carIndex = computeCarIndex(progress, TRACK_POINTS.length);
       drawOverheadView(offCtx, { trackPoints: TRACK_POINTS, carIndex }, contentRes.w, contentRes.h);
 
       // 2) Mode7透視(インセット、横並び/縦積みはcomputeInsetLayoutが決める)
