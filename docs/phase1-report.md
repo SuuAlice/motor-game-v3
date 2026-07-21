@@ -31,7 +31,18 @@
 | `35eecd3` | Unit H: 性能測定(frameProbe)+最悪ケース試作 |
 | `328c25a` | Unit H修正: 縦持ち転置・メモリ計測窓・GC検出・停止状態管理・タブa11y・本書新設 |
 | `30a0671` | PHASE1-REVIEW-FIX承認4件: 候補c表示・検死文字固定サイズ+行クリップ・車体サイズ拡大・Mode7静止比較 |
-| (本コミット) | 本書更新: §8を修正実施済みへ更新 |
+| `b15aed3` | 本書更新: §8を修正実施済みへ更新 |
+| `b9fd843` | Task#18(音源タブ無音)+Task#19(最悪ケース音量バランス)を修正 |
+| `becf4b9`・`3876920` | 本書更新: Task#18・#19の原因調査結果を記録 |
+| `84a9983` | Task#17: WorstCaseDemoの初回フレームクラッシュを解消 |
+| `1975d8c` | 本書更新: クラッシュの原因・修正結果を記録 |
+| `efb085d` | 本書更新: WorstCaseDemo性能ボトルネックの計測結果と品質低下案を記録 |
+| `76ed1c3` | Task#17: Mode7品質低下策(2pxサンプリング)+冗長clearRect削除 |
+| `13fb7a5` | 本書更新: 品質低下策の実装結果と修正前後比較計測を記録 |
+| `dd46aa6` | Task#17: WorstCaseDemoを直接低解像度Canvas方式へ変更(合成blit廃止、実験実装) |
+| `957230f` | Task#17: 直接Canvas方式のDPR物理基準ヘルパー(`directCanvas.ts`)とvsync対応統計(`computeVsyncAwareStats`)を追加 |
+| `00cfae8`・`833710d` | Task#17: 直接低解像度Canvas方式を全demo(ColorOpsDemo/Mode7Demo/OverheadViewDemo/ResolutionHarness)へ展開、DPR物理基準を`computeDirectCanvasPhysicalCssSize`へ置き換え |
+| (本コミット) | 本書更新: 全demo展開・DPR物理基準整理の結果を記録、未着手事項(vsync再測定・18秒非復帰の切り分け)を明記 |
 
 各コミットは`npm run test && npm run build && npm run lint`成功、`src/engine/`・既存V2 UI(`src/render/`等)への意図しない変更なしを確認済み。
 
@@ -48,7 +59,7 @@
 
 ## 3. 自動ゲート結果(本コミット時点)
 
-- `npm run test`: 46ファイル・447テスト成功(既存V2由来206テスト含む、無変更)
+- `npm run test`: 51ファイル・494テスト成功(既存V2由来206テスト含む、無変更。最新コミット時点、本書冒頭のコミット一覧参照)
 - `npm run build`: 成功、651モジュール、既存V2本番入口(`index.html`)を維持。`retro-proto.html`は本番buildに含まれない
 - `npm run lint`: 成功(oxlint、警告0)
 - `npx vite-node scripts/checkPaletteUsage.ts src/retro src/retro-proto`: RGB直値0件検出
@@ -249,6 +260,21 @@ Suu指示に基づき、visible canvasのbacking sizeを常にcontent解像度(4
 **評価**: 1x条件では修正前後の差がノイズレベル(run間のばらつきの範囲内、悪化とは判断していない)。**2x条件では2回とも一貫して、p95/p99が33.4ms(2 vsync分)から16.7〜16.8ms(1 vsync分)へ改善し、10秒間の収集フレーム数も498〜499から600(欠落なし)へ回復、16.7ms超過率も42%台から29%台へ改善した。** 倍率が上がるほど`drawImage`の転送先ピクセル数(=コスト)が増える(2xは1xの4倍)という理屈と整合する結果であり、案1・2よりも明確で再現性のある改善効果が確認できた。ただし29%程度の超過はまだ残っており、これだけで60fps完全達成には至っていない。実装はまだコミットしていない(WorstCaseDemo限定の実験コード)。
 
 **次のステップ(承認待ち)**: (1) 本方式を`WorstCaseDemo.tsx`へ正式に採用しコミットする。(2) 他の全demo(`ResolutionHarness.tsx`・`OverheadViewDemo.tsx`・`Mode7Demo.tsx`・`ColorOpsDemo.tsx`等)への展開要否を判断する(いずれも同じオフスクリーン+`drawImage`パターンを使っており、同様の効果が見込める)。(3) DPR物理基準(`computeIntegerScalePhysical`)との関係の整理(ご指示の続きが途中で途切れていたため、詳細を改めて伺いたい)。(4) 29%残る超過フレームの追加要因調査。
+
+**正式採用・全demo展開・DPR物理基準整理(コミット`957230f`・`00cfae8`・`833710d`、人間再レビュー待ち)**
+
+Suu承認(2026-07-21 03:32:42)を受け、以下を実装・確認済み。
+
+1. **WorstCaseDemoへの正式採用**: 上記実測結果(2x条件でp95/p99が33.4ms→16.7〜16.8ms、10秒600フレームへ改善)を根拠として正式採用した。実験扱いのコメントを外し、共通ヘルパー`applyDirectCanvasBackingSize`(後述)を使うよう整理した。
+2. **全demoへの展開**: `ColorOpsDemo`・`Mode7Demo`(静止比較+アニメーション両方)・`OverheadViewDemo`・`ResolutionHarness`のオフスクリーン+`drawImage`ブリット拡大を廃止し、直接低解像度Canvas方式へ統一した。各demoの比較目的(Mode7の等方vs透視2枚並び、解像度4案×3題材比較等)はbacking store方式の変更による影響を受けないことを実Chromiumで確認した(全6タブ・全候補×全題材でエラーなし、スクリーンショットで描画内容を目視確認)。副次的に、`OverheadViewDemo`にもTask#17で発見した`elapsedSec`下限クランプ+`computeCarIndex`の不変条件を適用した(同種の範囲外インデックスの潜在バグを予防、`computeCarIndex`は`overheadView/carIndex.ts`へ移設)。
+3. **共通ヘルパーへの集約**: `src/retro/canvas/directCanvas.ts`に`applyDirectCanvasBackingSize`(backing storeへcontent解像度のみを設定できる型シグネチャ、ResizeObserverでのscale変更時にbacking storeを表示寸法へ拡大し直せないことを構造的に保証)と`computeDirectCanvasPhysicalCssSize`(DPR物理基準の寸法計算)を新設し、各demoが共通で使うようにした。
+4. **DPR物理基準の整理**: 旧`computeIntegerScalePhysical`(backing storeを物理スケール後サイズにする方式、Unit Aで導入)から`computeDirectCanvasPhysicalCssSize`へ置き換えた。backing storeは常にcontent解像度のまま、CSS表示寸法=content×整数physicalScale/devicePixelRatioとすることで、理論上の物理表示寸法(CSS×DPR)がcontent×整数physicalScaleに厳密一致することを保証する(実数演算上、常に成立する)。fractional DPR(1.25/1.5等)ではCSS表示寸法自体が非整数ピクセルになりうることをテスト8件で検証し(`directCanvas.test.ts`)、`cssWidthIsIntegerPx`/`cssHeightIsIntegerPx`フラグで検出、`ResolutionHarness`のUIへ「ブラウザの実レイアウトでの丸めにより物理ピクセル境界がずれる可能性がある」という警告として表示するようにした(勝手な丸めはせず、非整数のまま報告する)。実機テストではDPR=1.5・全候補(a〜d)で警告は出なかった(現行の候補寸法とDPR=1.5の組み合わせでは非整数化しない、実測で確認)。
+5. **vsync対応統計の追加**: `frameProbe.ts`に`computeVsyncAwareStats`を追加。固定16.7ms閾値(`droppedFrameCount`、互換性のため維持)とは別に、生のフレーム間隔の中央値から実際のリフレッシュ周期を推定し、その1.5倍を超えたフレームを「実質的なmissed-vsync」として数える指標を新設した(テスト5件)。`WorstCaseDemo`の計測結果表示にも追加した。**ただしこの指標を使ったCPU4倍・1x/2xの再測定はまだ実施していない(未着手、次回)。**
+
+**未着手・次回に持ち越す事項**:
+- vsync対応統計を使ったCPU4倍・1x/2x再測定(残る29%の超過フレームが実質的なmissed-vsyncかどうかの切り分け)。
+- reduced→fullが18秒復帰しなかった件の切り分け調査(その期間のdrawPhaseMs・EMA・underStreakを記録し、「負荷が12ms未満にならず正しく復帰しなかった」のか「状態更新不具合」かを判別する。Suuから、headless固有と断定しないよう明示的な指示あり)。
+- 上記2点はまだ着手していない。次回セッションで、`WorstCaseDemo`の描画ループへ一時的な診断ログ(または恒常的な診断フック)を追加し、実ブラウザで再現・記録してから報告する。
 
 ## 11. 未決事項(人間/Suu判断待ち、docs/phase1-plan.md §13より継承)
 
