@@ -59,7 +59,7 @@ const COLLECT_MS = 10000;
 // 回数を減らす。MODE7_INSET_W/Hの端でstepPxに満たない場合はMath.minで
 // クリップし、すべての引数を整数に保つ(art-spec §2.2)。
 function drawMode7Inset(
-  offCtx: CanvasRenderingContext2D,
+  targetCtx: CanvasRenderingContext2D,
   mode7X: number,
   mode7Y: number,
   transforms: ReturnType<typeof computePerspectiveRowTransforms>,
@@ -70,8 +70,8 @@ function drawMode7Inset(
     const blockH = Math.min(stepPx, MODE7_INSET_H - row);
     for (let x = 0; x < MODE7_INSET_W; x += stepPx) {
       const blockW = Math.min(stepPx, MODE7_INSET_W - x);
-      offCtx.fillStyle = pixels[x] ?? PALETTE.N0;
-      offCtx.fillRect(mode7X + x, mode7Y + row, blockW, blockH);
+      targetCtx.fillStyle = pixels[x] ?? PALETTE.N0;
+      targetCtx.fillRect(mode7X + x, mode7Y + row, blockW, blockH);
     }
   }
 }
@@ -176,16 +176,18 @@ export function WorstCaseDemo() {
     const canvas = canvasRef.current;
     if (!canvas) return;
 
-    const offscreen = document.createElement('canvas');
-    offscreen.width = contentRes.w;
-    offscreen.height = contentRes.h;
-    const offCtx = offscreen.getContext('2d');
+    // 【実験】Task#17性能調査: オフスクリーン中間canvas+毎フレームdrawImage
+    // 拡大コピーを廃止し、可視canvasのbacking store自体をcontent解像度
+    // (480×270、縦持ちは転置後)に保って直接描画する。拡大自体はCSS側
+    // (width/height、imageRendering:pixelated、既存)をブラウザcompositorへ
+    // 委ねる。数値上の妥当性検証のための一時的な実装(未承認、レポート後に
+    // 判断)。
     const ctx = canvas.getContext('2d');
-    if (!offCtx || !ctx) return;
+    if (!ctx) return;
     ctx.imageSmoothingEnabled = false;
 
-    canvas.width = scaleResult.contentWidthPx;
-    canvas.height = scaleResult.contentHeightPx;
+    canvas.width = contentRes.w;
+    canvas.height = contentRes.h;
 
     let raf = 0;
     let progress = 0;
@@ -209,7 +211,7 @@ export function WorstCaseDemo() {
 
       // 1) 俯瞰走行ビュー(全面)
       const carIndex = computeCarIndex(progress, TRACK_POINTS.length);
-      drawOverheadView(offCtx, { trackPoints: TRACK_POINTS, carIndex }, contentRes.w, contentRes.h);
+      drawOverheadView(ctx, { trackPoints: TRACK_POINTS, carIndex }, contentRes.w, contentRes.h);
 
       // 2) Mode7透視(インセット、横並び/縦積みはcomputeInsetLayoutが決める)。
       // 直前フレームまでの品質判定結果(qualityState.quality)に応じて
@@ -223,21 +225,21 @@ export function WorstCaseDemo() {
         sourceDepthSpanPx: FLOOR_PLAN_HEIGHT_PX / 2,
       });
       const { x: mode7X, y: mode7Y } = insetLayout.mode7;
-      offCtx.fillStyle = PALETTE.N0;
-      offCtx.fillRect(mode7X - 1, mode7Y - 1, MODE7_INSET_W + 2, MODE7_INSET_H + 2);
-      drawMode7Inset(offCtx, mode7X, mode7Y, mode7Transforms, MODE7_STEP_PX[qualityState.quality]);
+      ctx.fillStyle = PALETTE.N0;
+      ctx.fillRect(mode7X - 1, mode7Y - 1, MODE7_INSET_W + 2, MODE7_INSET_H + 2);
+      drawMode7Inset(ctx, mode7X, mode7Y, mode7Transforms, MODE7_STEP_PX[qualityState.quality]);
 
       // 3) 色演算(煙+発光、インセット)
       const { x: colorOpsX, y: colorOpsY } = insetLayout.colorOps;
-      offCtx.fillStyle = PALETTE.N7;
-      offCtx.fillRect(colorOpsX - 1, colorOpsY - 1, COLOROPS_INSET_W + 2, COLOROPS_INSET_H + 2);
+      ctx.fillStyle = PALETTE.N7;
+      ctx.fillRect(colorOpsX - 1, colorOpsY - 1, COLOROPS_INSET_W + 2, COLOROPS_INSET_H + 2);
       for (const cell of buildGlowComparison(colorOpsX, colorOpsY).withOperation) {
-        offCtx.fillStyle = cell.color;
-        offCtx.fillRect(cell.x, cell.y, cell.widthPx, cell.heightPx);
+        ctx.fillStyle = cell.color;
+        ctx.fillRect(cell.x, cell.y, cell.widthPx, cell.heightPx);
       }
       for (const cell of buildSmokeComparison(colorOpsX, colorOpsY + 30).withOperation) {
-        offCtx.fillStyle = cell.color;
-        offCtx.fillRect(cell.x, cell.y, cell.widthPx, cell.heightPx);
+        ctx.fillStyle = cell.color;
+        ctx.fillRect(cell.x, cell.y, cell.widthPx, cell.heightPx);
       }
 
       // 4) モーター音のRPMをダミーで連続変化させる(物理エンジン非接続)
@@ -247,17 +249,12 @@ export function WorstCaseDemo() {
         applyMotorGain(motorGainRef.current, rpm, MOTOR_SOUND_PARAMS.baseRpm);
       }
 
-      // 5) 合成blit: drawImageは毎フレーム(0,0,canvas.width,canvas.height)全域を
-      // オフスクリーン全体(常に不透明、drawFloorが全面を塗るため)で上書きする
-      // ため、直前のclearRectは冗長(Task#17品質低下策・条件(d): 全面不透明blitが
-      // 保証される箇所に限定して削除)。
-      ctx.drawImage(offscreen, 0, 0, contentRes.w, contentRes.h, 0, 0, canvas.width, canvas.height);
+      // 【実験】5) 合成blitは廃止(直接ctxへ描画済みのため、オフスクリーンからの
+      // drawImageコピーが不要になった)。
 
-      // 描画フェーズ(1〜5、合成blitを含む自前の描画コスト全体)の所要時間を
-      // 品質判定へ渡す。§10.3の計測でblitがフレーム時間の6割を占めることが
-      // 分かっているため、blitを含めないとMode7側を下げても実際のフレーム
-      // 予算超過を検知できない。品質の切り替わりがあったときだけReact stateを
-      // 更新し、表示用テキストへ反映する(色以外の状態表示、art-spec的な規律)。
+      // 描画フェーズ(1〜4)の所要時間を品質判定へ渡す。品質の切り替わりが
+      // あったときだけReact stateを更新し、表示用テキストへ反映する
+      // (色以外の状態表示、art-spec的な規律)。
       const drawPhaseMs = performance.now() - drawPhaseStart;
       const previousQuality = qualityState.quality;
       qualityState = updateQualityMonitor(qualityState, drawPhaseMs, DEFAULT_QUALITY_MONITOR_CONFIG);
