@@ -6,7 +6,7 @@ This file provides guidance to coding agents working with this repository. `AGEN
 
 ## プロジェクトの現状
 
-V3「(仮題)挑め!手作りモーターカーGP」はPhase 0(リポジトリ初期化)が完了しました。本リポジトリは旧V2(「走れ!手作りモーターカー」)の開発リポジトリをそのまま起点とし、**同一履歴上でV3化した**(人間承認済み、`docs/repo-birth-checklist.md`の新規複製ステップは適用していない)。V2は Phase 0〜5が完了済みで、`src/engine/`(モーター物理+車体物理+コース)は206テスト・build・lintがすべて成功した状態で凍結されている(`docs/baseline-v2.0.md`)。GitHub(`suualice08/motor-game-v3`、default branch `main`)・Vercel(project `motor-game-v3`)への分離も完了している(詳細は`docs/handoff.md`)。V3はこのエンジンを基盤に、在庫経済・実在素材ティア・破壊モードと失敗図鑑・実レシピCPUレース・レトロ描画パイプラインを追加する。次はPhase 1(UI/描画/音担当エージェントの参加、レトロ描画基盤の技術検証)。
+V3「(仮題)挑め!手作りモーターカーGP」はPhase 0(リポジトリ初期化)・Phase 1(レトロ描画基盤の技術検証、2026-07-22人間承認・完了、`docs/phase1-report.md` §16)が完了しました。本リポジトリは旧V2(「走れ!手作りモーターカー」)の開発リポジトリをそのまま起点とし、**同一履歴上でV3化した**(人間承認済み、`docs/repo-birth-checklist.md`の新規複製ステップは適用していない)。V2は Phase 0〜5が完了済みで、`src/engine/`(モーター物理+車体物理+コース)は206テスト・build・lintがすべて成功した状態で凍結されている(`docs/baseline-v2.0.md`)。GitHub(`suualice08/motor-game-v3`、default branch `main`)・Vercel(project `motor-game-v3`)への分離も完了している(詳細は`docs/handoff.md`)。V3はこのエンジンを基盤に、在庫経済・実在素材ティア・破壊モードと失敗図鑑・実レシピCPUレース・レトロ描画パイプラインを追加する。次はPhase 2(素材システム: materials.ts+写像層、在庫・個体状態、サルベージ、店)。
 
 - `src/engine/` — 純粋な物理エンジン(`constants.ts`・`commutator.ts`・`motorPhysics.ts`・`vehiclePhysics.ts`・`trackPhysics.ts`・`scoring.ts`・`failures.ts`・`recipeCode.ts`・`__tests__/`)。V2から凍結継承(仕様書§2「エンジン凍結方針」)
 - `src/store/`・`src/render/`・`src/components/`・`src/modes/`・`src/data/` — **V2 UI一式。Phase 0時点では凍結参考実装として保持**(削除しない)。V3はレトロ描画基盤(低解像度Canvas)へ全面刷新するため、Phase 1で新UIシェルが構築でき次第、論理単位で置換・削除する
@@ -116,7 +116,7 @@ Phase 0(alice、完了): リポジトリ初期化(同一履歴上、案A)・base
 | 役割 | 担当 | 責務 |
 |---|---|---|
 | エンジン | **alice**(Claude Code) | `src/engine/`オーナー。素材写像・破壊状態機械・経済フック・sweep検証。V1.5以来の規律(構造凍結・定数逆算)を維持 |
-| UI/描画/音 | **新規Claude Codeインスタンス**(名称未定・後日参加) | レトロ描画パイプライン・ガレージUI・パーティクル・Web Audio。`docs/art-spec.md`を常時参照 |
+| UI/描画/音 | **brabit**(Claude Code) | レトロ描画パイプライン・ガレージUI・パーティクル・Web Audio。`docs/art-spec.md`を常時参照 |
 | マネージャー | **Suu**(Codex/GPT-5.6) | 実装から離れ、計画レビュー・進捗整理・agmsg中継に専任 |
 | コンテンツ(後発) | **4体目**(Claude Code、Phase 5で投入) | ボスレシピ設計・素材テーブル調整・経済バランスsweep。sweep基盤を使うがengine/本体は触らない |
 | 物理・アーキテクチャレビュー | Fable(Claude) | スプリント境界のレビュー、物理判断、エージェント間の裁定 |
