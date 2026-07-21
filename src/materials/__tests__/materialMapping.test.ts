@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { combineGearEfficiency, computeGearMaterialEfficiencyRatio } from '../materialMapping';
-import { GEAR_MATERIALS } from '../materials';
+import { combineGearEfficiency, computeGearMaterialEfficiencyRatio, computeMagnetStrengthCalibration } from '../materialMapping';
+import { GEAR_MATERIALS, MAGNET_MATERIALS } from '../materials';
+
+// src/data/parameterPresets.ts(V2 UI側)のMAGNET_PRESETSが「弱(フェライト)」「強(ネオジム)」と
+// 明示ラベル付けした値。materialMapping.ts(production)からV2 UIモジュールをimportしないため、
+// ここでは値のみをコメントで出典を示しつつ再掲する(2026-07-22 Suu指摘3)。
+const V2_UI_FERRITE_LABEL_VALUE = 0.2;
+const V2_UI_NEODYMIUM_LABEL_VALUE = 0.9;
 
 // V2互換の既存3プリセット(src/data/partPresets.ts GEAR_PRESETS)由来の基準効率。
 // gearRatio(減速比)依存であり素材依存ではない。ここでは値のみを固定して再利用する。
@@ -110,5 +116,76 @@ describe('materialMapping.ts Step3(ギヤ材質の効率比率・設計較正値
       const result = combineGearEfficiency(0.5, 2.0);
       expect(result).toEqual({ ok: true, efficiency: 1 });
     });
+  });
+});
+
+describe('materialMapping.ts Step4(磁石材質のmagnetStrength較正値・設計較正値)', () => {
+  it('MAGNET_MATERIALSの全ティアに対応する較正値が存在する(Record<MagnetMaterialId,...>の型網羅+実行時確認)', () => {
+    for (const magnet of MAGNET_MATERIALS) {
+      const result = computeMagnetStrengthCalibration(magnet);
+      expect(result.ok, `${magnet.id}の較正値が見つかりません`).toBe(true);
+    }
+  });
+
+  it('フェライト=0.20はV2 UI(parameterPresets.ts MAGNET_PRESETS)の「弱(フェライト)」ラベル値と一致する', () => {
+    const ferrite = MAGNET_MATERIALS.find((m) => m.id === 'magnet-ferrite')!;
+    const result = computeMagnetStrengthCalibration(ferrite);
+    expect(result).toEqual({ ok: true, magnetStrength: V2_UI_FERRITE_LABEL_VALUE });
+  });
+
+  it('ネオジム=0.90はV2 UI(parameterPresets.ts MAGNET_PRESETS)の「強(ネオジム)」ラベル値と一致する', () => {
+    const neodymium = MAGNET_MATERIALS.find((m) => m.id === 'magnet-neodymium')!;
+    const result = computeMagnetStrengthCalibration(neodymium);
+    expect(result).toEqual({ ok: true, magnetStrength: V2_UI_NEODYMIUM_LABEL_VALUE });
+  });
+
+  it('アルニコ=0.55', () => {
+    const alnico = MAGNET_MATERIALS.find((m) => m.id === 'magnet-alnico')!;
+    const result = computeMagnetStrengthCalibration(alnico);
+    expect(result).toEqual({ ok: true, magnetStrength: 0.55 });
+  });
+
+  it('サマリウムコバルト=0.65', () => {
+    const smco = MAGNET_MATERIALS.find((m) => m.id === 'magnet-samarium-cobalt')!;
+    const result = computeMagnetStrengthCalibration(smco);
+    expect(result).toEqual({ ok: true, magnetStrength: 0.65 });
+  });
+
+  it('4値すべてが有限かつ既存magnetStrengthドメイン[0,1]に収まる', () => {
+    for (const magnet of MAGNET_MATERIALS) {
+      const result = computeMagnetStrengthCalibration(magnet);
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(Number.isFinite(result.magnetStrength)).toBe(true);
+        expect(result.magnetStrength).toBeGreaterThanOrEqual(0);
+        expect(result.magnetStrength).toBeLessThanOrEqual(1);
+      }
+    }
+  });
+
+  it('アルニコ(0.55)<サマリウムコバルト(0.65): 実Br順位(アルニコ1.2T>サマリウムコバルト1.0T)を意図的に逆転させた較正順序', () => {
+    const alnico = computeMagnetStrengthCalibration(MAGNET_MATERIALS.find((m) => m.id === 'magnet-alnico')!);
+    const smco = computeMagnetStrengthCalibration(MAGNET_MATERIALS.find((m) => m.id === 'magnet-samarium-cobalt')!);
+    expect(alnico.ok && smco.ok).toBe(true);
+    if (alnico.ok && smco.ok) {
+      expect(alnico.magnetStrength).toBeLessThan(smco.magnetStrength);
+    }
+  });
+
+  it('較正値の順序はフェライト<アルニコ<サマリウムコバルト<ネオジムである', () => {
+    const values = MAGNET_MATERIALS.map((m) => {
+      const result = computeMagnetStrengthCalibration(m);
+      return result.ok ? result.magnetStrength : Number.NaN;
+    });
+    const [ferrite, alnico, smco, neodymium] = values;
+    expect(ferrite).toBeLessThan(alnico);
+    expect(alnico).toBeLessThan(smco);
+    expect(smco).toBeLessThan(neodymium);
+  });
+
+  it('未登録の素材IDはok:falseで明示的に失敗する', () => {
+    const unknownMagnet = { ...MAGNET_MATERIALS[0], id: 'magnet-unknown-fixture' };
+    const result = computeMagnetStrengthCalibration(unknownMagnet);
+    expect(result.ok).toBe(false);
   });
 });

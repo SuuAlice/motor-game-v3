@@ -1,12 +1,13 @@
 // 素材(+個体劣化状態)→既存engine/パラメータへの純関数写像(spec §4.3)。
-// engine/本体は素材を知らない。本ファイルはStep3として、ギヤ材質の効率比率(設計較正値)
-// のみを実装する。導線・電池等の写像はStep5(engine拡張)・Step7で追加する。
+// engine/本体は素材を知らない。本ファイルはStep3(ギヤ材質の効率比率)・Step4(磁石材質の
+// magnetStrength較正値)を実装する。導線・電池等の写像はStep5(engine拡張)・Step7で追加する。
 //
-// docs/phase2-plan.md §16 Step3。2026-07-22 Suu承認。
+// docs/phase2-plan.md §16 Step3・Step4。2026-07-22 Suu承認。
 
-import { GEAR_MATERIALS, type GearMaterial } from './materials';
+import { GEAR_MATERIALS, MAGNET_MATERIALS, type GearMaterial, type MagnetMaterial } from './materials';
 
 export type GearMaterialId = (typeof GEAR_MATERIALS)[number]['id'];
+export type MagnetMaterialId = (typeof MAGNET_MATERIALS)[number]['id'];
 
 /**
  * ギヤ材質の効率比率(設計較正値、カタログ物性ではない)。
@@ -70,4 +71,54 @@ export function combineGearEfficiency(baseEfficiency: number, ratio: number): Co
     return { ok: false, reason: `合成後の効率が物理的範囲(0,1]を外れました: ${efficiency}` };
   }
   return { ok: true, efficiency };
+}
+
+// ---------------------------------------------------------------------------
+// Step4: 磁石材質のmagnetStrength較正値(設計較正値、docs/phase2-plan.md §10)
+// ---------------------------------------------------------------------------
+
+/**
+ * 磁石材質→magnetStrength(既存engine、0〜1)の設計較正値テーブル(カタログ物性ではない)。
+ *
+ * フェライト0.20とネオジム0.90は、src/data/parameterPresets.ts(V2 UI側凍結参考実装)の
+ * MAGNET_PRESETS(「弱(フェライト)」=0.2、「強(ネオジム)」=0.9)がフェライト/ネオジムと
+ * 明示的にラベル付けした**意味的anchor・既存較正点**である(2026-07-22コード実査)。
+ *
+ * 重要: pre-Phase2に単一の「暗黙デフォルト値」は存在しない。src/modes/AssemblyMode.tsxの
+ * 初期値は0.5、gameStoreの初期値は1.0、scripts/vehicleSweep.tsは0.7〜1.0の各種値を使用して
+ * おり、V2全体の既定挙動を厳密に再現する値ではない。フェライト0.2/ネオジム0.9は
+ * 「V2 UIで当該素材と明示ラベルされた値」という限定的な意味でのみ根拠を持つ
+ * (2026-07-22 Suuレビューによりdocs/phase2-plan.md §10のFable判断の前提を精密化)。
+ *
+ * アルニコ0.55<サマリウムコバルト0.65は、spec.md §4.2の実Br順位(アルニコ1.2T>
+ * サマリウムコバルト1.0T)をあえて逆転させた設計較正である。理由: アルニコは高Brだが
+ * 保磁力が低く、開磁路構成で逆磁界により自己減磁しやすい(spec §4.2「逆磁界で減磁する
+ * 固有の癖」)ため、実効性は生Brランキングより劣後すると判断した(Fableレビュー
+ * docs/phase2-plan.md §10)。この2値は設計裁量であり確たる出典はない。
+ *
+ * 較正値の算出にmaterials.ts側の実Br・使用上限温度(NumericProperty)は一切参照しない
+ * (このコメント内で説明上の根拠として引用するのみ。2026-07-22 Suu指摘5)。
+ *
+ * Record<MagnetMaterialId, number>により、MAGNET_MATERIALSへ新規ティアが追加された場合の
+ * 更新漏れをTypeScriptの型検査で検出する。
+ */
+const MAGNET_STRENGTH_CALIBRATION: Record<MagnetMaterialId, number> = {
+  'magnet-ferrite': 0.2,
+  'magnet-alnico': 0.55,
+  'magnet-samarium-cobalt': 0.65,
+  'magnet-neodymium': 0.9,
+};
+
+export type MagnetStrengthCalibrationResult = { ok: true; magnetStrength: number } | { ok: false; reason: string };
+
+/**
+ * 磁石材質→magnetStrength較正値のテーブル参照純関数。MotorConfig.magnetStrengthへの実接続
+ * (CarRecipe生成)はStep7で行う。ここでは較正値の算出のみを提供する。
+ */
+export function computeMagnetStrengthCalibration(magnet: MagnetMaterial): MagnetStrengthCalibrationResult {
+  const magnetStrength = MAGNET_STRENGTH_CALIBRATION[magnet.id as MagnetMaterialId];
+  if (magnetStrength === undefined) {
+    return { ok: false, reason: `${magnet.id}: 較正値テーブルに未登録の素材IDです` };
+  }
+  return { ok: true, magnetStrength };
 }
