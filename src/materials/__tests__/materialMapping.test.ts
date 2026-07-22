@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import {
   combineGearEfficiency,
   composeConfigFromMaterials,
+  computeBatteryCapacityRatioCalibration,
+  computeBatteryInternalResistanceRatioCalibration,
   computeGearMaterialEfficiencyRatio,
   computeMagnetStrengthCalibration,
   computeWireDensityRatio,
@@ -10,7 +12,7 @@ import {
   type MaterialSelection,
   type WireMaterialId,
 } from '../materialMapping';
-import { GEAR_MATERIALS, MAGNET_MATERIALS, WIRE_MATERIALS, type WireMaterial } from '../materials';
+import { BATTERY_MATERIALS, GEAR_MATERIALS, MAGNET_MATERIALS, WIRE_MATERIALS, type WireMaterial } from '../materials';
 import { step, type MotorConfig, type SimState } from '../../engine/motorPhysics';
 import { createInitialVehicleState, type CarConfig } from '../../engine/vehiclePhysics';
 import { createValidatedTrack, stepTrackRun, type TrackDefinition, type TrackSegment } from '../../engine/trackPhysics';
@@ -363,7 +365,12 @@ describe('materialMapping.ts Step7a(composeConfigFromMaterials: 合成純関数)
   }
 
   const CANONICAL_BASELINE: MaterialCompositionBaseline = { chassisBaselineG: 150, baseGearEfficiency: 0.8 };
-  const CANONICAL_SELECTION: MaterialSelection = { wireId: 'wire-copper-standard', magnetId: 'magnet-ferrite', gearId: 'gear-pom' };
+  const CANONICAL_SELECTION: MaterialSelection = {
+    wireId: 'wire-copper-standard',
+    magnetId: 'magnet-ferrite',
+    gearId: 'gear-pom',
+    batteryId: 'battery-alkaline',
+  };
 
   function restState(): SimState {
     return {
@@ -390,6 +397,8 @@ describe('materialMapping.ts Step7a(composeConfigFromMaterials: 合成純関数)
     expect(result.motorConfig.magnetStrength).toBe(0.2);
     expect(result.carConfig.gearEfficiency).toBe(0.8);
     expect(result.carConfig.massG).toBe(150);
+    expect(result.motorConfig.batteryInternalResistanceRatio).toBe(1.0);
+    expect(result.motorConfig.batteryCapacityRatio).toBe(1.0);
   });
 
   it('2. 入力baseMotorConfig/baseCarConfig/baselineオブジェクト自体を変更しない', () => {
@@ -411,8 +420,13 @@ describe('materialMapping.ts Step7a(composeConfigFromMaterials: 合成純関数)
     expect(r2).toEqual(r1);
   });
 
-  it('4. 出力を再びbaseMotorConfig/baseCarConfigとして入力しても、同じbaseline・selectionなら結果が累積しない(真の冪等性)', () => {
-    const nonAnchorSelection: MaterialSelection = { wireId: 'wire-silver', magnetId: 'magnet-neodymium', gearId: 'gear-titanium' };
+  it('4. 出力を再びbaseMotorConfig/baseCarConfigとして入力しても、同じbaseline・selectionなら結果が累積しない(真の冪等性。電池ratioはbaselineを介さない絶対値上書きのため構造的に自明だが、非anchor電池で明示確認する)', () => {
+    const nonAnchorSelection: MaterialSelection = {
+      wireId: 'wire-silver',
+      magnetId: 'magnet-neodymium',
+      gearId: 'gear-titanium',
+      batteryId: 'battery-lithium-polymer',
+    };
     const first = composeConfigFromMaterials(baseMotorConfig(), baseCarConfig(), CANONICAL_BASELINE, nonAnchorSelection);
     expect(first.ok).toBe(true);
     if (!first.ok) return;
@@ -436,7 +450,12 @@ describe('materialMapping.ts Step7a(composeConfigFromMaterials: 合成純関数)
   it('6. ギヤ・磁石の既存個別関数(Step3・Step4)の結果が、合成写像後の値と一致する', () => {
     const magnet = MAGNET_MATERIALS.find((m) => m.id === 'magnet-neodymium')!;
     const gear = GEAR_MATERIALS.find((m) => m.id === 'gear-titanium')!;
-    const selection: MaterialSelection = { wireId: 'wire-copper-standard', magnetId: 'magnet-neodymium', gearId: 'gear-titanium' };
+    const selection: MaterialSelection = {
+      wireId: 'wire-copper-standard',
+      magnetId: 'magnet-neodymium',
+      gearId: 'gear-titanium',
+      batteryId: 'battery-alkaline',
+    };
     const result = composeConfigFromMaterials(baseMotorConfig(), baseCarConfig(), CANONICAL_BASELINE, selection);
     const magnetCalib = computeMagnetStrengthCalibration(magnet);
     const gearRatio = computeGearMaterialEfficiencyRatio(gear);
@@ -454,36 +473,48 @@ describe('materialMapping.ts Step7a(composeConfigFromMaterials: 合成純関数)
       wireId: 'wire-unknown-fixture' as WireMaterialId,
       magnetId: 'magnet-ferrite',
       gearId: 'gear-pom',
+      batteryId: 'battery-alkaline',
     };
     const result = composeConfigFromMaterials(baseMotorConfig(), baseCarConfig(), CANONICAL_BASELINE, badSelection);
     expect(result.ok).toBe(false);
   });
 
-  it('8. 導線×磁石×ギヤの全64組合せで出力が有限正かつ各configの既存許容範囲内に収まる', () => {
+  it('8/9(Step7b拡張). 導線×磁石×ギヤ×電池の全192組合せ(4×4×4×3)で出力が有限正かつ各configの既存許容範囲内に収まる(Step7aの64組合せから拡張)', () => {
     for (const wire of WIRE_MATERIALS) {
       for (const magnet of MAGNET_MATERIALS) {
         for (const gear of GEAR_MATERIALS) {
-          const selection: MaterialSelection = { wireId: wire.id, magnetId: magnet.id, gearId: gear.id };
-          const result = composeConfigFromMaterials(baseMotorConfig(), baseCarConfig(), CANONICAL_BASELINE, selection);
-          expect(result.ok, `${wire.id}×${magnet.id}×${gear.id}: ${!result.ok ? result.reason : ''}`).toBe(true);
-          if (!result.ok) continue;
-          expect(Number.isFinite(result.motorConfig.wireResistivityRatio)).toBe(true);
-          expect(result.motorConfig.wireResistivityRatio!).toBeGreaterThan(0);
-          expect(Number.isFinite(result.motorConfig.wireDensityRatio)).toBe(true);
-          expect(result.motorConfig.wireDensityRatio!).toBeGreaterThan(0);
-          expect(result.motorConfig.magnetStrength).toBeGreaterThanOrEqual(0);
-          expect(result.motorConfig.magnetStrength).toBeLessThanOrEqual(1);
-          expect(result.carConfig.gearEfficiency).toBeGreaterThan(0);
-          expect(result.carConfig.gearEfficiency).toBeLessThanOrEqual(1);
-          expect(result.carConfig.massG).toBeGreaterThanOrEqual(80);
-          expect(result.carConfig.massG).toBeLessThanOrEqual(250);
+          for (const battery of BATTERY_MATERIALS) {
+            const selection: MaterialSelection = { wireId: wire.id, magnetId: magnet.id, gearId: gear.id, batteryId: battery.id };
+            const result = composeConfigFromMaterials(baseMotorConfig(), baseCarConfig(), CANONICAL_BASELINE, selection);
+            expect(result.ok, `${wire.id}×${magnet.id}×${gear.id}×${battery.id}: ${!result.ok ? result.reason : ''}`).toBe(true);
+            if (!result.ok) continue;
+            expect(Number.isFinite(result.motorConfig.wireResistivityRatio)).toBe(true);
+            expect(result.motorConfig.wireResistivityRatio!).toBeGreaterThan(0);
+            expect(Number.isFinite(result.motorConfig.wireDensityRatio)).toBe(true);
+            expect(result.motorConfig.wireDensityRatio!).toBeGreaterThan(0);
+            expect(result.motorConfig.magnetStrength).toBeGreaterThanOrEqual(0);
+            expect(result.motorConfig.magnetStrength).toBeLessThanOrEqual(1);
+            expect(result.carConfig.gearEfficiency).toBeGreaterThan(0);
+            expect(result.carConfig.gearEfficiency).toBeLessThanOrEqual(1);
+            expect(result.carConfig.massG).toBeGreaterThanOrEqual(80);
+            expect(result.carConfig.massG).toBeLessThanOrEqual(250);
+            expect(Number.isFinite(result.motorConfig.batteryInternalResistanceRatio)).toBe(true);
+            expect(result.motorConfig.batteryInternalResistanceRatio!).toBeGreaterThan(0);
+            expect(Number.isFinite(result.motorConfig.batteryCapacityRatio)).toBe(true);
+            expect(result.motorConfig.batteryCapacityRatio!).toBeGreaterThan(0);
+          }
         }
       }
     }
   });
 
   it('9a. 合成写像の出力motorConfigをmotorPhysics.stepで実行してもNaN/Infinityが発生しない(engine側は無変更のsmokeテスト)', () => {
-    const selection: MaterialSelection = { wireId: 'wire-silver', magnetId: 'magnet-neodymium', gearId: 'gear-titanium' };
+    const selection: MaterialSelection = {
+      wireId: 'wire-silver',
+      magnetId: 'magnet-neodymium',
+      gearId: 'gear-titanium',
+      batteryId: 'battery-lithium-polymer',
+    };
     const result = composeConfigFromMaterials(baseMotorConfig(), baseCarConfig(), CANONICAL_BASELINE, selection);
     expect(result.ok).toBe(true);
     if (!result.ok) return;
@@ -499,7 +530,12 @@ describe('materialMapping.ts Step7a(composeConfigFromMaterials: 合成純関数)
   });
 
   it('9b. 合成写像の出力motorConfig・carConfigの両方をstepTrackRunで実行してもNaN/Infinityが発生しない(gearEfficiency・massG込みのsmokeテスト、engine側は無変更)', () => {
-    const selection: MaterialSelection = { wireId: 'wire-silver', magnetId: 'magnet-neodymium', gearId: 'gear-titanium' };
+    const selection: MaterialSelection = {
+      wireId: 'wire-silver',
+      magnetId: 'magnet-neodymium',
+      gearId: 'gear-titanium',
+      batteryId: 'battery-lithium-polymer',
+    };
     const result = composeConfigFromMaterials(baseMotorConfig(), baseCarConfig(), CANONICAL_BASELINE, selection);
     expect(result.ok).toBe(true);
     if (!result.ok) return;
@@ -551,11 +587,109 @@ describe('materialMapping.ts Step7a(composeConfigFromMaterials: 合成純関数)
     it('baseGearEfficiencyが大きすぎて合成後1を超える場合、combineGearEfficiency側の失敗が伝播しok:falseになる', () => {
       const invalidBaseline: MaterialCompositionBaseline = { chassisBaselineG: 150, baseGearEfficiency: 2.0 };
       // gear-peekのratio(1.01)と組み合わせると2.0×1.01>1となりcombineGearEfficiencyが失敗する
-      const selection: MaterialSelection = { wireId: 'wire-copper-standard', magnetId: 'magnet-ferrite', gearId: 'gear-peek' };
+      const selection: MaterialSelection = {
+        wireId: 'wire-copper-standard',
+        magnetId: 'magnet-ferrite',
+        gearId: 'gear-peek',
+        batteryId: 'battery-alkaline',
+      };
       const result = composeConfigFromMaterials(baseMotorConfig(), baseCarConfig(), invalidBaseline, selection);
       expect(result.ok).toBe(false);
       expect((result as { motorConfig?: unknown }).motorConfig).toBeUndefined();
       expect((result as { carConfig?: unknown }).carConfig).toBeUndefined();
+    });
+  });
+
+  describe('Step7b(電池材質の内部抵抗ratio・容量ratio較正値)', () => {
+    it('1. BATTERY_MATERIALSの全3tierに対応する内部抵抗ratio・容量ratioが存在する(Record型網羅+実行時確認)', () => {
+      for (const battery of BATTERY_MATERIALS) {
+        expect(computeBatteryInternalResistanceRatioCalibration(battery).ok, `${battery.id}の内部抵抗ratioが見つかりません`).toBe(true);
+        expect(computeBatteryCapacityRatioCalibration(battery).ok, `${battery.id}の容量ratioが見つかりません`).toBe(true);
+      }
+    });
+
+    it('2. anchor(battery-alkaline)は内部抵抗ratio・容量ratioともに厳密1.0になる', () => {
+      const alkaline = BATTERY_MATERIALS.find((m) => m.id === 'battery-alkaline')!;
+      expect(computeBatteryInternalResistanceRatioCalibration(alkaline)).toEqual({ ok: true, ratio: 1.0 });
+      expect(computeBatteryCapacityRatioCalibration(alkaline)).toEqual({ ok: true, ratio: 1.0 });
+    });
+
+    it('3. NiMH=0.30/1.00、LiPo=0.15/1.30が確定値と一致する', () => {
+      const nimh = BATTERY_MATERIALS.find((m) => m.id === 'battery-nickel-metal-hydride')!;
+      const lipo = BATTERY_MATERIALS.find((m) => m.id === 'battery-lithium-polymer')!;
+      expect(computeBatteryInternalResistanceRatioCalibration(nimh)).toEqual({ ok: true, ratio: 0.3 });
+      expect(computeBatteryCapacityRatioCalibration(nimh)).toEqual({ ok: true, ratio: 1.0 });
+      expect(computeBatteryInternalResistanceRatioCalibration(lipo)).toEqual({ ok: true, ratio: 0.15 });
+      expect(computeBatteryCapacityRatioCalibration(lipo)).toEqual({ ok: true, ratio: 1.3 });
+    });
+
+    it('4. 全tierが有限正であり、Step6のクランプ範囲[0.01,10]内に収まる', () => {
+      for (const battery of BATTERY_MATERIALS) {
+        const internal = computeBatteryInternalResistanceRatioCalibration(battery);
+        const capacity = computeBatteryCapacityRatioCalibration(battery);
+        expect(internal.ok, battery.id).toBe(true);
+        expect(capacity.ok, battery.id).toBe(true);
+        if (internal.ok) {
+          expect(Number.isFinite(internal.ratio)).toBe(true);
+          expect(internal.ratio).toBeGreaterThanOrEqual(0.01);
+          expect(internal.ratio).toBeLessThanOrEqual(10);
+        }
+        if (capacity.ok) {
+          expect(Number.isFinite(capacity.ratio)).toBe(true);
+          expect(capacity.ratio).toBeGreaterThanOrEqual(0.01);
+          expect(capacity.ratio).toBeLessThanOrEqual(10);
+        }
+      }
+    });
+
+    it('5. 未登録の素材IDはok:falseで明示的に失敗する', () => {
+      const unknownBattery = { ...BATTERY_MATERIALS[0], id: 'battery-unknown-fixture' };
+      expect(computeBatteryInternalResistanceRatioCalibration(unknownBattery).ok).toBe(false);
+      expect(computeBatteryCapacityRatioCalibration(unknownBattery).ok).toBe(false);
+    });
+
+    it('7. 電池個別較正関数の結果が、合成写像後の値と一致する(Step7aのテスト5・6と同型)', () => {
+      const battery = BATTERY_MATERIALS.find((m) => m.id === 'battery-lithium-polymer')!;
+      const selection: MaterialSelection = { ...CANONICAL_SELECTION, batteryId: 'battery-lithium-polymer' };
+      const result = composeConfigFromMaterials(baseMotorConfig(), baseCarConfig(), CANONICAL_BASELINE, selection);
+      const internal = computeBatteryInternalResistanceRatioCalibration(battery);
+      const capacity = computeBatteryCapacityRatioCalibration(battery);
+      expect(result.ok && internal.ok && capacity.ok).toBe(true);
+      if (result.ok && internal.ok && capacity.ok) {
+        expect(result.motorConfig.batteryInternalResistanceRatio).toBe(internal.ratio);
+        expect(result.motorConfig.batteryCapacityRatio).toBe(capacity.ratio);
+      }
+    });
+
+    it('8. selection中のbatteryIdが未登録の場合、部分更新されたconfigを返さず全体がok:falseになる(Step7aのテスト7の電池版)', () => {
+      const badSelection: MaterialSelection = { ...CANONICAL_SELECTION, batteryId: 'battery-unknown-fixture' as MaterialSelection['batteryId'] };
+      const result = composeConfigFromMaterials(baseMotorConfig(), baseCarConfig(), CANONICAL_BASELINE, badSelection);
+      expect(result.ok).toBe(false);
+      expect((result as { motorConfig?: unknown }).motorConfig).toBeUndefined();
+      expect((result as { carConfig?: unknown }).carConfig).toBeUndefined();
+    });
+
+    // (必須修正1、Suu_mot3レビュー)較正関数の実行時検証(有限正・MC3範囲内)を、productionの
+    // BATTERY_*_RATIO_CALIBRATIONテーブル(3tier、いずれも有限正かつ範囲内)への通常呼び出しで
+    // 固定する。テーブル自体は正しい値のため、validateBatteryRatioの失敗分岐(NaN・0・負値・
+    // 範囲外)を、private定数を改変せずに通常テストから到達させる方法がない
+    // (Step7aの「anchor欠落テストが通常テストから作れない」docs/phase2-step7-suu-review-v3.md
+    // §3と同型の限界、Fable Q5承認済みの結論: 型・コードレビュー上の防御として残す)。
+    it('13. 3tierそれぞれについて実行時検査ロジックが「通れば安全な値である」ことを間接的に確認する(明示アサート)', () => {
+      for (const battery of BATTERY_MATERIALS) {
+        const internal = computeBatteryInternalResistanceRatioCalibration(battery);
+        const capacity = computeBatteryCapacityRatioCalibration(battery);
+        expect(internal.ok, battery.id).toBe(true);
+        expect(capacity.ok, battery.id).toBe(true);
+        if (internal.ok) {
+          expect(Number.isFinite(internal.ratio)).toBe(true);
+          expect(internal.ratio).toBeGreaterThan(0);
+        }
+        if (capacity.ok) {
+          expect(Number.isFinite(capacity.ratio)).toBe(true);
+          expect(capacity.ratio).toBeGreaterThan(0);
+        }
+      }
     });
   });
 });

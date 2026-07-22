@@ -567,6 +567,27 @@ export const GEAR_MATERIALS = [
   },
 ] as const satisfies readonly GearMaterial[];
 
+// Phase2 Step7b(docs/phase2-step7b-plan.md v3、Fable/Suu_mot3承認2026-07-22)。
+// 内部抵抗ratio・容量ratioの設計較正値(カタログ物性ではない)は本ファイルではなく
+// src/materials/materialMapping.tsのBATTERY_INTERNAL_RESISTANCE_RATIO_CALIBRATION・
+// BATTERY_CAPACITY_RATIO_CALIBRATIONで定義する(数値の正はmaterialMapping.ts、
+// 変更時は両方更新すること)。本ファイル冒頭の既存方針(データと型のみを持つ)を維持するため、
+// BatteryMaterial interfaceには数値フィールドを追加しない(Fable承認Q1条件1、
+// materials.tsへの数値転記はせず決定基準+参照ポインタのみとする裁量を採用)。
+//
+// 決定基準(Fable、docs/phase2-step7-fable-review.md §Q3・Q4より):
+// 1. 実測の順序(内部抵抗: アルカリ>NiMH>LiPo、実用エネルギー: アルカリ≦NiMH<LiPo)を保存する。
+// 2. 実測の内部抵抗比は10倍を超えるが、ゲーム特性の分離が壊れない範囲へ3〜7倍程度に圧縮した。
+// 3. 負荷依存の実効容量低下(アルカリの大電流時崩れ)は、engineが固定J予算である以上
+//    モデル化せず、低内部抵抗の優位に代表させる(この省略は意図的)。
+// 4. 「同一外形・同一電圧相当のゲーム用抽象パック」として設計較正する。電圧差はratioへ
+//    含めず、既存batteryVoltageと直交させる(実セル電圧差は抽象パックの「電圧相当」に吸収)。
+// 5. Phase2時点のLiPoは低内部抵抗・高容量の純粋上位互換になる(意図的な暫定状態)。
+//    発熱・膨張・炎上(Phase3 D03/D04)・入手性によるトレードオフはPhase3完了まで未実装。
+//    この不完全性はPhase2ゲートsweep報告(docs/phase2-plan.md §16移行順9番)へも別途明記する。
+//
+// 下記descriptionJa(「内部抵抗高め」「低内部抵抗・大電流に強い」「最強の出力密度」)は
+// この較正値の定性的根拠である。
 export const BATTERY_MATERIALS = [
   {
     id: 'battery-alkaline',

@@ -1,7 +1,7 @@
 // 素材(+個体劣化状態)→既存engine/パラメータへの純関数写像(spec §4.3)。
 // engine/本体は素材を知らない。本ファイルはStep3(ギヤ材質の効率比率)・Step4(磁石材質の
-// magnetStrength較正値)・Step7a(導線ratio・合成写像)を実装する。電池の写像はStep7bで
-// 追加する(docs/phase2-plan.md §16、docs/phase2-step7-plan.md v4)。
+// magnetStrength較正値)・Step7a(導線ratio・合成写像)・Step7b(電池ratio較正値・合成写像)を
+// 実装する。
 //
 // docs/phase2-plan.md §16 Step3・Step4・Step7。2026-07-22 Suu_mot3承認・Fable技術レビュー承認。
 
@@ -12,13 +12,14 @@ import {
   applyMassAdjustmentToBaselineG,
   type WindingParams,
 } from './assumedGeometry';
-import { GEAR_MATERIALS, MAGNET_MATERIALS, WIRE_MATERIALS, type GearMaterial, type MagnetMaterial, type WireMaterial } from './materials';
+import { BATTERY_MATERIALS, GEAR_MATERIALS, MAGNET_MATERIALS, WIRE_MATERIALS, type BatteryMaterial, type GearMaterial, type MagnetMaterial, type WireMaterial } from './materials';
 import type { MotorConfig } from '../engine/motorPhysics';
 import type { CarConfig } from '../engine/vehiclePhysics';
 
 export type GearMaterialId = (typeof GEAR_MATERIALS)[number]['id'];
 export type MagnetMaterialId = (typeof MAGNET_MATERIALS)[number]['id'];
 export type WireMaterialId = (typeof WIRE_MATERIALS)[number]['id'];
+export type BatteryMaterialId = (typeof BATTERY_MATERIALS)[number]['id'];
 
 /**
  * ギヤ材質の効率比率(設計較正値、カタログ物性ではない)。
@@ -202,6 +203,60 @@ export function computeWireDensityRatio(wire: WireMaterial): WireRatioResult {
 }
 
 // ---------------------------------------------------------------------------
+// Step7b: 電池材質の内部抵抗ratio・容量ratio(設計較正値、docs/phase2-step7b-plan.md v3)
+// ---------------------------------------------------------------------------
+
+// Phase2 Step7b(Fable確定値、docs/phase2-step7-fable-review.md §Q3・Q4)。設計較正値
+// (カタログ物性ではない)。決定基準・圧縮理由・電圧直交・省略事項はmaterials.tsの
+// BATTERY_MATERIALS直前コメントに転記済み(数値の正は本ファイル、変更時は両方更新すること)。
+const BATTERY_INTERNAL_RESISTANCE_RATIO_CALIBRATION: Record<BatteryMaterialId, number> = {
+  'battery-alkaline': 1.0,
+  'battery-nickel-metal-hydride': 0.3,
+  'battery-lithium-polymer': 0.15,
+};
+
+const BATTERY_CAPACITY_RATIO_CALIBRATION: Record<BatteryMaterialId, number> = {
+  'battery-alkaline': 1.0,
+  'battery-nickel-metal-hydride': 1.0,
+  'battery-lithium-polymer': 1.3,
+};
+
+export type BatteryRatioResult = { ok: true; ratio: number } | { ok: false; reason: string };
+
+// Step5a/5bで確定したtrusted precondition契約(有限正保証)の履行者として、写像層
+// (materialMapping.ts)が最終防衛線になる。Record<BatteryMaterialId, number>は「全tier
+// 網羅」をTypeScriptの型検査で保証するが、値自体がNaN・Infinity・0・負値でないことは
+// 型レベルでは保証できないため、テーブル参照後に実行時検査を行う(Suu_mot3レビュー
+// 必須修正1、Fable Q5承認)。不正時はclamp・fallbackせず理由付きok:falseを返す
+// (素材写像の設定不備を黙って補正しない)。
+const BATTERY_RATIO_MIN = 0.01; // Step6 MC3クランプ範囲[0.01,10]と同じ下限
+const BATTERY_RATIO_MAX = 10; // 同上限
+
+function validateBatteryRatio(ratio: number, batteryId: string, label: string): BatteryRatioResult {
+  if (!Number.isFinite(ratio) || ratio <= 0) {
+    return { ok: false, reason: `${batteryId}: ${label}較正値が有限正の値ではありません: ${ratio}` };
+  }
+  if (ratio < BATTERY_RATIO_MIN || ratio > BATTERY_RATIO_MAX) {
+    return { ok: false, reason: `${batteryId}: ${label}較正値がMC3クランプ範囲[${BATTERY_RATIO_MIN},${BATTERY_RATIO_MAX}]を外れています: ${ratio}` };
+  }
+  return { ok: true, ratio };
+}
+
+/** 電池材質→内部抵抗ratio較正値のテーブル参照純関数(有限正・MC3範囲内を実行時検査)。 */
+export function computeBatteryInternalResistanceRatioCalibration(battery: BatteryMaterial): BatteryRatioResult {
+  const ratio = BATTERY_INTERNAL_RESISTANCE_RATIO_CALIBRATION[battery.id as BatteryMaterialId];
+  if (ratio === undefined) return { ok: false, reason: `${battery.id}: 内部抵抗較正値テーブルに未登録の素材IDです` };
+  return validateBatteryRatio(ratio, battery.id, '内部抵抗ratio');
+}
+
+/** 電池材質→容量ratio較正値のテーブル参照純関数(有限正・MC3範囲内を実行時検査)。 */
+export function computeBatteryCapacityRatioCalibration(battery: BatteryMaterial): BatteryRatioResult {
+  const ratio = BATTERY_CAPACITY_RATIO_CALIBRATION[battery.id as BatteryMaterialId];
+  if (ratio === undefined) return { ok: false, reason: `${battery.id}: 容量較正値テーブルに未登録の素材IDです` };
+  return validateBatteryRatio(ratio, battery.id, '容量ratio');
+}
+
+// ---------------------------------------------------------------------------
 // Step7a: 合成純関数(素材選択→MotorConfig/CarConfigへの接続、docs/phase2-plan.md §1・§3)
 // ---------------------------------------------------------------------------
 
@@ -221,14 +276,14 @@ export interface MaterialCompositionBaseline {
   baseGearEfficiency: number;
 }
 
-// Step7aのMaterialSelectionはbatteryIdを含めない(Suu_mot3最終レビュー指摘、
-// docs/phase2-step7-suu-review-v3.md §2、Fable承認済みQ6)。有効な入力を受理しながら
-// 結果へ反映しない契約は原子的Result契約と矛盾するため。電池較正値と実装が揃うStep7bで、
-// 型追加(batteryId)と実装追加を同時に行う。
 export interface MaterialSelection {
   wireId: WireMaterialId;
   magnetId: MagnetMaterialId;
   gearId: GearMaterialId;
+  // Step7bで追加(必須フィールド)。Step7aのSuu_mot3最終レビュー指摘どおり、型追加と
+  // 実装追加(下記composeConfigFromMaterials)を同時に行い、有効な入力を受理しながら
+  // 結果へ反映しない「受理するが無視する」状態を作らない。
+  batteryId: BatteryMaterialId;
 }
 
 export type ComposeConfigResult =
@@ -252,6 +307,9 @@ export type ComposeConfigResult =
  *
  * 原子的Result契約: いずれかの写像ステップが失敗した場合、部分適用されたconfigを返さず
  * 全体をok:falseにする(即時打ち切り)。
+ *
+ * 電圧直交契約(Fable承認Q4条件2): 本関数はbatteryVoltageを変更しない。化学系(batteryId)と
+ * パック電圧は独立軸である。LiPoを選んでも電圧はbaseMotorConfig.batteryVoltageのまま。
  */
 export function composeConfigFromMaterials(
   baseMotorConfig: MotorConfig,
@@ -265,6 +323,8 @@ export function composeConfigFromMaterials(
   if (!magnet) return { ok: false, reason: `${selection.magnetId}: 未登録の磁石素材IDです` };
   const gear = GEAR_MATERIALS.find((m) => m.id === selection.gearId);
   if (!gear) return { ok: false, reason: `${selection.gearId}: 未登録のギヤ素材IDです` };
+  const battery = BATTERY_MATERIALS.find((m) => m.id === selection.batteryId);
+  if (!battery) return { ok: false, reason: `${selection.batteryId}: 未登録の電池素材IDです` };
 
   const wireResistivityRatio = computeWireResistivityRatio(wire);
   if (!wireResistivityRatio.ok) return wireResistivityRatio;
@@ -276,6 +336,10 @@ export function composeConfigFromMaterials(
   if (!gearRatio.ok) return gearRatio;
   const gearEfficiency = combineGearEfficiency(baseline.baseGearEfficiency, gearRatio.ratio);
   if (!gearEfficiency.ok) return gearEfficiency;
+  const batteryInternalResistanceRatio = computeBatteryInternalResistanceRatioCalibration(battery);
+  if (!batteryInternalResistanceRatio.ok) return batteryInternalResistanceRatio;
+  const batteryCapacityRatio = computeBatteryCapacityRatioCalibration(battery);
+  if (!batteryCapacityRatio.ok) return batteryCapacityRatio;
 
   const windingParams: WindingParams = {
     coilTurns: baseMotorConfig.coilTurns,
@@ -294,6 +358,8 @@ export function composeConfigFromMaterials(
       wireResistivityRatio: wireResistivityRatio.ratio,
       wireDensityRatio: wireDensityRatio.ratio,
       magnetStrength: magnetStrength.magnetStrength,
+      batteryInternalResistanceRatio: batteryInternalResistanceRatio.ratio,
+      batteryCapacityRatio: batteryCapacityRatio.ratio,
     },
     carConfig: {
       ...baseCarConfig,
