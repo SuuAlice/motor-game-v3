@@ -160,8 +160,30 @@ export function computeMassDeltaG(actual: ResolvedMassDensity, anchor: ResolvedM
   return (actual.value - anchor.value) * volumeM3 * 1000;
 }
 
-const ANCHOR_WIRE = WIRE_MATERIALS.find((m) => m.isBaselineAnchor);
-const ANCHOR_MAGNET = MAGNET_MATERIALS.find((m) => m.isBaselineAnchor);
+// ---------------------------------------------------------------------------
+// anchor解決の公開API(Phase2 Step7、Fable承認済み)
+// ---------------------------------------------------------------------------
+
+export type AnchorResolutionResult<T> = { ok: true; material: T } | { ok: false; reason: string };
+
+/**
+ * 導線ファミリーのanchorティア(isBaselineAnchor=true、wire-copper-standard)を解決する。
+ * 密度解決(resolveWireDensity)・質量差分(computeWireMagnetMassAdjustmentG)・
+ * materialMapping.tsの抵抗率ratio計算が、この単一関数を共有することで同一のanchor選択
+ * 規則を参照する(anchor不一致というバグ類型を構造的に排除する、Fable承認済みQ1・Q7)。
+ */
+export function resolveAnchorWireMaterial(): AnchorResolutionResult<WireMaterial> {
+  const anchor = WIRE_MATERIALS.find((m) => m.isBaselineAnchor);
+  if (!anchor) return { ok: false, reason: '導線ファミリーにanchorティアが定義されていません(materials.tsの不整合)' };
+  return { ok: true, material: anchor };
+}
+
+/** 磁石ファミリーのanchorティア(isBaselineAnchor=true、magnet-ferrite)を解決する。上記と同型。 */
+export function resolveAnchorMagnetMaterial(): AnchorResolutionResult<MagnetMaterial> {
+  const anchor = MAGNET_MATERIALS.find((m) => m.isBaselineAnchor);
+  if (!anchor) return { ok: false, reason: '磁石ファミリーにanchorティアが定義されていません(materials.tsの不整合)' };
+  return { ok: true, material: anchor };
+}
 
 // ---------------------------------------------------------------------------
 // V2基準massG(推測で電池本数を導出せず、判別型で明示選択させる)
@@ -214,17 +236,19 @@ export function computeWireMagnetMassAdjustmentG(
   const validation = validateWindingParams(windingParams);
   if (!validation.ok) return validation;
 
-  if (!ANCHOR_WIRE) return { ok: false, reason: '導線ファミリーにanchorティアが定義されていません(materials.tsの不整合)' };
-  if (!ANCHOR_MAGNET) return { ok: false, reason: '磁石ファミリーにanchorティアが定義されていません(materials.tsの不整合)' };
+  const anchorWire = resolveAnchorWireMaterial();
+  if (!anchorWire.ok) return anchorWire;
+  const anchorMagnet = resolveAnchorMagnetMaterial();
+  if (!anchorMagnet.ok) return anchorMagnet;
 
   const wireDensity = resolveWireDensity(wire);
   if (!wireDensity.ok) return wireDensity;
   const magnetDensity = resolveMagnetDensity(magnet);
   if (!magnetDensity.ok) return magnetDensity;
 
-  const anchorWireDensity = resolveWireDensity(ANCHOR_WIRE);
+  const anchorWireDensity = resolveWireDensity(anchorWire.material);
   if (!anchorWireDensity.ok) return anchorWireDensity;
-  const anchorMagnetDensity = resolveMagnetDensity(ANCHOR_MAGNET);
+  const anchorMagnetDensity = resolveMagnetDensity(anchorMagnet.material);
   if (!anchorMagnetDensity.ok) return anchorMagnetDensity;
 
   const wireVolumeM3 = computeWireVolumeM3(windingParams);

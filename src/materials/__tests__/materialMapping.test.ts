@@ -1,6 +1,19 @@
 import { describe, expect, it } from 'vitest';
-import { combineGearEfficiency, computeGearMaterialEfficiencyRatio, computeMagnetStrengthCalibration } from '../materialMapping';
-import { GEAR_MATERIALS, MAGNET_MATERIALS } from '../materials';
+import {
+  combineGearEfficiency,
+  composeConfigFromMaterials,
+  computeGearMaterialEfficiencyRatio,
+  computeMagnetStrengthCalibration,
+  computeWireDensityRatio,
+  computeWireResistivityRatio,
+  type MaterialCompositionBaseline,
+  type MaterialSelection,
+  type WireMaterialId,
+} from '../materialMapping';
+import { GEAR_MATERIALS, MAGNET_MATERIALS, WIRE_MATERIALS, type WireMaterial } from '../materials';
+import { step, type MotorConfig, type SimState } from '../../engine/motorPhysics';
+import { createInitialVehicleState, type CarConfig } from '../../engine/vehiclePhysics';
+import { createValidatedTrack, stepTrackRun, type TrackDefinition, type TrackSegment } from '../../engine/trackPhysics';
 
 // src/data/parameterPresets.ts(V2 UI側)のMAGNET_PRESETSが「弱(フェライト)」「強(ネオジム)」と
 // 明示ラベル付けした値。materialMapping.ts(production)からV2 UIモジュールをimportしないため、
@@ -187,5 +200,362 @@ describe('materialMapping.ts Step4(磁石材質のmagnetStrength較正値・設�
     const unknownMagnet = { ...MAGNET_MATERIALS[0], id: 'magnet-unknown-fixture' };
     const result = computeMagnetStrengthCalibration(unknownMagnet);
     expect(result.ok).toBe(false);
+  });
+});
+
+describe('materialMapping.ts Step7a(導線ratio: 実測値からの単一出典写像)', () => {
+  describe('computeWireResistivityRatio', () => {
+    it('WIRE_MATERIALSの全ティアに対応する比率が存在する', () => {
+      for (const wire of WIRE_MATERIALS) {
+        const result = computeWireResistivityRatio(wire);
+        expect(result.ok, `${wire.id}の抵抗率ratioが計算できません`).toBe(true);
+      }
+    });
+
+    it('anchor(wire-copper-standard)は厳密に1.0になる', () => {
+      const copper = WIRE_MATERIALS.find((m) => m.id === 'wire-copper-standard')!;
+      expect(computeWireResistivityRatio(copper)).toEqual({ ok: true, ratio: 1.0 });
+    });
+
+    it('tier方向性: 実測抵抗率の大小関係と一致する(アルミ>銅>銀メッキ銅線>銀)', () => {
+      const aluminum = computeWireResistivityRatio(WIRE_MATERIALS.find((m) => m.id === 'wire-aluminum')!);
+      const copper = computeWireResistivityRatio(WIRE_MATERIALS.find((m) => m.id === 'wire-copper-standard')!);
+      const silverPlated = computeWireResistivityRatio(WIRE_MATERIALS.find((m) => m.id === 'wire-silver-plated-copper')!);
+      const silver = computeWireResistivityRatio(WIRE_MATERIALS.find((m) => m.id === 'wire-silver')!);
+      expect(aluminum.ok && copper.ok && silverPlated.ok && silver.ok).toBe(true);
+      if (aluminum.ok && copper.ok && silverPlated.ok && silver.ok) {
+        expect(aluminum.ratio).toBeGreaterThan(copper.ratio);
+        expect(copper.ratio).toBeGreaterThan(silverPlated.ratio);
+        expect(silverPlated.ratio).toBeGreaterThan(silver.ratio);
+      }
+    });
+
+    it('決定論: 同一素材への複数回呼び出しで常に同一の値になる', () => {
+      const silver = WIRE_MATERIALS.find((m) => m.id === 'wire-silver')!;
+      expect(computeWireResistivityRatio(silver)).toEqual(computeWireResistivityRatio(silver));
+    });
+
+    it('全ティアがStep6のクランプ範囲[0.5, 2.0]内に収まる(範囲外に出た場合はクランプ範囲側の再レビューが必要)', () => {
+      for (const wire of WIRE_MATERIALS) {
+        const result = computeWireResistivityRatio(wire);
+        if (result.ok) {
+          expect(result.ratio, `${wire.id}`).toBeGreaterThanOrEqual(0.5);
+          expect(result.ratio, `${wire.id}`).toBeLessThanOrEqual(2.0);
+        }
+      }
+    });
+
+    // Fable承認済みQ1: resistivityがpending・非有限のガードはStep5 trusted preconditionの
+    // 最後の砦。production配列(WIRE_MATERIALS)は全tier verifiedのため、成功経路だけでは
+    // ガード自体の回帰を検出できない。既存WireMaterialをspreadしたfixtureで直接固定する。
+    it('resistivityがpending(verifiedForPhysics:false)の場合はok:falseになる', () => {
+      const copper = WIRE_MATERIALS.find((m) => m.id === 'wire-copper-standard')!;
+      const pendingWire: WireMaterial = {
+        ...copper,
+        resistivity: { verifiedForPhysics: false, status: 'pending', reason: 'テスト用fixture' },
+      };
+      const result = computeWireResistivityRatio(pendingWire);
+      expect(result.ok).toBe(false);
+    });
+
+    it('resistivityがverifiedForPhysics:trueだがvalueが非有限・非正の場合はok:falseになる(型は満たすが実行時ガードで検出)', () => {
+      const copper = WIRE_MATERIALS.find((m) => m.id === 'wire-copper-standard')!;
+      const nanWire: WireMaterial = {
+        ...copper,
+        resistivity: { verifiedForPhysics: true, value: Number.NaN, origin: 'projectSpec', citation: copper.resistivity.verifiedForPhysics ? copper.resistivity.citation : { literatureName: 'x', publisher: 'x', sourceKind: 'x' } },
+      };
+      expect(computeWireResistivityRatio(nanWire).ok).toBe(false);
+
+      const zeroWire: WireMaterial = {
+        ...copper,
+        resistivity: { verifiedForPhysics: true, value: 0, origin: 'projectSpec', citation: copper.resistivity.verifiedForPhysics ? copper.resistivity.citation : { literatureName: 'x', publisher: 'x', sourceKind: 'x' } },
+      };
+      expect(computeWireResistivityRatio(zeroWire).ok).toBe(false);
+
+      const negativeWire: WireMaterial = {
+        ...copper,
+        resistivity: { verifiedForPhysics: true, value: -5, origin: 'projectSpec', citation: copper.resistivity.verifiedForPhysics ? copper.resistivity.citation : { literatureName: 'x', publisher: 'x', sourceKind: 'x' } },
+      };
+      expect(computeWireResistivityRatio(negativeWire).ok).toBe(false);
+    });
+  });
+
+  describe('computeWireDensityRatio', () => {
+    it('WIRE_MATERIALSの全ティアに対応する比率が存在する(銀メッキ銅線もresolveWireDensityの設計仮定経由で解決される)', () => {
+      for (const wire of WIRE_MATERIALS) {
+        const result = computeWireDensityRatio(wire);
+        expect(result.ok, `${wire.id}の密度ratioが計算できません`).toBe(true);
+      }
+    });
+
+    it('anchor(wire-copper-standard)は厳密に1.0になる', () => {
+      const copper = WIRE_MATERIALS.find((m) => m.id === 'wire-copper-standard')!;
+      expect(computeWireDensityRatio(copper)).toEqual({ ok: true, ratio: 1.0 });
+    });
+
+    it('銀メッキ銅線は銅密度代用の設計仮定により、anchorと同じく1.0になる', () => {
+      const silverPlated = WIRE_MATERIALS.find((m) => m.id === 'wire-silver-plated-copper')!;
+      expect(computeWireDensityRatio(silverPlated)).toEqual({ ok: true, ratio: 1.0 });
+    });
+
+    it('tier方向性: 実測密度の大小関係と一致する(銀>銅=銀メッキ銅線>アルミ)', () => {
+      const aluminum = computeWireDensityRatio(WIRE_MATERIALS.find((m) => m.id === 'wire-aluminum')!);
+      const copper = computeWireDensityRatio(WIRE_MATERIALS.find((m) => m.id === 'wire-copper-standard')!);
+      const silver = computeWireDensityRatio(WIRE_MATERIALS.find((m) => m.id === 'wire-silver')!);
+      expect(aluminum.ok && copper.ok && silver.ok).toBe(true);
+      if (aluminum.ok && copper.ok && silver.ok) {
+        expect(silver.ratio).toBeGreaterThan(copper.ratio);
+        expect(copper.ratio).toBeGreaterThan(aluminum.ratio);
+      }
+    });
+
+    it('決定論: 同一素材への複数回呼び出しで常に同一の値になる', () => {
+      const aluminum = WIRE_MATERIALS.find((m) => m.id === 'wire-aluminum')!;
+      expect(computeWireDensityRatio(aluminum)).toEqual(computeWireDensityRatio(aluminum));
+    });
+
+    it('全ティアがStep6のクランプ範囲[0.2, 1.5]内に収まる', () => {
+      for (const wire of WIRE_MATERIALS) {
+        const result = computeWireDensityRatio(wire);
+        if (result.ok) {
+          expect(result.ratio, `${wire.id}`).toBeGreaterThanOrEqual(0.2);
+          expect(result.ratio, `${wire.id}`).toBeLessThanOrEqual(1.5);
+        }
+      }
+    });
+  });
+});
+
+describe('materialMapping.ts Step7a(composeConfigFromMaterials: 合成純関数)', () => {
+  function baseMotorConfig(overrides: Partial<MotorConfig> = {}): MotorConfig {
+    return {
+      coilTurns: 80,
+      slitWidthMm: 1.5,
+      sandingQuality: 0.9,
+      brushPressure: 0.3,
+      // 素材未反映の任意値。合成後にmagnetStrengthが較正値で上書きされることを確認する対象
+      magnetStrength: 0.5,
+      magnetDistanceMm: 10,
+      batteryVoltage: 3,
+      axisOffsetMm: 0,
+      wireGaugeMm: 0.4,
+      parallelStrands: 1,
+      varnished: true,
+      ...overrides,
+    };
+  }
+
+  function baseCarConfig(overrides: Partial<CarConfig> = {}): CarConfig {
+    return {
+      // 意図的にbaselineと異なる値。合成写像の出力には一切使われない(無視される)ことを
+      // 確認する対象(§3.1の入力契約)
+      massG: 999,
+      gearEfficiency: 0.123,
+      gearRatio: 4,
+      wheelDiameterMm: 30,
+      tireGrip: 0.7,
+      axleFriction: 0,
+      wheelAlignmentMm: 0,
+      centerOfMassHeightMm: 20,
+      motorMountOffsetMm: 0,
+      ...overrides,
+    };
+  }
+
+  const CANONICAL_BASELINE: MaterialCompositionBaseline = { chassisBaselineG: 150, baseGearEfficiency: 0.8 };
+  const CANONICAL_SELECTION: MaterialSelection = { wireId: 'wire-copper-standard', magnetId: 'magnet-ferrite', gearId: 'gear-pom' };
+
+  function restState(): SimState {
+    return {
+      theta: Math.PI / 4,
+      omega: 0,
+      current: 0,
+      backEmf: 0,
+      shorted: false,
+      running: true,
+      rpm: 0,
+      chatterFramesLeft: 0,
+      batteryHeat: 0,
+      coilCollapsed: false,
+      highSpeedFrameCount: 0,
+    };
+  }
+
+  it('1. canonical anchor base(baseline=150g/0.8, selection=全anchor素材)で厳密な具体値になる', () => {
+    const result = composeConfigFromMaterials(baseMotorConfig(), baseCarConfig(), CANONICAL_BASELINE, CANONICAL_SELECTION);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.motorConfig.wireResistivityRatio).toBe(1.0);
+    expect(result.motorConfig.wireDensityRatio).toBe(1.0);
+    expect(result.motorConfig.magnetStrength).toBe(0.2);
+    expect(result.carConfig.gearEfficiency).toBe(0.8);
+    expect(result.carConfig.massG).toBe(150);
+  });
+
+  it('2. 入力baseMotorConfig/baseCarConfig/baselineオブジェクト自体を変更しない', () => {
+    const motor = baseMotorConfig();
+    const car = baseCarConfig();
+    const baseline: MaterialCompositionBaseline = { ...CANONICAL_BASELINE };
+    const motorSnapshot = { ...motor };
+    const carSnapshot = { ...car };
+    const baselineSnapshot = { ...baseline };
+    composeConfigFromMaterials(motor, car, baseline, CANONICAL_SELECTION);
+    expect(motor).toEqual(motorSnapshot);
+    expect(car).toEqual(carSnapshot);
+    expect(baseline).toEqual(baselineSnapshot);
+  });
+
+  it('3. 同一入力で複数回呼び出しても常に同一出力になる(決定論)', () => {
+    const r1 = composeConfigFromMaterials(baseMotorConfig(), baseCarConfig(), CANONICAL_BASELINE, CANONICAL_SELECTION);
+    const r2 = composeConfigFromMaterials(baseMotorConfig(), baseCarConfig(), CANONICAL_BASELINE, CANONICAL_SELECTION);
+    expect(r2).toEqual(r1);
+  });
+
+  it('4. 出力を再びbaseMotorConfig/baseCarConfigとして入力しても、同じbaseline・selectionなら結果が累積しない(真の冪等性)', () => {
+    const nonAnchorSelection: MaterialSelection = { wireId: 'wire-silver', magnetId: 'magnet-neodymium', gearId: 'gear-titanium' };
+    const first = composeConfigFromMaterials(baseMotorConfig(), baseCarConfig(), CANONICAL_BASELINE, nonAnchorSelection);
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    const second = composeConfigFromMaterials(first.motorConfig, first.carConfig, CANONICAL_BASELINE, nonAnchorSelection);
+    expect(second).toEqual(first);
+  });
+
+  it('5. 導線の個別ratio関数(computeWireResistivityRatio/computeWireDensityRatio)の結果が、合成写像後の値と一致する', () => {
+    const wire = WIRE_MATERIALS.find((m) => m.id === 'wire-silver')!;
+    const selection: MaterialSelection = { ...CANONICAL_SELECTION, wireId: 'wire-silver' };
+    const result = composeConfigFromMaterials(baseMotorConfig(), baseCarConfig(), CANONICAL_BASELINE, selection);
+    const resistivity = computeWireResistivityRatio(wire);
+    const density = computeWireDensityRatio(wire);
+    expect(result.ok && resistivity.ok && density.ok).toBe(true);
+    if (result.ok && resistivity.ok && density.ok) {
+      expect(result.motorConfig.wireResistivityRatio).toBe(resistivity.ratio);
+      expect(result.motorConfig.wireDensityRatio).toBe(density.ratio);
+    }
+  });
+
+  it('6. ギヤ・磁石の既存個別関数(Step3・Step4)の結果が、合成写像後の値と一致する', () => {
+    const magnet = MAGNET_MATERIALS.find((m) => m.id === 'magnet-neodymium')!;
+    const gear = GEAR_MATERIALS.find((m) => m.id === 'gear-titanium')!;
+    const selection: MaterialSelection = { wireId: 'wire-copper-standard', magnetId: 'magnet-neodymium', gearId: 'gear-titanium' };
+    const result = composeConfigFromMaterials(baseMotorConfig(), baseCarConfig(), CANONICAL_BASELINE, selection);
+    const magnetCalib = computeMagnetStrengthCalibration(magnet);
+    const gearRatio = computeGearMaterialEfficiencyRatio(gear);
+    expect(result.ok && magnetCalib.ok && gearRatio.ok).toBe(true);
+    if (result.ok && magnetCalib.ok && gearRatio.ok) {
+      expect(result.motorConfig.magnetStrength).toBe(magnetCalib.magnetStrength);
+      const combined = combineGearEfficiency(CANONICAL_BASELINE.baseGearEfficiency, gearRatio.ratio);
+      expect(combined.ok).toBe(true);
+      if (combined.ok) expect(result.carConfig.gearEfficiency).toBe(combined.efficiency);
+    }
+  });
+
+  it('7. selection中の1素材が未登録IDの場合、部分更新されたconfigを返さず全体がok:falseになる', () => {
+    const badSelection: MaterialSelection = {
+      wireId: 'wire-unknown-fixture' as WireMaterialId,
+      magnetId: 'magnet-ferrite',
+      gearId: 'gear-pom',
+    };
+    const result = composeConfigFromMaterials(baseMotorConfig(), baseCarConfig(), CANONICAL_BASELINE, badSelection);
+    expect(result.ok).toBe(false);
+  });
+
+  it('8. 導線×磁石×ギヤの全64組合せで出力が有限正かつ各configの既存許容範囲内に収まる', () => {
+    for (const wire of WIRE_MATERIALS) {
+      for (const magnet of MAGNET_MATERIALS) {
+        for (const gear of GEAR_MATERIALS) {
+          const selection: MaterialSelection = { wireId: wire.id, magnetId: magnet.id, gearId: gear.id };
+          const result = composeConfigFromMaterials(baseMotorConfig(), baseCarConfig(), CANONICAL_BASELINE, selection);
+          expect(result.ok, `${wire.id}×${magnet.id}×${gear.id}: ${!result.ok ? result.reason : ''}`).toBe(true);
+          if (!result.ok) continue;
+          expect(Number.isFinite(result.motorConfig.wireResistivityRatio)).toBe(true);
+          expect(result.motorConfig.wireResistivityRatio!).toBeGreaterThan(0);
+          expect(Number.isFinite(result.motorConfig.wireDensityRatio)).toBe(true);
+          expect(result.motorConfig.wireDensityRatio!).toBeGreaterThan(0);
+          expect(result.motorConfig.magnetStrength).toBeGreaterThanOrEqual(0);
+          expect(result.motorConfig.magnetStrength).toBeLessThanOrEqual(1);
+          expect(result.carConfig.gearEfficiency).toBeGreaterThan(0);
+          expect(result.carConfig.gearEfficiency).toBeLessThanOrEqual(1);
+          expect(result.carConfig.massG).toBeGreaterThanOrEqual(80);
+          expect(result.carConfig.massG).toBeLessThanOrEqual(250);
+        }
+      }
+    }
+  });
+
+  it('9a. 合成写像の出力motorConfigをmotorPhysics.stepで実行してもNaN/Infinityが発生しない(engine側は無変更のsmokeテスト)', () => {
+    const selection: MaterialSelection = { wireId: 'wire-silver', magnetId: 'magnet-neodymium', gearId: 'gear-titanium' };
+    const result = composeConfigFromMaterials(baseMotorConfig(), baseCarConfig(), CANONICAL_BASELINE, selection);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    let s = restState();
+    const rng = () => 0.5;
+    for (let i = 0; i < 120; i++) {
+      s = step(result.motorConfig, s, 1 / 120, rng);
+      expect(Number.isFinite(s.theta)).toBe(true);
+      expect(Number.isFinite(s.omega)).toBe(true);
+      expect(Number.isFinite(s.current)).toBe(true);
+      expect(Number.isFinite(s.backEmf)).toBe(true);
+    }
+  });
+
+  it('9b. 合成写像の出力motorConfig・carConfigの両方をstepTrackRunで実行してもNaN/Infinityが発生しない(gearEfficiency・massG込みのsmokeテスト、engine側は無変更)', () => {
+    const selection: MaterialSelection = { wireId: 'wire-silver', magnetId: 'magnet-neodymium', gearId: 'gear-titanium' };
+    const result = composeConfigFromMaterials(baseMotorConfig(), baseCarConfig(), CANONICAL_BASELINE, selection);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    const segment: TrackSegment = { lengthM: 10, slopeDeg: 0, surfaceGrip: 1, roughness: 0 };
+    const track: TrackDefinition = { id: 'step7a-smoke', name: 'smoke', description: '', segments: [segment], objectives: [] };
+    const validated = createValidatedTrack(track);
+    let state = createInitialVehicleState(result.motorConfig, result.carConfig);
+    const rng = () => 0.5;
+    for (let i = 0; i < 120; i++) {
+      state = stepTrackRun(result.motorConfig, result.carConfig, validated, state, 1 / 120, rng);
+      expect(Number.isFinite(state.positionM)).toBe(true);
+      expect(Number.isFinite(state.velocityMps)).toBe(true);
+      expect(Number.isFinite(state.energyUsedJ)).toBe(true);
+      if (state.status !== 'running' && state.status !== 'ready') break;
+    }
+  });
+
+  it('10. wireGaugeMm/parallelStrands省略時と明示的な0.4/1指定時とで、出力(massGの導線体積寄与を含む)が完全一致する', () => {
+    // wireGaugeMm/parallelStrandsそのものはbaseMotorConfigから素通しでコピーされるため、
+    // 省略(undefined)/明示(0.4・1)の違いがmotorConfig上には残る(これは仕様どおりで、
+    // motorPhysics.ts側のresolveWireGaugeMm等が`?? D_REF`で解決する既存の設計)。ここで
+    // 一致を主張するのは、DEFAULT_WIRE_GAUGE_MM/DEFAULT_PARALLEL_STRANDSのフォールバックが
+    // 正しく効き、massGへの導線体積寄与が同じ値になることのみ。
+    const omittedMotor = baseMotorConfig({ wireGaugeMm: undefined, parallelStrands: undefined });
+    const explicitMotor = baseMotorConfig({ wireGaugeMm: 0.4, parallelStrands: 1 });
+    const r1 = composeConfigFromMaterials(omittedMotor, baseCarConfig(), CANONICAL_BASELINE, CANONICAL_SELECTION);
+    const r2 = composeConfigFromMaterials(explicitMotor, baseCarConfig(), CANONICAL_BASELINE, CANONICAL_SELECTION);
+    expect(r1.ok && r2.ok).toBe(true);
+    if (r1.ok && r2.ok) {
+      expect(r1.carConfig.massG).toBe(r2.carConfig.massG);
+      expect(r1.motorConfig.wireResistivityRatio).toBe(r2.motorConfig.wireResistivityRatio);
+      expect(r1.motorConfig.wireDensityRatio).toBe(r2.motorConfig.wireDensityRatio);
+      expect(r1.motorConfig.magnetStrength).toBe(r2.motorConfig.magnetStrength);
+      expect(r1.carConfig.gearEfficiency).toBe(r2.carConfig.gearEfficiency);
+    }
+  });
+
+  // 推奨(Suu_mot3コードレビュー): 原子的Resultをlookup失敗だけでなく下流失敗でも固定する。
+  describe('11. 下流失敗(無効baseline)でもok:falseかつconfigを返さない', () => {
+    it('chassisBaselineGがNaNの場合、applyMassAdjustmentToBaselineG側の失敗が伝播しok:falseになる', () => {
+      const invalidBaseline: MaterialCompositionBaseline = { chassisBaselineG: Number.NaN, baseGearEfficiency: 0.8 };
+      const result = composeConfigFromMaterials(baseMotorConfig(), baseCarConfig(), invalidBaseline, CANONICAL_SELECTION);
+      expect(result.ok).toBe(false);
+      expect((result as { motorConfig?: unknown }).motorConfig).toBeUndefined();
+      expect((result as { carConfig?: unknown }).carConfig).toBeUndefined();
+    });
+
+    it('baseGearEfficiencyが大きすぎて合成後1を超える場合、combineGearEfficiency側の失敗が伝播しok:falseになる', () => {
+      const invalidBaseline: MaterialCompositionBaseline = { chassisBaselineG: 150, baseGearEfficiency: 2.0 };
+      // gear-peekのratio(1.01)と組み合わせると2.0×1.01>1となりcombineGearEfficiencyが失敗する
+      const selection: MaterialSelection = { wireId: 'wire-copper-standard', magnetId: 'magnet-ferrite', gearId: 'gear-peek' };
+      const result = composeConfigFromMaterials(baseMotorConfig(), baseCarConfig(), invalidBaseline, selection);
+      expect(result.ok).toBe(false);
+      expect((result as { motorConfig?: unknown }).motorConfig).toBeUndefined();
+      expect((result as { carConfig?: unknown }).carConfig).toBeUndefined();
+    });
   });
 });

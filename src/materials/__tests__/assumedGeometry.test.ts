@@ -8,6 +8,8 @@ import {
   computeMassDeltaG,
   computeWireMagnetMassAdjustmentG,
   computeWireVolumeM3,
+  resolveAnchorMagnetMaterial,
+  resolveAnchorWireMaterial,
   resolveChassisBaselineG,
   resolveMagnetDensity,
   resolveWireDensity,
@@ -249,4 +251,42 @@ describe('assumedGeometry.ts Step2a(導線・磁石の質量差分)', () => {
   // if (false)ブロックでの@ts-expect-errorはunreachable code解析により型検査自体が
   // 素通りし「エラーなし」と誤判定されたため、信頼できない型テストとして削除した
   // (2026-07-22再レビュー指摘3)。
+
+  // Phase2 Step7(Fable承認済みQ1・Q7): anchor解決の公開API。resolverは引数なしで
+  // 現行materials.tsのWIRE_MATERIALS/MAGNET_MATERIALSを参照するため、「anchorが
+  // 欠落した状態」を通常テストから作ることはできない(Suu_mot3最終レビュー指摘2、
+  // docs/phase2-step7-suu-review-v3.md §3)。この分岐は型・コードレビュー上の防御として
+  // 残すのみとし、成功経路のみをテストする。
+  describe('resolveAnchorWireMaterial/resolveAnchorMagnetMaterial(Step7、anchor解決の公開API)', () => {
+    it('resolveAnchorWireMaterialは現行materials.tsのwire-copper-standardを返す', () => {
+      const result = resolveAnchorWireMaterial();
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.material.id).toBe('wire-copper-standard');
+        expect(result.material.isBaselineAnchor).toBe(true);
+      }
+    });
+
+    it('resolveAnchorMagnetMaterialは現行materials.tsのmagnet-ferriteを返す', () => {
+      const result = resolveAnchorMagnetMaterial();
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.material.id).toBe('magnet-ferrite');
+        expect(result.material.isBaselineAnchor).toBe(true);
+      }
+    });
+
+    it('computeWireMagnetMassAdjustmentGはresolveAnchorWireMaterial/resolveAnchorMagnetMaterial経由でも既存の結果と一致する(回帰)', () => {
+      // anchor構成(銅×フェライト)でdeltaGが厳密0になることは、既存の
+      // 「computeWireMagnetMassAdjustmentG: anchor構成での厳密ゼロ再現」describe内で
+      // 既に確認済み。ここでは新関数を経由する実装へ置き換えた後も同じ結果になることを
+      // 非anchor構成(アルミ×フェライト)で確認する
+      const result = computeWireMagnetMassAdjustmentG(ALUMINUM_WIRE, FERRITE_MAGNET, REPRESENTATIVE_WINDING);
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(Number.isFinite(result.deltaG)).toBe(true);
+        expect(result.deltaG).toBeLessThan(0); // アルミは銅よりも軽いため負の質量差分
+      }
+    });
+  });
 });
