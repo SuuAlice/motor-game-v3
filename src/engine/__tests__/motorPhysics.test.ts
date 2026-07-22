@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { step, type MotorConfig, type SimState } from '../motorPhysics';
+import { step, computeElectricalState, computeJ, computeRCoil, type MotorConfig, type SimState } from '../motorPhysics';
 import { getCommutationSign } from '../commutator';
 import {
   B_FLOOR_RATIO,
@@ -9,6 +9,7 @@ import {
   K_B_DISTANCE,
   K_E,
   K_T,
+  J_NAIL,
   CHATTER_BURST_FRAMES,
   CHATTER_PRESSURE_THRESHOLD,
 } from '../constants';
@@ -260,5 +261,179 @@ describe('Phase3: 組み立てモードの逆方向フリック', () => {
     const initial: SimState = { ...restState(), omega: -15 };
     const s = runSteps(config, 120 * 15, NO_NOISE_RNG, initial);
     expect(s.omega).toBeGreaterThan(0);
+  });
+});
+
+// Phase2 Step5a(docs/phase2-plan.md §7、Fable承認済み): 導線ratio(抵抗率・密度)の
+// engine拡張。goodConfig()はbrushPressure=0.3(>=CHATTER_PRESSURE_THRESHOLD=0.2)
+// かつaxisOffsetMm=0のため、チャタリング判定は常にfalse分岐、軸ずれ振動は振幅0倍
+// (vibrationNoiseの戻り値が常に0)となり、NO_NOISE_RNGの下で完全に決定論的に振る舞う
+// (rngの値そのものは結果に影響しない)。以下のテストで選ぶtheta(π/6・π/4・π/3)は
+// いずれもスリット(slitWidthMm=1.5)のデッドゾーン境界(θ=0/π近傍)から十分離れた点。
+describe('Phase2 Step5a: 導線ratio(抵抗率・密度)のengine拡張', () => {
+  describe('後方互換(省略時・明示的ratio=1.0の同値性、利用経路ごとに個別固定)', () => {
+    it('120ステップ統合: wireResistivityRatio/wireDensityRatioを省略した場合と明示的に1.0を指定した場合で状態が完全一致する', () => {
+      const omitted = runSteps(goodConfig(), 120);
+      const explicit = runSteps(goodConfig({ wireResistivityRatio: 1.0, wireDensityRatio: 1.0 }), 120);
+      expect(explicit.omega).toBe(omitted.omega);
+      expect(explicit.theta).toBe(omitted.theta);
+      expect(explicit.current).toBe(omitted.current);
+    });
+
+    it('computeRCoil: wireResistivityRatioを省略した場合と明示的に1.0を指定した場合でR_coilが完全一致する', () => {
+      const omitted = computeRCoil(goodConfig());
+      const explicit = computeRCoil(goodConfig({ wireResistivityRatio: 1.0 }));
+      expect(explicit).toBe(omitted);
+    });
+
+    it('computeJ: wireDensityRatioを省略した場合と明示的に1.0を指定した場合でJが完全一致する', () => {
+      const omitted = computeJ(goodConfig());
+      const explicit = computeJ(goodConfig({ wireDensityRatio: 1.0 }));
+      expect(explicit).toBe(omitted);
+    });
+
+    it('computeElectricalState経路(rCoil算出)もratio省略と明示的1.0で電流が一致する', () => {
+      const es1 = computeElectricalState(goodConfig(), Math.PI / 4, 50);
+      const es2 = computeElectricalState(goodConfig({ wireResistivityRatio: 1.0 }), Math.PI / 4, 50);
+      expect(es2.current).toBe(es1.current);
+    });
+
+    it('effectiveInertia未指定のstep()経路(内部でcomputeOmegaDynamicsがJを再計算する経路)もwireDensityRatio省略と明示的1.0で一致する', () => {
+      // effectiveInertiaを渡さないため、computeOmegaDynamics内部のJ計算(J_NAIL+コイル寄与×densityRatio)を
+      // 直接経由する。120ステップ統合テストとは別に、この経路単体を数ステップで固定する。
+      const s1 = step(goodConfig(), restState(), DT, NO_NOISE_RNG);
+      const s2 = step(goodConfig({ wireDensityRatio: 1.0 }), restState(), DT, NO_NOISE_RNG);
+      expect(s2.omega).toBe(s1.omega);
+      expect(s2.theta).toBe(s1.theta);
+    });
+
+    it('effectiveInertia指定のadvanceMotorState経路(computeOmegaDynamicsの内部J計算を経由しない経路)もratio省略と明示的1.0で一致する(Q2契約)', () => {
+      const s1 = step(goodConfig(), restState(), DT, NO_NOISE_RNG, 0, 3e-4);
+      const s2 = step(goodConfig({ wireDensityRatio: 1.0 }), restState(), DT, NO_NOISE_RNG, 0, 3e-4);
+      expect(s2.omega).toBe(s1.omega);
+    });
+  });
+
+  describe('R_coil・Jのスケーリング式(比例 vs アフィン)', () => {
+    it('computeRCoilはwireResistivityRatioに厳密に比例する(オフセットなし)', () => {
+      const base = computeRCoil(goodConfig({ wireResistivityRatio: 1 }));
+      const doubled = computeRCoil(goodConfig({ wireResistivityRatio: 2 }));
+      const halved = computeRCoil(goodConfig({ wireResistivityRatio: 0.5 }));
+      expect(doubled).toBeCloseTo(base * 2, 12);
+      expect(halved).toBeCloseTo(base * 0.5, 12);
+    });
+
+    it('computeJはwireDensityRatioに対してアフィン(J_NAILの固定オフセット分だけ比例から外れる)であり、コイル寄与分のみが比例する', () => {
+      const j1 = computeJ(goodConfig({ wireDensityRatio: 1 }));
+      const j2 = computeJ(goodConfig({ wireDensityRatio: 2 }));
+      const jHalf = computeJ(goodConfig({ wireDensityRatio: 0.5 }));
+
+      // コイル寄与分(J_NAILを除いた部分)はratioに厳密比例する
+      expect(j2 - J_NAIL).toBeCloseTo((j1 - J_NAIL) * 2, 12);
+      expect(jHalf - J_NAIL).toBeCloseTo((j1 - J_NAIL) * 0.5, 12);
+
+      // しかしJ_total自体はJ_NAILの固定オフセットがあるためratioに比例しない
+      expect(j2 / j1).not.toBeCloseTo(2, 2);
+    });
+  });
+
+  describe('方向性の性質テスト: ストール電流(ω=0)はwireResistivityRatioに対して単調に減少する', () => {
+    it('ω=0では、theta(整流状態)によらずcurrentがratio∈{0.5,1,2}で厳密に単調減少する(ω=0でbackEmf=0のため、currentの大きさはthetaに依存しないことも合わせて確認)', () => {
+      for (const theta of [Math.PI / 6, Math.PI / 4, Math.PI / 3]) {
+        const currents = [0.5, 1, 2].map(
+          (r) => computeElectricalState(goodConfig({ wireResistivityRatio: r }), theta, 0).current,
+        );
+        expect(currents[0]).toBeGreaterThan(currents[1]);
+        expect(currents[1]).toBeGreaterThan(currents[2]);
+      }
+    });
+  });
+
+  describe('方向性の性質テスト: 3レジーム×2時間点でのomega応答(Fable指摘Q4)', () => {
+    // R1 静止からの立ち上がり: theta=π/3, omega=0, loadTorque=0
+    // R2 負荷下の中速域: theta=π/6, omega=60rad/s, loadTorque=3e-4N·m
+    //    (加速度を鈍らせるが、駆動トルクの符号を反転させるほど大きくはない値を選定)
+    // R3 無負荷高速域: theta=π/4, omega=110rad/s
+    //    (定常回転域に近いが未収束の値。収束点そのものだと差分が数値誤差に埋もれるため避けた)
+    // いずれもデッドゾーン境界・チャタリング閾値から意図的に離した代表点。
+    interface Regime {
+      label: string;
+      theta: number;
+      omega: number;
+      loadTorque: number;
+    }
+    const regimes: Regime[] = [
+      { label: '静止からの立ち上がり', theta: Math.PI / 3, omega: 0, loadTorque: 0 },
+      { label: '負荷下の中速域', theta: Math.PI / 6, omega: 60, loadTorque: 3e-4 },
+      { label: '無負荷高速域', theta: Math.PI / 4, omega: 110, loadTorque: 0 },
+    ];
+
+    function stateAt(theta: number, omega: number): SimState {
+      return {
+        theta,
+        omega,
+        current: 0,
+        backEmf: 0,
+        shorted: false,
+        running: true,
+        rpm: 0,
+        chatterFramesLeft: 0,
+        batteryHeat: 0,
+        coilCollapsed: false,
+        highSpeedFrameCount: 0,
+      };
+    }
+
+    function omegaAfterSteps(config: MotorConfig, regime: Regime, steps: number): number {
+      let s = stateAt(regime.theta, regime.omega);
+      for (let i = 0; i < steps; i++) {
+        s = step(config, s, DT, NO_NOISE_RNG, regime.loadTorque);
+      }
+      return s.omega;
+    }
+
+    for (const regime of regimes) {
+      for (const steps of [1, 5]) {
+        it(`[${regime.label}] ${steps}ステップ後: wireResistivityRatio∈{0.5,1,2}でomegaが単調減少する(ストール電流減の帰結)`, () => {
+          const omegas = [0.5, 1, 2].map((r) => omegaAfterSteps(goodConfig({ wireResistivityRatio: r }), regime, steps));
+          expect(omegas[0]).toBeGreaterThan(omegas[1]);
+          expect(omegas[1]).toBeGreaterThan(omegas[2]);
+        });
+
+        it(`[${regime.label}] ${steps}ステップ後: wireDensityRatio∈{0.5,1,2}でomegaが単調減少する(立ち上がり鈍化)`, () => {
+          const omegas = [0.5, 1, 2].map((r) => omegaAfterSteps(goodConfig({ wireDensityRatio: r }), regime, steps));
+          expect(omegas[0]).toBeGreaterThan(omegas[1]);
+          expect(omegas[1]).toBeGreaterThan(omegas[2]);
+        });
+      }
+    }
+  });
+
+  describe('方向性の性質テスト: 定常回転収束後(最高回転数相当)はwireResistivityRatioに対して単調に減少する', () => {
+    it('15秒間の定常回転収束後、wireResistivityRatio∈{0.5,1,2}でomegaが単調減少する', () => {
+      const steps = 120 * 15;
+      const omegas = [0.5, 1, 2].map((r) => runSteps(goodConfig({ wireResistivityRatio: r }), steps).omega);
+      expect(omegas[0]).toBeGreaterThan(omegas[1]);
+      expect(omegas[1]).toBeGreaterThan(omegas[2]);
+    });
+  });
+
+  describe('effectiveInertia契約(Fable承認済み、Q2): 外部指定時はwireDensityRatioが無効、省略時は相補的に有効', () => {
+    it('effectiveInertiaを外部指定した場合、wireDensityRatioを変えても出力が完全一致する(二重適用なし)', () => {
+      const EFFECTIVE_INERTIA = 3e-4;
+      const results = [0.5, 1, 2].map(
+        (r) => step(goodConfig({ wireDensityRatio: r }), restState(Math.PI / 3), DT, NO_NOISE_RNG, 0, EFFECTIVE_INERTIA).omega,
+      );
+      expect(results[0]).toBe(results[1]);
+      expect(results[1]).toBe(results[2]);
+    });
+
+    it('effectiveInertiaを省略した場合、wireDensityRatioを変えると出力が変化する(相補経路: 内部J計算にratioが反映される)', () => {
+      const results = [0.5, 1, 2].map(
+        (r) => step(goodConfig({ wireDensityRatio: r }), restState(Math.PI / 3), DT, NO_NOISE_RNG, 0).omega,
+      );
+      expect(results[0]).not.toBe(results[1]);
+      expect(results[1]).not.toBe(results[2]);
+    });
   });
 });

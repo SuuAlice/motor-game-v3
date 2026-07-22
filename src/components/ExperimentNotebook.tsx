@@ -27,6 +27,8 @@ const CONFIG_LABELS: Record<keyof MotorConfig, [string, string]> = {
   wireGaugeMm: ['線径', 'mm'],
   parallelStrands: ['並列本数', '本'],
   varnished: ['ワニス', ''],
+  wireResistivityRatio: ['導線抵抗率', '比'],
+  wireDensityRatio: ['導線密度', '比'],
 };
 
 function displayConfigValue(config: MotorConfig, key: keyof MotorConfig): string {

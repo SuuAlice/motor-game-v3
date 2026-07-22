@@ -48,6 +48,16 @@ export interface MotorConfig {
   wireGaugeMm?: number; // 0.2–0.8mm、エナメル線の直径。省略時 D_REF(0.4mm)
   parallelStrands?: 1 | 2; // シングル巻き/ダブル巻き。省略時 1
   varnished?: boolean; // ワニス固め済みか。省略時 true(崩壊なし、v1.0と同じ挙動)
+  // Phase2 Step5a(spec §4.3導線写像、docs/phase2-plan.md §7)で追加。無次元比率で
+  // 素材の抵抗率・密度をR_coil/Jへスケーリングする。engineは絶対物性値(Ω·m/kg/m³)
+  // を一切知らず、比率のみを受け取る(素材非依存の黒箱定数R_REF/K_J_REFを維持)。
+  // 契約(Fable承認済み、Q1): 有限かつ正の値であることが前提条件(trusted
+  // precondition)。engine内でclamp・fallback・fail-fastは行わない。呼び出し側
+  // (Step6のrecipeCode正規化・Step7のmaterialMapping)がこの保証の履行者になる。
+  wireResistivityRatio?: number; // 既定1.0。R_coilの倍率。anchor(銅線標準)で1.0
+  // 契約(Fable承認済み、Q2): effectiveInertiaが外部指定された場合、この値は
+  // 使われない(computeOmegaDynamicsの内部J計算自体を通らないため二重適用なし)。
+  wireDensityRatio?: number; // 既定1.0。Jのコイル寄与分の倍率。anchor(銅線標準)で1.0
 }
 
 export interface SimState {
@@ -119,6 +129,14 @@ function resolveVarnished(config: MotorConfig): boolean {
   return config.varnished ?? true;
 }
 
+function resolveWireResistivityRatio(config: MotorConfig): number {
+  return config.wireResistivityRatio ?? 1;
+}
+
+function resolveWireDensityRatio(config: MotorConfig): number {
+  return config.wireDensityRatio ?? 1;
+}
+
 function computeRCoilPerTurn(wireGaugeMm: number, parallelStrands: number): number {
   return (R_REF * (D_REF / wireGaugeMm) ** 2) / parallelStrands;
 }
@@ -134,18 +152,20 @@ export function computeMaxTurns(wireGaugeMm: number, parallelStrands: number): n
   return Math.floor(COIL_WINDOW / (wireGaugeMm * wireGaugeMm * parallelStrands) + 1e-9);
 }
 
-// R_coil = computeRCoilPerTurn(線径依存) · coilTurns
+// R_coil = computeRCoilPerTurn(線径依存) · coilTurns · wireResistivityRatio(素材依存、Phase2 Step5a)
 export function computeRCoil(config: MotorConfig): number {
   const wireGaugeMm = resolveWireGaugeMm(config);
   const parallelStrands = resolveParallelStrands(config);
-  return computeRCoilPerTurn(wireGaugeMm, parallelStrands) * config.coilTurns;
+  const resistivityRatio = resolveWireResistivityRatio(config);
+  return computeRCoilPerTurn(wireGaugeMm, parallelStrands) * config.coilTurns * resistivityRatio;
 }
 
-// J = J_NAIL + computeKJPerTurn(線径依存) · coilTurns
+// J = J_NAIL + computeKJPerTurn(線径依存) · coilTurns · wireDensityRatio(素材依存、Phase2 Step5a)
 export function computeJ(config: MotorConfig): number {
   const wireGaugeMm = resolveWireGaugeMm(config);
   const parallelStrands = resolveParallelStrands(config);
-  return J_NAIL + computeKJPerTurn(wireGaugeMm, parallelStrands) * config.coilTurns;
+  const densityRatio = resolveWireDensityRatio(config);
+  return J_NAIL + computeKJPerTurn(wireGaugeMm, parallelStrands) * config.coilTurns * densityRatio;
 }
 
 // spec-v1.5.md §4: アルカリ単3相当。3.0V(2本直列)は内部抵抗も直列で2倍になる。
@@ -259,7 +279,7 @@ export function computeElectricalState(config: MotorConfig, theta: number, omega
   const B = computeB(config.magnetStrength, config.magnetDistanceMm);
   const backEmf = K_E * B * config.coilTurns * omega * sinTheta * s;
   const rBatteryInternal = computeBatteryInternalResistance(config.batteryVoltage);
-  const rCoil = computeRCoilPerTurn(wireGaugeMm, parallelStrands) * config.coilTurns;
+  const rCoil = computeRCoilPerTurn(wireGaugeMm, parallelStrands) * config.coilTurns * resolveWireResistivityRatio(config);
   const rContact = computeContactResistance(config);
   const iRaw = shorted || deadZone ? 0 : (config.batteryVoltage - backEmf) / (rCoil + rContact + rBatteryInternal);
   const current = Math.max(0, iRaw);
@@ -422,7 +442,11 @@ export function computeOmegaDynamics(
   const staticFrictionLimit = MU_BRUSH * config.brushPressure;
   const tFric = -sign(omega) * staticFrictionLimit;
   const tDrag = -C_DRAG * omega;
-  const j = effectiveInertia ?? J_NAIL + computeKJPerTurn(wireGaugeMm, parallelStrands) * config.coilTurns;
+  // effectiveInertia指定時はそれを正とし、ここでのJ再計算(wireDensityRatio込み)は
+  // 使われない(Fable承認済み、Q2: 二段API・反射慣性方式の設計意図どおり、車体層が
+  // 一度だけJ_eff=jMotor+反射質量を合成する。二重適用を避けるため無効)。
+  const j =
+    effectiveInertia ?? J_NAIL + computeKJPerTurn(wireGaugeMm, parallelStrands) * config.coilTurns * resolveWireDensityRatio(config);
   return omega + ((evaluation.tMag + evaluation.tCog + tFric + tDrag - loadTorque) / j) * dt;
 }
 
