@@ -58,6 +58,15 @@ export interface MotorConfig {
   // 契約(Fable承認済み、Q2): effectiveInertiaが外部指定された場合、この値は
   // 使われない(computeOmegaDynamicsの内部J計算自体を通らないため二重適用なし)。
   wireDensityRatio?: number; // 既定1.0。Jのコイル寄与分の倍率。anchor(銅線標準)で1.0
+  // Phase2 Step5b(docs/phase2-plan.md §7・§8、Fable承認済み)で追加。電池側の
+  // 無次元比率。wireResistivityRatio/wireDensityRatioと同じtrusted precondition
+  // (有限かつ正、engine内でclamp・fallback・fail-fastは行わない。Step6の
+  // recipeCode正規化・Step7のmaterialMappingが保証の履行者になる)。
+  batteryInternalResistanceRatio?: number; // 既定1.0。実効内部抵抗の倍率(anchor=アルカリで1.0)
+  // trackPhysics.ts(computeEnergyBudgetJ)でのみ参照される(phase2-plan.md §8で
+  // MotorConfig所属を確定済み: 実レシピCPUが「レシピ+シードのみ」で定義される
+  // 規約と整合するため)。motorPhysics.ts側の物理式には一切関与しない。
+  batteryCapacityRatio?: number; // 既定1.0。エネルギー予算(BATTERY_CAPACITY_J_*)の倍率
 }
 
 export interface SimState {
@@ -137,6 +146,10 @@ function resolveWireDensityRatio(config: MotorConfig): number {
   return config.wireDensityRatio ?? 1;
 }
 
+function resolveBatteryInternalResistanceRatio(config: MotorConfig): number {
+  return config.batteryInternalResistanceRatio ?? 1;
+}
+
 function computeRCoilPerTurn(wireGaugeMm: number, parallelStrands: number): number {
   return (R_REF * (D_REF / wireGaugeMm) ** 2) / parallelStrands;
 }
@@ -171,6 +184,14 @@ export function computeJ(config: MotorConfig): number {
 // spec-v1.5.md §4: アルカリ単3相当。3.0V(2本直列)は内部抵抗も直列で2倍になる。
 export function computeBatteryInternalResistance(batteryVoltage: 1.5 | 3.0): number {
   return batteryVoltage === 1.5 ? R_BATTERY_INTERNAL_1_5V : R_BATTERY_INTERNAL_3V;
+}
+
+// Phase2 Step5b(Fable承認済み、Q1): computeBatteryInternalResistanceの適用箇所
+// (電流計算・電池発熱計算の2箇所)がbatteryInternalResistanceRatioの乗算を
+// 個別に複製しないよう、一元化したprivate helper。非exportとし、観測可能な
+// 振る舞い(電流・batteryHeatへの反映)を通してのみテストする。
+function resolveEffectiveBatteryInternalResistance(config: MotorConfig): number {
+  return computeBatteryInternalResistance(config.batteryVoltage) * resolveBatteryInternalResistanceRatio(config);
 }
 
 // spec §3.5: ブラシ圧が閾値未満のとき、接触不良の瞬断が起こる。1フレーム単発では
@@ -278,7 +299,7 @@ export function computeElectricalState(config: MotorConfig, theta: number, omega
   const shorted = config.slitWidthMm <= 0;
   const B = computeB(config.magnetStrength, config.magnetDistanceMm);
   const backEmf = K_E * B * config.coilTurns * omega * sinTheta * s;
-  const rBatteryInternal = computeBatteryInternalResistance(config.batteryVoltage);
+  const rBatteryInternal = resolveEffectiveBatteryInternalResistance(config);
   const rCoil = computeRCoilPerTurn(wireGaugeMm, parallelStrands) * config.coilTurns * resolveWireResistivityRatio(config);
   const rContact = computeContactResistance(config);
   const iRaw = shorted || deadZone ? 0 : (config.batteryVoltage - backEmf) / (rCoil + rContact + rBatteryInternal);
@@ -464,7 +485,7 @@ export function advanceMotorState(
   const { current, backEmf, tMag, tCog, shorted } = evaluation;
 
   // 電池発熱(spec-v1.5.md §4)。静止摩擦クランプの有無によらず毎ステップ更新する。
-  const rBatteryInternal = computeBatteryInternalResistance(config.batteryVoltage);
+  const rBatteryInternal = resolveEffectiveBatteryInternalResistance(config);
   const rContact = computeContactResistance(config);
   const batteryHeat = nextBatteryHeat(state.batteryHeat, current, shorted, config.batteryVoltage, rContact, rBatteryInternal, dt);
 

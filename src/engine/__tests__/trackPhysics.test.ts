@@ -472,3 +472,136 @@ describe('Phase3受け入れ基準: createValidatedTrack(fail-fast契約)', () =
     expect(Number.isFinite(state.positionM)).toBe(true);
   });
 });
+
+// Phase2 Step5b(docs/phase2-plan.md §7・§8、Fable承認済み+訂正済み追加条件2):
+// batteryCapacityRatioのengine拡張(trackPhysics.tsのcomputeEnergyBudgetJのみで
+// 参照される、非export)。budgetはテスト側でBATTERY_CAPACITY_J_1_5V/_3_0V×ratio
+// として算出し、production側のcomputeEnergyBudgetJはexportしない。
+describe('Phase2 Step5b: 電池ratio(容量)のengine拡張', () => {
+  function runTrajectory(motorConfig: MotorConfig, carConfig: CarConfig, t: ReturnType<typeof createValidatedTrack>, n: number, rngSeed = 1) {
+    const rng = mulberry32(rngSeed);
+    let state = createInitialVehicleState(motorConfig, carConfig);
+    const trajectory: VehicleSimState[] = [state]; // index 0 = 初期state
+    for (let i = 0; i < n; i++) {
+      state = stepTrackRun(motorConfig, carConfig, t, state, DT, rng);
+      trajectory.push(state);
+    }
+    return trajectory;
+  }
+
+  describe('後方互換(省略時・明示的ratio=1.0の同値性)', () => {
+    it('stepTrackRunのforcePowerOff発動タイミング: batteryCapacityRatio省略と明示的1.0で全状態軌跡が完全一致する', () => {
+      const carConfig = standardCarConfig();
+      const t = createValidatedTrack(track({ segments: [seg({ lengthM: 50 })], hasEnergyBudget: true }));
+      const omitted = runTrajectory(goodMotorConfig({ batteryVoltage: 1.5 }), carConfig, t, 3000);
+      const explicit = runTrajectory(goodMotorConfig({ batteryVoltage: 1.5, batteryCapacityRatio: 1.0 }), carConfig, t, 3000);
+      expect(explicit).toEqual(omitted);
+      // 軌跡完全一致が成り立てば、forcePowerOffのcrossingタイミング自体も
+      // 自動的に一致する(crossingは軌跡上のenergyUsedJの遷移点にすぎないため)
+      const crossingIndex = (traj: VehicleSimState[]) =>
+        traj.findIndex((s, i) => i > 0 && traj[i - 1].energyUsedJ < BATTERY_CAPACITY_J_1_5V && s.energyUsedJ >= BATTERY_CAPACITY_J_1_5V);
+      expect(crossingIndex(explicit)).toBe(crossingIndex(omitted));
+    });
+  });
+
+  describe('方向性の性質テスト: capacity ratio↑でenergyExhausted発動までのステップ数が単調に増加する(crossingと終端の分離)', () => {
+    // fixture(事前許可のうえ実測・Fable Q3承認済み): batteryVoltage=1.5V、
+    // track lengthM=50(track長自体は無関係。予算切れ後は静止摩擦で数m以内に
+    // 停止するため50/100/200mいずれでも同じ挙動と実測確認済み)、
+    // hasEnergyBudget=true、goodMotorConfig()+standardCarConfig()、rng=mulberry32(1)。
+    // 参考実測値(絶対値はハードコードせず、相対順序のみを期待値にする):
+    // ratio=0.5→2797ステップ、ratio=1→5461ステップ、ratio=2→10793ステップ。
+    const MAX_STEPS = 120 * 120; // 14400。ratio=2の実測10793に対し十分な余裕。
+
+    function runToExhaustionOrThrow(motorConfig: MotorConfig, budget: number) {
+      const carConfig = standardCarConfig();
+      const t = createValidatedTrack(track({ segments: [seg({ lengthM: 50 })], hasEnergyBudget: true }));
+      let state = createInitialVehicleState(motorConfig, carConfig);
+      const rng = mulberry32(1);
+      let firstCrossingStep = -1;
+      let crossingCount = 0;
+      let maxEnergyUsedJSoFar = state.energyUsedJ;
+      let energyUsedJEverDecreased = false;
+      let steps = 0;
+      while (state.status === 'ready' || state.status === 'running') {
+        if (steps >= MAX_STEPS) {
+          throw new Error(
+            `Step5b容量方向性テスト: ratio対応budget=${budget}Jが${MAX_STEPS}ステップ以内にenergyExhausted終端へ到達しませんでした(収束前打ち切り)。`,
+          );
+        }
+        const before = state;
+        state = stepTrackRun(motorConfig, carConfig, t, state, DT, rng);
+        steps += 1;
+        if (before.energyUsedJ < budget && state.energyUsedJ >= budget) {
+          crossingCount += 1;
+          if (firstCrossingStep === -1) firstCrossingStep = steps;
+        }
+        if (state.energyUsedJ < maxEnergyUsedJSoFar) energyUsedJEverDecreased = true;
+        maxEnergyUsedJSoFar = Math.max(maxEnergyUsedJSoFar, state.energyUsedJ);
+      }
+      return { state, firstCrossingStep, crossingCount, energyUsedJEverDecreased };
+    }
+
+    it('ratio∈{0.5,1,2}のいずれも、crossingが厳密に一度だけ観測され、energyUsedJが単調非減少のまま最終的にstalled+failureCode=energyExhaustedになり、crossingステップ数が厳密単調増加する', () => {
+      const BATTERY_VOLTAGE_1_5V = 1.5;
+      const results = [0.5, 1, 2].map((ratio) => {
+        const budget = BATTERY_CAPACITY_J_1_5V * ratio;
+        const motorConfig = goodMotorConfig({ batteryVoltage: BATTERY_VOLTAGE_1_5V, batteryCapacityRatio: ratio });
+        const { state, firstCrossingStep, crossingCount, energyUsedJEverDecreased } = runToExhaustionOrThrow(motorConfig, budget);
+        expect(crossingCount).toBe(1); // crossingは厳密に一度だけ
+        expect(energyUsedJEverDecreased).toBe(false); // energyUsedJは単調非減少
+        expect(state.status).toBe('stalled');
+        expect(state.failureCode).toBe('energyExhausted');
+        return firstCrossingStep;
+      });
+      expect(results[0]).toBeLessThan(results[1]);
+      expect(results[1]).toBeLessThan(results[2]);
+    });
+  });
+
+  describe('追加条件1(Fable承認済み): batteryCapacityRatioは最小ratioのcrossingまで全状態軌跡に一切影響しない(予算上限にのみ作用)', () => {
+    it('ratio=0.5のcrossing直後(の直前まで)の全状態軌跡が、ratio∈{0.5,1,2}すべてで完全一致する', () => {
+      const carConfig = standardCarConfig();
+      const t = createValidatedTrack(track({ segments: [seg({ lengthM: 50 })], hasEnergyBudget: true }));
+      const budgetAt = (ratio: number) => BATTERY_CAPACITY_J_1_5V * ratio;
+      const smallestRatio = 0.5;
+
+      // まずratio=0.5のcrossingステップ数(=軌跡配列でのindex)を求める。
+      // stepTrackRunはフレーム開始時点のenergyUsedJでforcePowerOffを判定するため
+      // (1フレーム遅延規約)、crossingが観測されたそのステップ自体はまだ
+      // forcePowerOff=falseで通常給電されている。したがって「crossingIndexを含む」
+      // 範囲まではratioの影響が及ばない(次のステップから初めてforcePowerOffの
+      // 判定材料であるenergyUsedJがratioごとに異なる意味を持ち始める)。
+      const probeTrajectory = runTrajectory(
+        goodMotorConfig({ batteryVoltage: 1.5, batteryCapacityRatio: smallestRatio }),
+        carConfig,
+        t,
+        120 * 120,
+      );
+      const crossingIndex = probeTrajectory.findIndex(
+        (s, i) => i > 0 && probeTrajectory[i - 1].energyUsedJ < budgetAt(smallestRatio) && s.energyUsedJ >= budgetAt(smallestRatio),
+      );
+      expect(crossingIndex).toBeGreaterThan(0);
+
+      // ratio∈{0.5,1,2}それぞれでcrossingIndexまで(含む)の軌跡を取り、全要素を比較する
+      const trajectories = [0.5, 1, 2].map((ratio) =>
+        runTrajectory(goodMotorConfig({ batteryVoltage: 1.5, batteryCapacityRatio: ratio }), carConfig, t, crossingIndex),
+      );
+      expect(trajectories[1]).toEqual(trajectories[0]);
+      expect(trajectories[2]).toEqual(trajectories[0]);
+    });
+  });
+
+  describe('訂正済み追加条件2(Fable承認済み・訂正済み): hasEnergyBudget=falseのとき、batteryCapacityRatioを変えても全状態軌跡が完全一致する', () => {
+    it('予算無効レースでは、batteryCapacityRatio∈{0.5,1,2}のいずれでも初期状態を含む601要素(初期state+600step)の全状態軌跡が完全一致する(forcePowerOffが一切発火しないため)', () => {
+      const carConfig = standardCarConfig();
+      const t = createValidatedTrack(track({ segments: [seg({ lengthM: 50 })] })); // hasEnergyBudget省略=false
+      const trajectories = [0.5, 1, 2].map((ratio) =>
+        runTrajectory(goodMotorConfig({ batteryVoltage: 1.5, batteryCapacityRatio: ratio }), carConfig, t, 600),
+      );
+      expect(trajectories[0]).toHaveLength(601);
+      expect(trajectories[1]).toEqual(trajectories[0]);
+      expect(trajectories[2]).toEqual(trajectories[0]);
+    });
+  });
+});

@@ -159,8 +159,16 @@ export function createValidatedTrack(track: TrackDefinition): ValidatedTrackDefi
   return track as ValidatedTrackDefinition;
 }
 
+// Phase2 Step5b(docs/phase2-plan.md §8、Fable承認済み): batteryCapacityRatio
+// (既定1.0、trusted precondition)を予算算出1箇所へ適用する。呼び出し元も
+// stepTrackRunのforcePowerOff判定1箇所のみのため、重複適用の懸念はない。
+function resolveBatteryCapacityRatio(motorConfig: MotorConfig): number {
+  return motorConfig.batteryCapacityRatio ?? 1;
+}
+
 function computeEnergyBudgetJ(motorConfig: MotorConfig): number {
-  return motorConfig.batteryVoltage === 1.5 ? BATTERY_CAPACITY_J_1_5V : BATTERY_CAPACITY_J_3_0V;
+  const base = motorConfig.batteryVoltage === 1.5 ? BATTERY_CAPACITY_J_1_5V : BATTERY_CAPACITY_J_3_0V;
+  return base * resolveBatteryCapacityRatio(motorConfig);
 }
 
 // トラック駆動の1フレーム更新。stepVehicle(1区間・平坦専用のPhase2 API)の

@@ -1,5 +1,14 @@
 import { describe, expect, it } from 'vitest';
-import { step, computeElectricalState, computeJ, computeRCoil, type MotorConfig, type SimState } from '../motorPhysics';
+import {
+  step,
+  advanceMotorState,
+  computeElectricalState,
+  computeJ,
+  computeRCoil,
+  type MotorConfig,
+  type MotorFrameEvaluation,
+  type SimState,
+} from '../motorPhysics';
 import { getCommutationSign } from '../commutator';
 import {
   B_FLOOR_RATIO,
@@ -434,6 +443,157 @@ describe('Phase2 Step5a: 導線ratio(抵抗率・密度)のengine拡張', () => 
       );
       expect(results[0]).not.toBe(results[1]);
       expect(results[1]).not.toBe(results[2]);
+    });
+  });
+});
+
+// Phase2 Step5b(docs/phase2-plan.md §7・§8、Fable承認済み): 電池ratio
+// (batteryInternalResistanceRatio・batteryCapacityRatio)のengine拡張。
+// batteryCapacityRatioはtrackPhysics.tsのみで参照されるため、motorPhysics.ts側の
+// テストはbatteryInternalResistanceRatioのみを対象とする。
+describe('Phase2 Step5b: 電池ratio(内部抵抗)のengine拡張', () => {
+  describe('後方互換(省略時・明示的ratio=1.0の同値性)', () => {
+    it('computeElectricalState経路: batteryInternalResistanceRatio省略と明示的1.0で電流が一致する', () => {
+      const es1 = computeElectricalState(goodConfig(), Math.PI / 4, 50);
+      const es2 = computeElectricalState(goodConfig({ batteryInternalResistanceRatio: 1.0 }), Math.PI / 4, 50);
+      expect(es2.current).toBe(es1.current);
+    });
+
+    it('advanceMotorState経路(batteryHeat): batteryInternalResistanceRatio省略と明示的1.0で一致する', () => {
+      const s1 = step(goodConfig(), restState(), DT, NO_NOISE_RNG);
+      const s2 = step(goodConfig({ batteryInternalResistanceRatio: 1.0 }), restState(), DT, NO_NOISE_RNG);
+      expect(s2.batteryHeat).toBe(s1.batteryHeat);
+      expect(s2.omega).toBe(s1.omega);
+    });
+
+    it('120ステップ統合: batteryInternalResistanceRatio省略と明示的1.0で状態が完全一致する', () => {
+      const omitted = runSteps(goodConfig(), 120);
+      const explicit = runSteps(goodConfig({ batteryInternalResistanceRatio: 1.0 }), 120);
+      expect(explicit.omega).toBe(omitted.omega);
+      expect(explicit.batteryHeat).toBe(omitted.batteryHeat);
+    });
+  });
+
+  describe('方向性の性質テスト: ストール電流(ω=0)はbatteryInternalResistanceRatioに対して単調に減少する', () => {
+    it('ω=0では、theta(整流状態)によらずcurrentがratio∈{0.5,1,2}で厳密に単調減少する', () => {
+      for (const theta of [Math.PI / 6, Math.PI / 4, Math.PI / 3]) {
+        const currents = [0.5, 1, 2].map(
+          (r) => computeElectricalState(goodConfig({ batteryInternalResistanceRatio: r }), theta, 0).current,
+        );
+        expect(currents[0]).toBeGreaterThan(currents[1]);
+        expect(currents[1]).toBeGreaterThan(currents[2]);
+      }
+    });
+  });
+
+  describe('方向性の性質テスト: 3レジーム×2時間点でのomega応答(Step5aと同型の枠組み、Fable Q4承認)', () => {
+    // レジーム選定理由はStep5aと同一: いずれもデッドゾーン境界(θ=0/π近傍)・
+    // チャタリング閾値(brushPressure>=CHATTER_PRESSURE_THRESHOLD=0.2、goodConfig()の
+    // brushPressure=0.3で常に非チャタリング)から意図的に離した代表点。
+    interface Regime {
+      label: string;
+      theta: number;
+      omega: number;
+      loadTorque: number;
+    }
+    const regimes: Regime[] = [
+      { label: '静止からの立ち上がり', theta: Math.PI / 3, omega: 0, loadTorque: 0 },
+      { label: '負荷下の中速域', theta: Math.PI / 6, omega: 60, loadTorque: 3e-4 },
+      { label: '無負荷高速域', theta: Math.PI / 4, omega: 110, loadTorque: 0 },
+    ];
+
+    function stateAt(theta: number, omega: number): SimState {
+      return {
+        theta,
+        omega,
+        current: 0,
+        backEmf: 0,
+        shorted: false,
+        running: true,
+        rpm: 0,
+        chatterFramesLeft: 0,
+        batteryHeat: 0,
+        coilCollapsed: false,
+        highSpeedFrameCount: 0,
+      };
+    }
+
+    function omegaAfterSteps(config: MotorConfig, regime: Regime, steps: number): number {
+      let s = stateAt(regime.theta, regime.omega);
+      for (let i = 0; i < steps; i++) {
+        s = step(config, s, DT, NO_NOISE_RNG, regime.loadTorque);
+      }
+      return s.omega;
+    }
+
+    for (const regime of regimes) {
+      for (const steps of [1, 5]) {
+        it(`[${regime.label}] ${steps}ステップ後: batteryInternalResistanceRatio∈{0.5,1,2}でomegaが単調減少する`, () => {
+          const omegas = [0.5, 1, 2].map((r) =>
+            omegaAfterSteps(goodConfig({ batteryInternalResistanceRatio: r }), regime, steps),
+          );
+          expect(omegas[0]).toBeGreaterThan(omegas[1]);
+          expect(omegas[1]).toBeGreaterThan(omegas[2]);
+        });
+      }
+    }
+  });
+
+  describe('batteryHeatの二層テスト(Fable承認済み、Q5): I²Rの結合量のため単純な単調性は主張しない', () => {
+    // R_battが増えるとI∝1/(R_coil+R_contact+R_batt)は減るため、integrated stepでの
+    // batteryHeat(I²R_batt)はR_batt増加に対して単純増加/単純減少のどちらにもなり得ない
+    // (R_batt=R_coil+R_contact近傍で増減が反転しうる)。よって二層で検証する。
+
+    it('層1: computeElectricalStateでcurrentがratioに対して単調減少する(既に上のストール電流テストで確認済み、ここではomega=50の非ゼロ回転状態でも成り立つことを追加確認)', () => {
+      const currents = [0.5, 1, 2].map(
+        (r) => computeElectricalState(goodConfig({ batteryInternalResistanceRatio: r }), Math.PI / 4, 50).current,
+      );
+      expect(currents[0]).toBeGreaterThan(currents[1]);
+      expect(currents[1]).toBeGreaterThan(currents[2]);
+    });
+
+    it('層2: advanceMotorState単体でcurrentを固定し、R寄与のみを隔離するとbatteryHeatがratioに対して単調増加する', () => {
+      // currentを大きな固定値(10A)にするのは、R_batt由来の発熱(I²R_batt)が
+      // HEAT_DISSIPATION(自然冷却)を確実に上回るようにするための統制上の選択で、
+      // 実際の走行で生じる電流値ではない(現実のダイナミクスでの発熱量を主張する
+      // テストではない)。
+      const fixedEvaluation: MotorFrameEvaluation = {
+        current: 10,
+        backEmf: 0,
+        tMag: 0,
+        tCog: 0,
+        shorted: false,
+        deadZone: false,
+        chatterFramesLeft: 0,
+      };
+      const heats = [0.5, 1, 2].map((r) => {
+        const config = goodConfig({ batteryInternalResistanceRatio: r });
+        const next = advanceMotorState(config, restState(), fixedEvaluation, DT, NO_NOISE_RNG);
+        return next.batteryHeat;
+      });
+      expect(heats[0]).toBeLessThan(heats[1]);
+      expect(heats[1]).toBeLessThan(heats[2]);
+    });
+
+    it('省略=明示1.0の後方互換は層2の経路でも維持される', () => {
+      const fixedEvaluation: MotorFrameEvaluation = {
+        current: 10,
+        backEmf: 0,
+        tMag: 0,
+        tCog: 0,
+        shorted: false,
+        deadZone: false,
+        chatterFramesLeft: 0,
+      };
+      const omitted = advanceMotorState(goodConfig(), restState(), fixedEvaluation, DT, NO_NOISE_RNG);
+      const explicit = advanceMotorState(
+        goodConfig({ batteryInternalResistanceRatio: 1.0 }),
+        restState(),
+        fixedEvaluation,
+        DT,
+        NO_NOISE_RNG,
+      );
+      expect(explicit.batteryHeat).toBe(omitted.batteryHeat);
     });
   });
 });

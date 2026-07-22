@@ -29,6 +29,8 @@ const CONFIG_LABELS: Record<keyof MotorConfig, [string, string]> = {
   varnished: ['ワニス', ''],
   wireResistivityRatio: ['導線抵抗率', '比'],
   wireDensityRatio: ['導線密度', '比'],
+  batteryInternalResistanceRatio: ['電池内部抵抗', '比'],
+  batteryCapacityRatio: ['電池容量', '比'],
 };
 
 function displayConfigValue(config: MotorConfig, key: keyof MotorConfig): string {

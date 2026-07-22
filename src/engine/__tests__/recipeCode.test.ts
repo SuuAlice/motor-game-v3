@@ -307,18 +307,28 @@ describe('recipeCode(v2・MC2-)', () => {
     expect(decodedAfterRewrite.motorConfig.magnetDistanceMm).toBe(3);
   });
 
-  // 既知の移行制約(Phase2 Step5a、Fable承認済みQ3付帯条件): motorConfigToFields/
-  // normalizeMotorFields(recipeCode.ts)はwireResistivityRatio/wireDensityRatioを
-  // 一切参照しないため、MC2往復でこの2フィールドは対称的にドロップされる(値が
-  // 化けるのではなく、単純に消えてundefined=デフォルト1.0相当になる)。この挙動は
-  // Step6のMC3バージョンbump対応で反転する(保持されるようになる)想定。
-  // Step6着手時、本テストは「保持される」ことを確認するテストへ更新/反転すること。
-  it('15. [既知の移行制約] wireResistivityRatio/wireDensityRatioはMC2往復でドロップされる(Step6のMC3対応まで)', () => {
+  // 既知の移行制約(Phase2 Step5a/Step5b、Fable承認済みQ3付帯条件・Step5b計画11節):
+  // motorConfigToFields/normalizeMotorFields(recipeCode.ts)は導線2フィールド
+  // (wireResistivityRatio/wireDensityRatio)・電池2フィールド
+  // (batteryInternalResistanceRatio/batteryCapacityRatio)のいずれも一切参照しない
+  // ため、MC2往復で4フィールドすべてが対称的にドロップされる(値が化けるのでは
+  // なく、単純に消えてundefined=デフォルト1.0相当になる)。この挙動はStep6の
+  // MC3バージョンbump対応で反転する(4フィールドすべてが保持されるようになる)想定。
+  // Step6着手時、本テストは「4フィールドすべて保持される」ことを確認するテストへ
+  // 更新/反転すること。
+  it('15. [既知の移行制約] 導線2件・電池2件の計4フィールドはMC2往復でドロップされる(Step6のMC3対応まで)', () => {
     const recipe = fullRecipe({
-      motorConfig: fullMotorConfig({ wireResistivityRatio: 2, wireDensityRatio: 2 }),
+      motorConfig: fullMotorConfig({
+        wireResistivityRatio: 2,
+        wireDensityRatio: 2,
+        batteryInternalResistanceRatio: 2,
+        batteryCapacityRatio: 2,
+      }),
     });
     const decoded = decodeRecipe(encodeRecipe(recipe));
     expect(decoded.motorConfig.wireResistivityRatio).toBeUndefined();
     expect(decoded.motorConfig.wireDensityRatio).toBeUndefined();
+    expect(decoded.motorConfig.batteryInternalResistanceRatio).toBeUndefined();
+    expect(decoded.motorConfig.batteryCapacityRatio).toBeUndefined();
   });
 });
