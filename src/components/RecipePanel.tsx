@@ -67,10 +67,10 @@ export function RecipePanel() {
   return (
     <section className="w-full rounded-2xl border border-violet-200 bg-violet-50 p-4" aria-labelledby="recipe-title">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <div><h2 id="recipe-title" className="font-black text-slate-900">車体込みレシピ</h2><p className="text-xs text-slate-600">MC2形式 / シード {seed}</p></div>
+        <div><h2 id="recipe-title" className="font-black text-slate-900">車体込みレシピ</h2><p className="text-xs text-slate-600">MC3形式 / シード {seed}</p></div>
         <button type="button" onClick={randomizeSeed} className="text-xs font-bold text-violet-800 underline">シードを変更</button>
       </div>
-      <textarea value={code} onChange={(event) => { setCode(event.target.value); setPreview(null); }} placeholder="MC2- または M15- で始まるレシピコード" aria-label="レシピコード" className="mt-3 h-24 w-full rounded-xl border border-violet-200 bg-white p-3 font-mono text-xs" />
+      <textarea value={code} onChange={(event) => { setCode(event.target.value); setPreview(null); }} placeholder="MC3-、MC2- または M15- で始まるレシピコード" aria-label="レシピコード" className="mt-3 h-24 w-full rounded-xl border border-violet-200 bg-white p-3 font-mono text-xs" />
       <div className="mt-2 grid gap-2 sm:grid-cols-2">
         <button type="button" onClick={copyRecipe} className="rounded-xl bg-violet-700 px-3 py-2 text-sm font-black text-white">現在の設定をコピー</button>
         <button type="button" onClick={inspectRecipe} className="rounded-xl border border-violet-400 bg-white px-3 py-2 text-sm font-black text-violet-900">内容を確認</button>

@@ -7,26 +7,72 @@ import type { CarConfig } from './vehiclePhysics';
 // (recipeCodec.ts自体は無変更、Phase4完了ゲート後に削除予定の参考資料)。
 
 const PREFIX_V2 = 'MC2-';
+const PREFIX_V3 = 'MC3-';
 const PREFIX_V15 = 'M15-';
 
 // 悪意ある巨大入力によるbase64復号・JSON.parseコストを、処理前に排除する
 const MAX_RECIPE_CODE_LENGTH = 4096;
 const MAX_APPEARANCE_ID_LENGTH = 32;
 
-// v2 payloadのキー対応表(短縮キー、フィールド追加時はここに追記する)。
+// Phase2 Step6(docs/phase2-plan.md §9、Fable承認済み)。導線・電池ratio 4フィールド
+// (Step5a/5b、docs/phase2-plan.md §7)のクランプ範囲。実測範囲(materials.ts
+// Unit1/Step2a)を両側に余裕を持って包含する設計値であり、物性値そのものではない。
+// クランプ変更ポリシー(Fable承認済み付帯条件): 範囲の拡大は後方互換(旧範囲内の値の
+// decode結果は不変)、縮小は破壊的変更としてFable再レビュー対象とする。
+const MIN_WIRE_RESISTIVITY_RATIO = 0.5;
+const MAX_WIRE_RESISTIVITY_RATIO = 2.0; // 実測[0.946(銀), 1.577(アルミ)]を包含
+const MIN_WIRE_DENSITY_RATIO = 0.2;
+const MAX_WIRE_DENSITY_RATIO = 1.5; // 実測[0.301(アルミ), 1.171(銀)]を包含
+// 電池ratio(batteryInternalResistanceRatio/batteryCapacityRatio)はStep7で
+// materialMapping接続時に較正値が確定するまで、物性値としての意味のある上下限を
+// 確定しない(Fable承認済みQ2)。NaN/Infinity/負値等の壊れた入力を排除するためだけの
+// 広い保守的範囲とする。Step7較正値がこの範囲外になった場合はMC3仕様変更として
+// Fable再レビュー対象とする(上記クランプ変更ポリシーと同じ扱い)。
+const MIN_BATTERY_RATIO = 0.01;
+const MAX_BATTERY_RATIO = 10;
+
+// v2/v3共通のキー対応表(短縮キー、フィールド追加時はここに追記する)。
 // m(MotorConfig): ct=coilTurns, sw=slitWidthMm, sq=sandingQuality, bp=brushPressure,
 //   ms=magnetStrength, md=magnetDistanceMm, bv=batteryVoltage, ao=axisOffsetMm,
 //   wg=wireGaugeMm, ps=parallelStrands, vn=varnished
+//   (v3で追加) wr=wireResistivityRatio, wz=wireDensityRatio,
+//   br=batteryInternalResistanceRatio, bc=batteryCapacityRatio
 // c(CarConfig): mg=massG, gr=gearRatio, ge=gearEfficiency, wd=wheelDiameterMm,
 //   tg=tireGrip, af=axleFriction, wa=wheelAlignmentMm, ch=centerOfMassHeightMm,
 //   mo=motorMountOffsetMm
 // a(CarAppearance): bc=bodyColorId, ac=accentColorId
 // sd=seed
+// 注意: m.bc(batteryCapacityRatio)とa.bc(bodyColorId)は短縮キーの文字列としては
+// 同名だが、m/aは別オブジェクト(名前空間)のためシリアライズ上の衝突はない
+// (Fable承認済み: 一意性の要求は各namespace内部に限定する、namespace横断は
+// 完全修飾キーm.bc/a.bcで区別する)。
+
+// 各namespaceのauthoritativeな生キー配列(Fable承認済み付帯条件: フィールド追加時に
+// 重複キーを取り違えないための機械検査対象)。motorConfigToFields/normalizeMotorFields
+// 等のオブジェクトリテラルとは意図的に別データとして保持する(オブジェクトリテラルは
+// 重複キーを構文上静かに畳み込んでしまい、後勝ちで上書きされた重複を実行時に検出
+// できないため、配列で明示的に列挙する必要がある)。フィールド追加時は、この配列と
+// 対応するToFields/normalizeFields関数の両方を更新すること(recipeCode.test.tsの
+// ドリフト検査が更新漏れを検出する)。
+export const RECIPE_M_FIELD_KEYS = [
+  'ct', 'sw', 'sq', 'bp', 'ms', 'md', 'bv', 'ao', 'wg', 'ps', 'vn', 'wr', 'wz', 'br', 'bc',
+] as const;
+export const RECIPE_C_FIELD_KEYS = ['mg', 'gr', 'ge', 'wd', 'tg', 'af', 'wa', 'ch', 'mo'] as const;
+export const RECIPE_A_FIELD_KEYS = ['bc', 'ac'] as const;
+
 interface RecipePayloadV2 {
   v: 2;
   m: { ct: number; sw: number; sq: number; bp: number; ms: number; md: number; bv: number; ao: number; wg: number; ps: number; vn: boolean };
   c: { mg: number; gr: number; ge: number; wd: number; tg: number; af: number; wa: number; ch: number; mo: number };
   a: { bc: string; ac: string };
+  sd: number;
+}
+
+interface RecipePayloadV3 {
+  v: 3;
+  m: RecipePayloadV2['m'] & { wr: number; wz: number; br: number; bc: number };
+  c: RecipePayloadV2['c'];
+  a: RecipePayloadV2['a'];
   sd: number;
 }
 
@@ -154,6 +200,15 @@ function normalizeMotorFields(m: Record<string, unknown>): MotorConfig {
     wireGaugeMm,
     parallelStrands,
     varnished: boolAt(m, 'vn', true),
+    // Phase2 Step6で追加。数値型でない・非有限(NaN/Infinity)・キー欠落はいずれも
+    // numAtの既存パターンにより fallback=1 へ差し替わる(新規の特別扱いをしない)。
+    // decodeV2(v2 payload、wr/wz/br/bcキーを持たない)・decodeV15からもこの
+    // normalizeMotorFieldsを経由するため、旧コードを復号した場合も4フィールドは
+    // 一律fallback=1(=engineのデフォルト挙動と等価)で補われる(意味互換)。
+    wireResistivityRatio: clamp(numAt(m, 'wr', 1), MIN_WIRE_RESISTIVITY_RATIO, MAX_WIRE_RESISTIVITY_RATIO),
+    wireDensityRatio: clamp(numAt(m, 'wz', 1), MIN_WIRE_DENSITY_RATIO, MAX_WIRE_DENSITY_RATIO),
+    batteryInternalResistanceRatio: clamp(numAt(m, 'br', 1), MIN_BATTERY_RATIO, MAX_BATTERY_RATIO),
+    batteryCapacityRatio: clamp(numAt(m, 'bc', 1), MIN_BATTERY_RATIO, MAX_BATTERY_RATIO),
   };
 }
 
@@ -192,6 +247,10 @@ function motorConfigToFields(motor: MotorConfig): Record<string, unknown> {
     wg: motor.wireGaugeMm ?? 0.4,
     ps: motor.parallelStrands ?? 1,
     vn: motor.varnished ?? true,
+    wr: motor.wireResistivityRatio ?? 1,
+    wz: motor.wireDensityRatio ?? 1,
+    br: motor.batteryInternalResistanceRatio ?? 1,
+    bc: motor.batteryCapacityRatio ?? 1,
   };
 }
 
@@ -226,12 +285,15 @@ function resolveDefaultAppearance(defaultAppearance?: CarAppearance): CarAppeara
   return normalizeAppearanceFields(appearanceToFields(defaultAppearance ?? BUILT_IN_FALLBACK_APPEARANCE));
 }
 
+// Phase2 Step6(Fable承認済み): encodeRecipeは常にMC3-(v:3)を出力する。
+// MC2-を出力する経路は残さない(decodeRecipeはMC2-/M15-の読み込みのみ後方互換で
+// 維持する。生成は常に最新版数)。
 export function encodeRecipe(recipe: CarRecipe): string {
   const motorConfig = normalizeMotorFields(motorConfigToFields(recipe.motorConfig));
   const carConfig = normalizeCarFields(carConfigToFields(recipe.carConfig));
   const appearance = normalizeAppearanceFields(appearanceToFields(recipe.appearance));
-  const payload: RecipePayloadV2 = {
-    v: 2,
+  const payload: RecipePayloadV3 = {
+    v: 3,
     m: {
       ct: motorConfig.coilTurns,
       sw: motorConfig.slitWidthMm,
@@ -244,6 +306,10 @@ export function encodeRecipe(recipe: CarRecipe): string {
       wg: motorConfig.wireGaugeMm as number,
       ps: motorConfig.parallelStrands as number,
       vn: motorConfig.varnished as boolean,
+      wr: motorConfig.wireResistivityRatio as number,
+      wz: motorConfig.wireDensityRatio as number,
+      br: motorConfig.batteryInternalResistanceRatio as number,
+      bc: motorConfig.batteryCapacityRatio as number,
     },
     c: {
       mg: carConfig.massG,
@@ -260,7 +326,7 @@ export function encodeRecipe(recipe: CarRecipe): string {
     sd: normalizeSeed(recipe.seed),
   };
   const encodedPayload = encodeBase64Url(JSON.stringify(payload));
-  return `${PREFIX_V2}${encodedPayload}.${checksum(encodedPayload)}`;
+  return `${PREFIX_V3}${encodedPayload}.${checksum(encodedPayload)}`;
 }
 
 function decodeChecksummedBody(prefix: string, trimmed: string): string {
@@ -284,11 +350,37 @@ function parsePayloadJson(payload: string): unknown {
   }
 }
 
+// Phase2 Step6(Fable承認済みQ3): decodeV2は無改修のまま残す(1文字も変更しない)。
+// M15→MC2で確立した「旧decoderを不変体として凍結する」資産をそのまま踏襲する。
 function decodeV2(trimmed: string): CarRecipe {
   const payload = decodeChecksummedBody(PREFIX_V2, trimmed);
   const parsed = parsePayloadJson(payload);
   if (!isPlainRecord(parsed)) throw new RecipeCodeError('レシピデータの構造が不正です。');
   if (parsed.v !== 2) throw new RecipeCodeError('対応していないレシピバージョンです。');
+  const m = parsed.m;
+  const c = parsed.c;
+  const a = parsed.a;
+  if (!isPlainRecord(m)) throw new RecipeCodeError('モーター設定の構造が不正です。');
+  if (!isPlainRecord(c)) throw new RecipeCodeError('車体設定の構造が不正です。');
+  if (!isPlainRecord(a)) throw new RecipeCodeError('外観設定の構造が不正です。');
+  return {
+    motorConfig: normalizeMotorFields(m),
+    carConfig: normalizeCarFields(c),
+    appearance: normalizeAppearanceFields(a),
+    seed: normalizeSeed(parsed.sd),
+  };
+}
+
+// Phase2 Step6(Fable承認済みQ3): decodeV2とほぼ同型の独立関数として新設する
+// (共通ヘルパーへの統合リファクタは行わない。decodeV2側の参照は変更しない)。
+// 相違点はprefix(PREFIX_V3)とversion判定(v===3)のみで、normalizeMotorFields等の
+// 共有関数を経由するため、v3固有のパース処理は不要(m内のwr/wz/br/bcが
+// numAt→clampで正規化される)。
+function decodeV3(trimmed: string): CarRecipe {
+  const payload = decodeChecksummedBody(PREFIX_V3, trimmed);
+  const parsed = parsePayloadJson(payload);
+  if (!isPlainRecord(parsed)) throw new RecipeCodeError('レシピデータの構造が不正です。');
+  if (parsed.v !== 3) throw new RecipeCodeError('対応していないレシピバージョンです。');
   const m = parsed.m;
   const c = parsed.c;
   const a = parsed.a;
@@ -341,7 +433,8 @@ export function decodeRecipe(code: string, defaultCarConfig?: CarConfig, default
   if (trimmed.length > MAX_RECIPE_CODE_LENGTH) {
     throw new RecipeCodeError('レシピコードが長すぎます。');
   }
+  if (trimmed.startsWith(PREFIX_V3)) return decodeV3(trimmed);
   if (trimmed.startsWith(PREFIX_V2)) return decodeV2(trimmed);
   if (trimmed.startsWith(PREFIX_V15)) return decodeV15(trimmed, defaultCarConfig, defaultAppearance);
-  throw new RecipeCodeError('レシピコードはMC2-またはM15-で始まる必要があります。');
+  throw new RecipeCodeError('レシピコードはMC3-、MC2-またはM15-で始まる必要があります。');
 }

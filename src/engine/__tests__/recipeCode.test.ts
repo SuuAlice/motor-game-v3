@@ -1,10 +1,23 @@
-// spec.md §6.4: 車体・外観込みレシピコード(MC2-)。v1.5(M15-、モーター単体、
-// src/data/recipeCodec.ts)との後方互換読み込み・書き出し直しも検証する。
+// spec.md §6.4: 車体・外観込みレシピコード(MC3-)。v2(MC2-)・v1.5(M15-、モーター
+// 単体、src/data/recipeCodec.ts)との後方互換読み込み・書き出し直しも検証する。
 import { describe, expect, it } from 'vitest';
-import { decodeRecipe, encodeRecipe, RecipeCodeError, type CarAppearance, type CarRecipe } from '../recipeCode';
+import {
+  decodeRecipe,
+  encodeRecipe,
+  RecipeCodeError,
+  RECIPE_M_FIELD_KEYS,
+  RECIPE_C_FIELD_KEYS,
+  RECIPE_A_FIELD_KEYS,
+  type CarAppearance,
+  type CarRecipe,
+} from '../recipeCode';
 import { computeMaxTurns, type MotorConfig } from '../motorPhysics';
 import type { CarConfig } from '../vehiclePhysics';
 
+// Phase2 Step6(Fable承認済み): 新4フィールド(wireResistivityRatio/wireDensityRatio/
+// batteryInternalResistanceRatio/batteryCapacityRatio)を含む、全オプショナル
+// フィールドを明示設定した構成。RECIPE_M_FIELD_KEYSとのドリフト検査(後述)の
+// fixtureとして使うため、MotorConfigの全optionalフィールドを省略しないこと。
 function fullMotorConfig(overrides: Partial<MotorConfig> = {}): MotorConfig {
   return {
     coilTurns: 80,
@@ -18,6 +31,10 @@ function fullMotorConfig(overrides: Partial<MotorConfig> = {}): MotorConfig {
     wireGaugeMm: 0.4,
     parallelStrands: 1,
     varnished: true,
+    wireResistivityRatio: 1,
+    wireDensityRatio: 1,
+    batteryInternalResistanceRatio: 1,
+    batteryCapacityRatio: 1,
     ...overrides,
   };
 }
@@ -75,8 +92,27 @@ function buildRawMc2Code(rawJson: string): string {
   return `MC2-${payload}.${testChecksum(payload)}`;
 }
 
+function buildRawMc3Code(rawJson: string): string {
+  const payload = testEncodeBase64Url(rawJson);
+  return `MC3-${payload}.${testChecksum(payload)}`;
+}
+
 function testClamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, Number.isFinite(value) ? value : min));
+}
+
+// encodeRecipeが実際に生成したコードのm/c/a各payloadのkey集合を取り出す
+// (recipeCode.ts本体のmotorConfigToFields等はexportされていないため、
+// decodeBase64Urlと同一アルゴリズムをテスト側で再実装して覗き見る。
+// 本番コードには影響しない)
+function extractPayloadKeys(code: string): { m: string[]; c: string[]; a: string[] } {
+  const withoutPrefix = code.replace(/^(MC3-|MC2-|M15-)/, '');
+  const body = withoutPrefix.slice(0, withoutPrefix.lastIndexOf('.'));
+  const base64 = body.replaceAll('-', '+').replaceAll('_', '/').padEnd(Math.ceil(body.length / 4) * 4, '=');
+  const binary = atob(base64);
+  const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+  const json = JSON.parse(new TextDecoder('utf-8').decode(bytes));
+  return { m: Object.keys(json.m), c: Object.keys(json.c), a: Object.keys(json.a) };
 }
 
 // v1.5(M15-)フィクスチャ生成専用のヘルパー。src/data/recipeCodec.tsは
@@ -113,7 +149,7 @@ const validRawFields = {
   a: { bc: 'blue', ac: 'yellow' },
 };
 
-describe('recipeCode(v2・MC2-)', () => {
+describe('recipeCode(MC3-/MC2-/M15-)', () => {
   it('1. CarRecipe全体を同一値で往復できる', () => {
     const recipe = fullRecipe();
     const decoded = decodeRecipe(encodeRecipe(recipe));
@@ -172,11 +208,17 @@ describe('recipeCode(v2・MC2-)', () => {
     expect(decoded.appearance).toEqual(injectedAppearance);
   });
 
-  it('6. v1.5コードを読み込んだ結果をMC2-として書き出し直し、再度往復できる', () => {
+  it('6. v1.5コードを読み込んだ結果をMC3-として書き出し直し、再度往復できる(Step6でMC2-からMC3-へ更新)', () => {
     const v15Code = buildV15Code(fullMotorConfig({ magnetDistanceMm: 3 }), 7);
     const decodedFromV15 = decodeRecipe(v15Code);
+    // v1.5コードには新4フィールドが存在しないため、decodeV15→normalizeMotorFields経由で
+    // fallback=1.0が補われる(意味互換、15節のテストと同型)
+    expect(decodedFromV15.motorConfig.wireResistivityRatio).toBe(1);
+    expect(decodedFromV15.motorConfig.wireDensityRatio).toBe(1);
+    expect(decodedFromV15.motorConfig.batteryInternalResistanceRatio).toBe(1);
+    expect(decodedFromV15.motorConfig.batteryCapacityRatio).toBe(1);
     const rewritten = encodeRecipe(decodedFromV15);
-    expect(rewritten.startsWith('MC2-')).toBe(true);
+    expect(rewritten.startsWith('MC3-')).toBe(true);
     const decodedAgain = decodeRecipe(rewritten);
     expect(decodedAgain).toEqual(decodedFromV15);
   });
@@ -195,15 +237,29 @@ describe('recipeCode(v2・MC2-)', () => {
     expect(decoded.appearance).toEqual({ bodyColorId: 'not-a-real-color', accentColorId: 'also-unknown' });
   });
 
-  it('8. MC2-/M15-以外のプレフィックスを拒否する', () => {
+  it('8. MC3-/MC2-/M15-以外のプレフィックスを拒否する(Step6でMC3-の案内を追加)', () => {
     expect(() => decodeRecipe('XYZ-invalid')).toThrow(RecipeCodeError);
+    expect(() => decodeRecipe('XYZ-invalid')).toThrow('MC3-');
     expect(() => decodeRecipe('XYZ-invalid')).toThrow('MC2-');
+    expect(() => decodeRecipe('XYZ-invalid')).toThrow('M15-');
   });
 
-  it('9. payload内のバージョン不整合を拒否する', () => {
+  it('9. payload内のバージョン不整合を拒否する(MC2-プレフィックス+v:3)', () => {
     const raw = JSON.stringify({ v: 3, ...validRawFields, sd: 1 });
     expect(() => decodeRecipe(buildRawMc2Code(raw))).toThrow(RecipeCodeError);
     expect(() => decodeRecipe(buildRawMc2Code(raw))).toThrow('バージョン');
+  });
+
+  it('9b. payload内のバージョン不整合を拒否する(MC3-プレフィックス+v:2、9の逆方向)', () => {
+    const raw = JSON.stringify({
+      v: 2,
+      m: { ...validRawFields.m, wr: 1, wz: 1, br: 1, bc: 1 },
+      c: validRawFields.c,
+      a: validRawFields.a,
+      sd: 1,
+    });
+    expect(() => decodeRecipe(buildRawMc3Code(raw))).toThrow(RecipeCodeError);
+    expect(() => decodeRecipe(buildRawMc3Code(raw))).toThrow('バージョン');
   });
 
   it('10. defaultCarConfig/defaultAppearance省略時はエンジン内蔵フォールバックが使われる', () => {
@@ -307,28 +363,257 @@ describe('recipeCode(v2・MC2-)', () => {
     expect(decodedAfterRewrite.motorConfig.magnetDistanceMm).toBe(3);
   });
 
-  // 既知の移行制約(Phase2 Step5a/Step5b、Fable承認済みQ3付帯条件・Step5b計画11節):
-  // motorConfigToFields/normalizeMotorFields(recipeCode.ts)は導線2フィールド
-  // (wireResistivityRatio/wireDensityRatio)・電池2フィールド
-  // (batteryInternalResistanceRatio/batteryCapacityRatio)のいずれも一切参照しない
-  // ため、MC2往復で4フィールドすべてが対称的にドロップされる(値が化けるのでは
-  // なく、単純に消えてundefined=デフォルト1.0相当になる)。この挙動はStep6の
-  // MC3バージョンbump対応で反転する(4フィールドすべてが保持されるようになる)想定。
-  // Step6着手時、本テストは「4フィールドすべて保持される」ことを確認するテストへ
-  // 更新/反転すること。
-  it('15. [既知の移行制約] 導線2件・電池2件の計4フィールドはMC2往復でドロップされる(Step6のMC3対応まで)', () => {
+  // 固定MC2 fixture(Phase2 Step6着手前、Step5a/5b完了時点の実装で実際に生成された
+  // 生文字列をリテラルとして固定したもの。将来encode実装がさらに変わっても、この
+  // 文字列に対する復号互換だけは独立に検証できる。中身はfullRecipe()相当
+  // (motorConfig: fullMotorConfig()のうち新4フィールドを除く旧11フィールド、
+  // carConfig: fullCarConfig()、appearance: {bodyColorId:'blue',accentColorId:'yellow'}、
+  // seed: 0x12345678)で、新4フィールドのキー(wr/wz/br/bc)を一切含まない)
+  const FIXED_MC2_FIXTURE =
+    'MC2-eyJ2IjoyLCJtIjp7ImN0Ijo4MCwic3ciOjEuNSwic3EiOjAuOSwiYnAiOjAuMywibXMiOjAuOSwibWQiOjEwLCJidiI6MywiYW8iOjAsIndnIjowLjQsInBzIjoxLCJ2biI6dHJ1ZX0sImMiOnsibWciOjE1MCwiZ3IiOjQsImdlIjowLjgsIndkIjozMCwidGciOjAuNywiYWYiOjAsIndhIjowLCJjaCI6MjAsIm1vIjowfSwiYSI6eyJiYyI6ImJsdWUiLCJhYyI6InllbGxvdyJ9LCJzZCI6MzA1NDE5ODk2fQ.0vkhtdv';
+
+  it('15a. [MC2意味互換] 固定MC2 fixtureを復号すると、欠落している導線2件・電池2件の計4フィールドがすべてfallback=1.0へ補完される', () => {
+    const decoded = decodeRecipe(FIXED_MC2_FIXTURE);
+    expect(decoded.motorConfig.wireResistivityRatio).toBe(1);
+    expect(decoded.motorConfig.wireDensityRatio).toBe(1);
+    expect(decoded.motorConfig.batteryInternalResistanceRatio).toBe(1);
+    expect(decoded.motorConfig.batteryCapacityRatio).toBe(1);
+    // 4フィールド以外の意味も、旧MC2実装が意図した値のまま変わっていないことを確認
+    expect(decoded.motorConfig.coilTurns).toBe(80);
+    expect(decoded.motorConfig.magnetStrength).toBe(0.9);
+    expect(decoded.carConfig).toEqual(fullCarConfig());
+    expect(decoded.appearance).toEqual({ bodyColorId: 'blue', accentColorId: 'yellow' });
+    expect(decoded.seed).toBe(0x12345678);
+  });
+
+  it('15b. [MC3 round-trip] MC3のencode/decodeで導線2件・電池2件の計4フィールドが往復保持される', () => {
     const recipe = fullRecipe({
       motorConfig: fullMotorConfig({
         wireResistivityRatio: 2,
-        wireDensityRatio: 2,
-        batteryInternalResistanceRatio: 2,
-        batteryCapacityRatio: 2,
+        wireDensityRatio: 1.2,
+        batteryInternalResistanceRatio: 0.5,
+        batteryCapacityRatio: 3,
       }),
     });
-    const decoded = decodeRecipe(encodeRecipe(recipe));
-    expect(decoded.motorConfig.wireResistivityRatio).toBeUndefined();
-    expect(decoded.motorConfig.wireDensityRatio).toBeUndefined();
-    expect(decoded.motorConfig.batteryInternalResistanceRatio).toBeUndefined();
-    expect(decoded.motorConfig.batteryCapacityRatio).toBeUndefined();
+    const code = encodeRecipe(recipe);
+    expect(code.startsWith('MC3-')).toBe(true);
+    const decoded = decodeRecipe(code);
+    expect(decoded.motorConfig.wireResistivityRatio).toBe(2);
+    expect(decoded.motorConfig.wireDensityRatio).toBe(1.2);
+    expect(decoded.motorConfig.batteryInternalResistanceRatio).toBe(0.5);
+    expect(decoded.motorConfig.batteryCapacityRatio).toBe(3);
+    expect(decoded).toEqual(recipe);
+  });
+
+  describe('16. 新4フィールドのクランプ境界', () => {
+    it('範囲内の値はそのまま保持される', () => {
+      const recipe = fullRecipe({
+        motorConfig: fullMotorConfig({
+          wireResistivityRatio: 1.8,
+          wireDensityRatio: 0.3,
+          batteryInternalResistanceRatio: 5,
+          batteryCapacityRatio: 0.02,
+        }),
+      });
+      const decoded = decodeRecipe(encodeRecipe(recipe));
+      expect(decoded.motorConfig.wireResistivityRatio).toBe(1.8);
+      expect(decoded.motorConfig.wireDensityRatio).toBe(0.3);
+      expect(decoded.motorConfig.batteryInternalResistanceRatio).toBe(5);
+      expect(decoded.motorConfig.batteryCapacityRatio).toBe(0.02);
+    });
+
+    it('下限未満・上限超過はそれぞれの範囲へclampされる', () => {
+      const recipe = fullRecipe({
+        motorConfig: fullMotorConfig({
+          wireResistivityRatio: 999,
+          wireDensityRatio: -5,
+          batteryInternalResistanceRatio: -1,
+          batteryCapacityRatio: 999999,
+        }),
+      });
+      const decoded = decodeRecipe(encodeRecipe(recipe));
+      expect(decoded.motorConfig.wireResistivityRatio).toBe(2.0);
+      expect(decoded.motorConfig.wireDensityRatio).toBe(0.2);
+      expect(decoded.motorConfig.batteryInternalResistanceRatio).toBe(0.01);
+      expect(decoded.motorConfig.batteryCapacityRatio).toBe(10);
+    });
+  });
+
+  describe('17. 新4フィールドの異常値処理(既存numAtパターンへの完全な追従、特別扱いなし)', () => {
+    it('キー欠落はfallback=1.0になる(validRawFieldsは新4フィールドのキーを持たない)', () => {
+      const raw = JSON.stringify({ v: 3, ...validRawFields, sd: 1 });
+      const decoded = decodeRecipe(buildRawMc3Code(raw));
+      expect(decoded.motorConfig.wireResistivityRatio).toBe(1);
+      expect(decoded.motorConfig.wireDensityRatio).toBe(1);
+      expect(decoded.motorConfig.batteryInternalResistanceRatio).toBe(1);
+      expect(decoded.motorConfig.batteryCapacityRatio).toBe(1);
+    });
+
+    it('null・文字列型等の型不一致はfallback=1.0になる', () => {
+      const raw = JSON.stringify({
+        v: 3,
+        m: { ...validRawFields.m, wr: null, wz: 'not-a-number', br: true, bc: [1, 2] },
+        c: validRawFields.c,
+        a: validRawFields.a,
+        sd: 1,
+      });
+      const decoded = decodeRecipe(buildRawMc3Code(raw));
+      expect(decoded.motorConfig.wireResistivityRatio).toBe(1);
+      expect(decoded.motorConfig.wireDensityRatio).toBe(1);
+      expect(decoded.motorConfig.batteryInternalResistanceRatio).toBe(1);
+      expect(decoded.motorConfig.batteryCapacityRatio).toBe(1);
+    });
+
+    it('JSON数値としてパース後Infinityになる巨大指数値(1e400等)はfallback=1.0になる(Number.isFiniteによる既存の検出)', () => {
+      // ソース上でJS数値リテラルとして1e400を書くとJSON.stringify段階でnullに
+      // 落ちてしまうため、既存の型不正テスト(13)と同じ手法で文字列置換により
+      // 直接埋め込む(JSON構文としては合法な巨大指数リテラル)
+      const raw = JSON.stringify({
+        v: 3,
+        m: { ...validRawFields.m, wr: 10, wz: 1, br: 1, bc: 1 },
+        c: validRawFields.c,
+        a: validRawFields.a,
+        sd: 1,
+      }).replace('"wr":10', '"wr":1e400');
+      const decoded = decodeRecipe(buildRawMc3Code(raw));
+      expect(decoded.motorConfig.wireResistivityRatio).toBe(1);
+    });
+
+    it('有限だが範囲外の負値・0はclampされる(範囲外の値であって欠落ではないため、fallback=1.0にはならない)', () => {
+      const raw = JSON.stringify({
+        v: 3,
+        m: { ...validRawFields.m, wr: -5, wz: 0, br: -1, bc: 0 },
+        c: validRawFields.c,
+        a: validRawFields.a,
+        sd: 1,
+      });
+      const decoded = decodeRecipe(buildRawMc3Code(raw));
+      expect(decoded.motorConfig.wireResistivityRatio).toBe(0.5);
+      expect(decoded.motorConfig.wireDensityRatio).toBe(0.2);
+      expect(decoded.motorConfig.batteryInternalResistanceRatio).toBe(0.01);
+      expect(decoded.motorConfig.batteryCapacityRatio).toBe(0.01);
+    });
+
+    it('JSON構文としてNaN/Infinityという裸tokenを埋め込んだ文字列はJSON.parse自体が失敗し、RecipeCodeErrorになる(JSON仕様上の非合法構文)', () => {
+      const brokenPayload = testEncodeBase64Url('{"v":3,"m":{"wr":NaN}}');
+      const code = `MC3-${brokenPayload}.${testChecksum(brokenPayload)}`;
+      expect(() => decodeRecipe(code)).toThrow(RecipeCodeError);
+    });
+  });
+
+  describe('18. namespace内key一意性(Fable承認済み付帯条件、m/c/a全namespaceを恒久検査)', () => {
+    it('RECIPE_M_FIELD_KEYSはnamespace内に重複がない', () => {
+      expect(new Set(RECIPE_M_FIELD_KEYS).size).toBe(RECIPE_M_FIELD_KEYS.length);
+    });
+    it('RECIPE_C_FIELD_KEYSはnamespace内に重複がない', () => {
+      expect(new Set(RECIPE_C_FIELD_KEYS).size).toBe(RECIPE_C_FIELD_KEYS.length);
+    });
+    it('RECIPE_A_FIELD_KEYSはnamespace内に重複がない', () => {
+      expect(new Set(RECIPE_A_FIELD_KEYS).size).toBe(RECIPE_A_FIELD_KEYS.length);
+    });
+  });
+
+  // MotorConfig/CarConfig/CarAppearanceの長名フィールドの期待集合(interfaceの
+  // フィールド名そのもの)。RECIPE_*_FIELD_KEYS(短縮key)とは1:1対応するが別の
+  // 名前空間(長名 vs 短縮key)のため、fixtureの完全性はこちらの長名集合で
+  // 直接検査する(encode後のpayloadはencodeRecipe内部のnormalizeMotorFields等が
+  // 省略optionalへも常にdefault値を補って出力するため、payload側のkey数だけを
+  // 見てもfixtureがoptionalを明示設定しているかどうかは判別できない、指摘1反映)。
+  const EXPECTED_MOTOR_CONFIG_KEYS = [
+    'coilTurns', 'slitWidthMm', 'sandingQuality', 'brushPressure', 'magnetStrength',
+    'magnetDistanceMm', 'batteryVoltage', 'axisOffsetMm', 'wireGaugeMm', 'parallelStrands',
+    'varnished', 'wireResistivityRatio', 'wireDensityRatio', 'batteryInternalResistanceRatio',
+    'batteryCapacityRatio',
+  ] as const;
+  const EXPECTED_CAR_CONFIG_KEYS = [
+    'massG', 'gearRatio', 'gearEfficiency', 'wheelDiameterMm', 'tireGrip',
+    'axleFriction', 'wheelAlignmentMm', 'centerOfMassHeightMm', 'motorMountOffsetMm',
+  ] as const;
+  const EXPECTED_APPEARANCE_KEYS = ['bodyColorId', 'accentColorId'] as const;
+
+  describe('19. fixtureの完全性(長名フィールドの明示設定を直接検査、指摘1反映)', () => {
+    it('fullMotorConfig()はMotorConfigの全フィールド(新4フィールド込み)を明示設定しており、Object.keysの件数・集合がRECIPE_M_FIELD_KEYS.lengthおよび期待集合と一致する', () => {
+      const keys = Object.keys(fullMotorConfig());
+      expect(keys.length).toBe(RECIPE_M_FIELD_KEYS.length);
+      expect(new Set(keys)).toEqual(new Set(EXPECTED_MOTOR_CONFIG_KEYS));
+      expect(keys).toContain('wireResistivityRatio');
+      expect(keys).toContain('wireDensityRatio');
+      expect(keys).toContain('batteryInternalResistanceRatio');
+      expect(keys).toContain('batteryCapacityRatio');
+    });
+
+    it('fullCarConfig()/fullAppearance()もRECIPE_C_FIELD_KEYS/RECIPE_A_FIELD_KEYSと件数・集合が一致する', () => {
+      const carKeys = Object.keys(fullCarConfig());
+      const appearanceKeys = Object.keys(fullAppearance());
+      expect(carKeys.length).toBe(RECIPE_C_FIELD_KEYS.length);
+      expect(new Set(carKeys)).toEqual(new Set(EXPECTED_CAR_CONFIG_KEYS));
+      expect(appearanceKeys.length).toBe(RECIPE_A_FIELD_KEYS.length);
+      expect(new Set(appearanceKeys)).toEqual(new Set(EXPECTED_APPEARANCE_KEYS));
+    });
+  });
+
+  describe('20. authoritative key配列と実装(motorConfigToFields等)とのドリフト検査', () => {
+    it('全フィールド明示設定済みのfullMotorConfig()/fullCarConfig()/fullAppearance()から実際にencodeされたpayloadのkey集合が、RECIPE_*_FIELD_KEYSの集合と一致する', () => {
+      const code = encodeRecipe(fullRecipe());
+      const { m, c, a } = extractPayloadKeys(code);
+      expect(m.length).toBe(RECIPE_M_FIELD_KEYS.length);
+      expect(c.length).toBe(RECIPE_C_FIELD_KEYS.length);
+      expect(a.length).toBe(RECIPE_A_FIELD_KEYS.length);
+      expect(new Set(m)).toEqual(new Set(RECIPE_M_FIELD_KEYS));
+      expect(new Set(c)).toEqual(new Set(RECIPE_C_FIELD_KEYS));
+      expect(new Set(a)).toEqual(new Set(RECIPE_A_FIELD_KEYS));
+    });
+  });
+
+  describe('21. encode入力側のNaN/Infinity(計画v2 §9(a)、指摘2反映)', () => {
+    it('encodeRecipeへ渡すMotorConfig側の新4フィールドがNaN/Infinityの場合、encode前のnormalizeで1.0へfallbackする', () => {
+      const recipe = fullRecipe({
+        motorConfig: fullMotorConfig({
+          wireResistivityRatio: NaN,
+          wireDensityRatio: Infinity,
+          batteryInternalResistanceRatio: NaN,
+          batteryCapacityRatio: -Infinity,
+        }),
+      });
+      const decoded = decodeRecipe(encodeRecipe(recipe));
+      expect(decoded.motorConfig.wireResistivityRatio).toBe(1);
+      expect(decoded.motorConfig.wireDensityRatio).toBe(1);
+      expect(decoded.motorConfig.batteryInternalResistanceRatio).toBe(1);
+      expect(decoded.motorConfig.batteryCapacityRatio).toBe(1);
+    });
+  });
+
+  describe('22. クランプの正確な境界値(計画v2 §6、指摘3反映)', () => {
+    it('各フィールドの下限がそのまま保持される(clampされて消えない)', () => {
+      const recipe = fullRecipe({
+        motorConfig: fullMotorConfig({
+          wireResistivityRatio: 0.5,
+          wireDensityRatio: 0.2,
+          batteryInternalResistanceRatio: 0.01,
+          batteryCapacityRatio: 0.01,
+        }),
+      });
+      const decoded = decodeRecipe(encodeRecipe(recipe));
+      expect(decoded.motorConfig.wireResistivityRatio).toBe(0.5);
+      expect(decoded.motorConfig.wireDensityRatio).toBe(0.2);
+      expect(decoded.motorConfig.batteryInternalResistanceRatio).toBe(0.01);
+      expect(decoded.motorConfig.batteryCapacityRatio).toBe(0.01);
+    });
+
+    it('各フィールドの上限がそのまま保持される(clampされて消えない)', () => {
+      const recipe = fullRecipe({
+        motorConfig: fullMotorConfig({
+          wireResistivityRatio: 2.0,
+          wireDensityRatio: 1.5,
+          batteryInternalResistanceRatio: 10,
+          batteryCapacityRatio: 10,
+        }),
+      });
+      const decoded = decodeRecipe(encodeRecipe(recipe));
+      expect(decoded.motorConfig.wireResistivityRatio).toBe(2.0);
+      expect(decoded.motorConfig.wireDensityRatio).toBe(1.5);
+      expect(decoded.motorConfig.batteryInternalResistanceRatio).toBe(10);
+      expect(decoded.motorConfig.batteryCapacityRatio).toBe(10);
+    });
   });
 });
