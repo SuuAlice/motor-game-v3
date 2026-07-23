@@ -2,7 +2,7 @@
 
 作成日: 2026-07-23
 担当: alice_mot3(エンジン・写像)
-状態: **実装前計画v4・Fable技術レビュー完了(`docs/phase2-step10-fable-review.md`)反映済み・(d)将来枠降格/(e)採用(Phase5で(e)-1/(e)-2分割)はFable技術判定として確定・プロジェクトとしての最終決定とspec.md/CLAUDE.md/AGENTS.md編集は人間承認待ち**
+状態: **実装前計画v4・Fable技術レビュー完了(`docs/phase2-step10-fable-review.md`)反映済み・(d)将来枠降格/(e)採用(Phase5で(e)-1/(e)-2分割)はFable技術判定として確定・当時はプロジェクトとしての最終決定とspec.md/CLAUDE.md/AGENTS.md編集が人間承認待ちだった。【2026-07-23追記: 人間最終承認済み(Suu_mot3中継)。spec.md/CLAUDE.md/AGENTS.md編集はcommit `0425e54`で反映済み】**
 実費見込み: 0 USD
 
 本書は単独で作業を再開できる水準で書く。根拠: `docs/phase2-plan.md` §16移行順10・§18、`docs/spec.md` §2(エンジン凍結方針の拡張5点(d)(e))・§6.5・§9.2。
@@ -134,9 +134,9 @@ spec §2(d)の降格条項(「大規模なら進角は将来枠へ降格する�
 
 個別論点(a)〜(e)の確定回答は、`docs/phase2-step10-lap-lateral-extension-estimate.md` v3の8節・`docs/phase2-step10-fable-review.md`を参照。
 
-## 12. spec.md/CLAUDE.md/AGENTS.md編集案(人間承認が必要、本Stepでは未実施)
+## 12. spec.md/CLAUDE.md/AGENTS.md編集案(計画時点では人間承認が必要・本Stepでは未実施だった。**2026-07-23追記: その後人間最終承認済み、下記12.1〜12.5はcommit `0425e54`で反映済み**)
 
-Fableの指示(11.1節)により(d)のspec §2・§9.2等へのdocs-only変更が必要と判断され、Suu_mot3指摘(9節Q4)により(e)のspec §2・CLAUDE.md/AGENTS.mdへの状態追記も必要と判断されたが、**本Stepの承認範囲(読み取り専用調査+見積り文書2点+`docs/phase2-plan.md` §18追記)には含まれていないため、以下は変更案の提示のみとし、実際の編集は行っていない**。Suu_mot3経由で人間承認を得てから、別タスクとして実施する。
+Fableの指示(11.1節)により(d)のspec §2・§9.2等へのdocs-only変更が必要と判断され、Suu_mot3指摘(9節Q4)により(e)のspec §2・CLAUDE.md/AGENTS.mdへの状態追記も必要と判断されたが、**本Stepの承認範囲(読み取り専用調査+見積り文書2点+`docs/phase2-plan.md` §18追記)には含まれていないため、当初は以下の変更案の提示のみとし、実際の編集は行っていなかった**。Suu_mot3経由で人間承認を得てから、別タスクとして実施する計画だった。**【2026-07-23追記: 人間最終承認済み(Suu_mot3中継)。下記12.1〜12.5の追記案はcommit `0425e54`にてspec.md/CLAUDE.md/AGENTS.mdへ提示どおり反映済み】**
 
 ### 12.1 `docs/spec.md` §2「エンジン凍結方針」への追記案(原文は書き換えず、段落末尾に追記)
 
@@ -184,4 +184,8 @@ Fableの指示(11.1節)により(d)のspec §2・§9.2等へのdocs-only変更�
 
 ---
 
-以上、v4はSuu_mot3の最終レビュー指摘(2026-07-23、必須修正2点)を反映した計画です。11節の(d)(e)の判定はFable技術判定として確定していますが、プロジェクトとしての最終決定(採否そのもの)は人間承認待ちです。12節のspec.md/CLAUDE.md/AGENTS.md編集案(12.1〜12.5)はいずれも変更案の提示のみであり、実際の編集は行っていません。Suu_mot3の確認後、人間承認を経て12節の編集に着手します。それまでproduction/test/engineファイルの編集・commitは行いません。
+以上、v4はSuu_mot3の最終レビュー指摘(2026-07-23、必須修正2点)を反映した計画です。11節の(d)(e)の判定はFable技術判定として確定していますが、計画立案時点ではプロジェクトとしての最終決定(採否そのもの)は人間承認待ちでした。12節のspec.md/CLAUDE.md/AGENTS.md編集案(12.1〜12.5)も、計画立案時点ではいずれも変更案の提示のみであり、実際の編集は行っていませんでした。Suu_mot3の確認後、人間承認を経て12節の編集に着手する計画でした。それまでproduction/test/engineファイルの編集・commitは行わない方針でした。
+
+---
+
+**【2026-07-23完了報告】** プロジェクトリードから『ok, shouninsimasu, susumete』と人間最終承認を受領(Suu_mot3中継)。これにより11節の(d)将来枠降格・(e)採用(Phase5で(e)-1/(e)-2分割)はプロジェクトとしても最終決定済みとなり、12.1〜12.5の追記案どおりspec.md §2(d)(e)・§9.2、CLAUDE.md/AGENTS.md(d)(e)への日付入り状態追記(削除・書き換えなしの追記のみ)を実施した。`npm run test`(747件)・`npm run build`・`npm run lint`・`git diff --check`すべて成功、`cmp CLAUDE.md AGENTS.md`一致、`src/engine/`・`src/materials/`・production/testは無変更を確認したうえで、commit `0425e54`(担当名入り日本語コミットメッセージ)としてコミット済み。本Step10は完了。

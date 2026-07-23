@@ -213,7 +213,7 @@ anchor: 導線tier1「銅線(標準)、16.8nΩ·m」を選択したとき`ratio 
 - インターフェース: aliceが`MaterialId`/`MaterialTier`/`InventoryItem`/`PlayerInventory`等の型を`src/materials/`から公開し、brabitの店UIはこれを読み取り専用で消費する
 - 経済数値(価格・サルベージ回収率の実値)はspec §5どおりPhase2では仮置きとし、最終バランスは別途sweepベースで調整する
 
-## 18. 進角(d)・周回横方向拡張(e)のPhase2末見積り
+## 18. 進角(d)・周回横方向拡張(e)のPhase2末見積り(2026-07-23人間最終承認済み・spec.md/CLAUDE.md/AGENTS.md反映済み、commit 0425e54)
 
 本計画には見積り結果そのものは含めない(まだ着手していないため)が、Phase2内の作業として次を計画する。
 
@@ -224,7 +224,9 @@ anchor: 導線tier1「銅線(標準)、16.8nΩ·m」を選択したとき`ratio 
 
 (2026-07-23追記)見積り文書(`docs/phase2-step10-advance-angle-estimate.md`(d)・`docs/phase2-step10-lap-lateral-extension-estimate.md`(e))を作成し、Fable技術レビューを完了した(`docs/phase2-step10-fable-review.md`)。重要な訂正: 上記(e)の記述「現行`vehiclePhysics.ts`は縦1次元(直線区間の速度・トルクのみ)」は不正確だった。実際にはカーブ・コースアウト判定(`curveRadiusM`・v²/R保持限界・derailed遷移)がV2から凍結継承済みの既存ベースラインとしてすでに存在する。
 
-**Fable技術判定(確定。ただしプロジェクトとしての最終決定・spec.md/CLAUDE.md/AGENTS.md編集は人間承認待ち、Suu_mot3 2026-07-23最終レビュー指摘によりv4で明確化)**: (d)進角拡張は、現行の無誘導電気モデルではspec §9.2の特性シフトを原理的に再現できない(電機子インダクタンス導入が必要)という発見により大規模と判定され、spec §2(d)の降格条項発動・**将来枠へ降格**することがFable技術判定として確定した(spec.md/CLAUDE.md/AGENTS.mdへの反映は別途人間承認事項、`docs/phase2-step10-plan.md` v4 §12.1〜12.3参照)。(e)周回・横方向拡張は「中〜大規模」の再評価を受け入れたうえで**採用が相当(降格しない)**、Phase5内で(e)-1(周回構造)・(e)-2(壁擦り+ローラー)の2独立ステップへ分割することがFable技術判定として確定した。(e)についてもspec §2(e)・CLAUDE.md/AGENTS.md(e)へ見積り完了を示す日付入り状態追記が必要と判断した(spec §6.5本文は変更不要、`docs/phase2-step10-plan.md` v4 §12.4〜12.5参照)。詳細は両見積り文書(v4)・Fableレビュー全文を参照。
+**Fable技術判定(確定。当時はプロジェクトとしての最終決定・spec.md/CLAUDE.md/AGENTS.md編集は人間承認待ちだったが、下記のとおり2026-07-23付で人間承認済み・反映済み。Suu_mot3 2026-07-23最終レビュー指摘によりv4で明確化)**: (d)進角拡張は、現行の無誘導電気モデルではspec §9.2の特性シフトを原理的に再現できない(電機子インダクタンス導入が必要)という発見により大規模と判定され、spec §2(d)の降格条項発動・**将来枠へ降格**することがFable技術判定として確定した(spec.md/CLAUDE.md/AGENTS.mdへの反映は別途人間承認事項、`docs/phase2-step10-plan.md` v4 §12.1〜12.3参照)。(e)周回・横方向拡張は「中〜大規模」の再評価を受け入れたうえで**採用が相当(降格しない)**、Phase5内で(e)-1(周回構造)・(e)-2(壁擦り+ローラー)の2独立ステップへ分割することがFable技術判定として確定した。(e)についてもspec §2(e)・CLAUDE.md/AGENTS.md(e)へ見積り完了を示す日付入り状態追記が必要と判断した(spec §6.5本文は変更不要、`docs/phase2-step10-plan.md` v4 §12.4〜12.5参照)。詳細は両見積り文書(v4)・Fableレビュー全文を参照。
+
+**現在の状態(2026-07-23追記)**: プロジェクトリードから『ok, shouninsimasu, susumete』と人間最終承認を受領済み(Suu_mot3中継)。上記(d)/(e)の判定はプロジェクトとしても最終決定済みであり、spec.md §2(d)(e)・§9.2、CLAUDE.md/AGENTS.md(d)(e)への状態追記もcommit `0425e54`で反映済み。直前の「人間承認待ち」「別途人間承認事項」はFableレビュー・見積り確定時点(承認前)の経緯記述であり、現在は解消済みである。
 
 ## 19. 停止条件
 

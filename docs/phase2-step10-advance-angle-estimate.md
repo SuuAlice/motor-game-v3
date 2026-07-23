@@ -3,12 +3,12 @@
 作成日: 2026-07-23
 担当: alice_mot3(エンジン・写像)
 根拠: `docs/phase2-step10-plan.md` v4(承認済み)、`docs/spec.md` §2(d)・§9.2、CLAUDE.md「エンジン凍結方針」
-状態: **v4・Fable技術レビュー完了(`docs/phase2-step10-fable-review.md`)・判定「§2(d)降格条項発動、将来枠へ降格」はFable技術判定として確定・プロジェクトとしての最終決定とspec.md/CLAUDE.md/AGENTS.md編集は人間承認待ち**
+状態: **v4・Fable技術レビュー完了(`docs/phase2-step10-fable-review.md`)・判定「§2(d)降格条項発動、将来枠へ降格」はFable技術判定として確定・当時はプロジェクトとしての最終決定とspec.md/CLAUDE.md/AGENTS.md編集が人間承認待ちだった。【2026-07-23追記: 人間最終承認済み(Suu_mot3中継)。spec.md/CLAUDE.md/AGENTS.md編集はcommit `0425e54`で反映済み】**
 
 v3からの変更点(Suu_mot3最終レビュー、v4で反映):
 7. 「将来枠へ降格することが確定した」等の記述について、Fable技術判定としては確定だがプロジェクトとしての最終決定は人間承認待ちであることを状態欄・変更点・8節で明示的に分離した(Suu_mot3必須修正1点目、他の1点(e)のspec追記の要否は本書ではなく`docs/phase2-step10-lap-lateral-extension-estimate.md`側の論点)
 
-本書は`src/engine/commutator.ts`・`src/engine/motorPhysics.ts`・`src/engine/recipeCode.ts`・関連テストの読み取り専用調査に基づく見積りである。engine/への変更は一切行っていない。**8節のFable技術レビューにより、(d)は将来枠へ降格することが相当と判定された(プロジェクトとしての最終決定は人間承認待ち)。** 本Stepの範囲では見積り文書の作成のみを行い、spec.md/CLAUDE.md/AGENTS.mdへの反映は別途人間承認を得てから行う(`docs/phase2-step10-plan.md` v4参照)。
+本書は`src/engine/commutator.ts`・`src/engine/motorPhysics.ts`・`src/engine/recipeCode.ts`・関連テストの読み取り専用調査に基づく見積りである。engine/への変更は一切行っていない。**8節のFable技術レビューにより、(d)は将来枠へ降格することが相当と判定された(執筆当時はプロジェクトとしての最終決定は人間承認待ち)。** 本Step(見積り文書作成)の範囲では見積り文書の作成のみを行い、spec.md/CLAUDE.md/AGENTS.mdへの反映は別途人間承認を得てから行う計画であった(`docs/phase2-step10-plan.md` v4参照)。**【2026-07-23追記: その後人間最終承認済み(Suu_mot3中継)。spec.md/CLAUDE.md/AGENTS.mdへの反映はcommit `0425e54`で完了済み】**
 
 v1からの変更点(Suu_mot3事前レビュー、v2で反映):
 1. `recipeCode.ts`への影響を「未確認」のまま残さず、実際に読み取り調査した結果(`motorConfigToFields`/`normalizeMotorFields`の権威的なフィールド管理、版数方針の論点)を具体化し、対象ファイルを2ファイルから3ファイル(+テスト2本)へ訂正(3.2節・4節)
