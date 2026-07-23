@@ -10,7 +10,9 @@
     "preview": "vite preview",
     "test": "vitest run",
     "sweep": "vite-node scripts/vehicleSweep.ts",
-    "sweep:motor": "vite-node scripts/sweep.ts"
+    "sweep:motor": "vite-node scripts/sweep.ts",
+    "sweep:material": "vite-node scripts/materialSweep.ts",
+    "typecheck:material-sweep": "tsc -p tsconfig.material-sweep.json"
   },
   "dependencies": {
     "react": "^18.3.1",
