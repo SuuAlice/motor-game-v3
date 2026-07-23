@@ -66,7 +66,7 @@ src/materials/
 `src/engine/`への最小拡張(要Fableレビュー、詳細は7節)は`motorPhysics.ts`(MotorConfig拡張・computeRCoil/computeJ/computeBatteryInternalResistance)、`trackPhysics.ts`(電池容量参照箇所)、`recipeCode.ts`(新フィールドのkey-map・clamp・normalize)に限定する。
 
 alice所有: `src/materials/`全体、`src/engine/`拡張、`scripts/materialSweep.ts`。
-brabit所有: 店UI・インベントリ表示・個体劣化の視覚表現。`src/materials/`が公開する型(`MaterialId`/`MaterialTier`/`InventoryItem`/`PlayerInventory`等)を読み取り専用で消費する。店UIの配置ディレクトリはbrabit裁量とし、`src/materials/`とのファイル競合は想定しない。
+brabit所有: 店UI・インベントリ表示・個体劣化の視覚表現。`src/materials/`が公開する型(`MaterialId`/`InventoryItem`/`PlayerInventory`等。ティアは各IDの`tierIndex`+`family`で表現し、独立の`MaterialTier`型は存在しない)を読み取り専用で消費する。店UIの配置ディレクトリはbrabit裁量とし、`src/materials/`とのファイル競合は想定しない。
 
 アイテム個体ID生成・localStorage永続化は`src/materials/`の責務外とし、別途store層(所有・実装方法は別途相談)に委ねる。
 
@@ -210,7 +210,7 @@ anchor: 導線tier1「銅線(標準)、16.8nΩ·m」を選択したとき`ratio 
 
 - alice側: `materials.ts`/`materialMapping.ts`/`inventoryItem.ts`、対応するengine拡張、sweep、物性正当性
 - brabit側: 店(店UI)・インベントリ表示・素材カタログの見た目(art-spec準拠)・個体劣化の視覚表現(バッジ等)
-- インターフェース: aliceが`MaterialId`/`MaterialTier`/`InventoryItem`/`PlayerInventory`等の型を`src/materials/`から公開し、brabitの店UIはこれを読み取り専用で消費する
+- インターフェース: aliceが`MaterialId`/`InventoryItem`/`PlayerInventory`等の型を`src/materials/`から公開し、brabitの店UIはこれを読み取り専用で消費する(ティアは各IDの`tierIndex`+`family`で表現し、独立の`MaterialTier`型は存在しない)
 - 経済数値(価格・サルベージ回収率の実値)はspec §5どおりPhase2では仮置きとし、最終バランスは別途sweepベースで調整する
 
 ## 18. 進角(d)・周回横方向拡張(e)のPhase2末見積り(2026-07-23人間最終承認済み・spec.md/CLAUDE.md/AGENTS.md反映済み、commit 0425e54)
