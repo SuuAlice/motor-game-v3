@@ -67,6 +67,24 @@ export const STANDARD_CAR_CONFIG: CarConfig = {
   motorMountOffsetMm: 0,
 };
 
+// persistのpartializeを名前付きexportとして切り出す(docs/phase2-ui-shop-plan.md v4 §10・
+// Fable技術レビュー指摘の回帰テスト用)。テスト環境(vitest、jsdom未使用)では
+// zustand persistミドルウェアがlocalStorage不在によりapi.persistを一切公開しないため、
+// `useGameStore.persist`経由の検証ができない。この純関数を直接呼び出すことで、
+// 'shop'/'inventory'追加後もmodeがpartialize対象に含まれない(=非永続のまま)ことを
+// ブラウザ環境に依存せず検証できる。
+export function partializeGameStorePersistedState(s: GameStore) {
+  return {
+    diagnosisProgress: s.diagnosisProgress,
+    courseProgress: s.courseProgress,
+    selectedTrackId: s.selectedTrackId,
+    testRunCompleted: s.testRunCompleted,
+    config: s.config,
+    carConfig: s.carConfig,
+    garageSelection: s.garageSelection,
+  };
+}
+
 export const TEST_RUN_COURSE_LENGTH_M = 10;
 
 export interface TestRunSample {
@@ -157,7 +175,7 @@ interface GameStore {
   config: MotorConfig;
   simState: SimState;
   history: MeasurementSample[];
-  mode: 'title' | 'garage' | 'testRun' | 'course' | 'lab' | 'diagnosis' | 'assembly';
+  mode: 'title' | 'garage' | 'testRun' | 'course' | 'lab' | 'diagnosis' | 'assembly' | 'shop' | 'inventory';
   garageSelection: GarageSelection;
   selectedTrackId: string;
   carConfig: CarConfig;
@@ -198,7 +216,7 @@ interface GameStore {
   flickStart: () => void;
   resetSim: () => void;
   // トップレベルのモード切替(App.tsxのモード選択画面用)。進行中のチャレンジ状態を破棄する
-  setMode: (mode: 'title' | 'garage' | 'testRun' | 'course' | 'lab' | 'diagnosis' | 'assembly') => void;
+  setMode: (mode: 'title' | 'garage' | 'testRun' | 'course' | 'lab' | 'diagnosis' | 'assembly' | 'shop' | 'inventory') => void;
   setGarageSelection: (partial: Partial<GarageSelection>) => void;
   setLabCarConfig: (partial: Partial<CarConfig>) => void;
   selectTrack: (trackId: string) => void;
@@ -682,15 +700,7 @@ export const useGameStore = create<GameStore>()(
       // spec docs/spec.md §7タスク6「進捗のlocalStorage保存」。CLAUDE.mdの
       // 「localStorage以外の永続化・外部通信は行わない」に従い、進捗のみ保存する。
       name: 'v15:progress',
-      partialize: (s) => ({
-        diagnosisProgress: s.diagnosisProgress,
-        courseProgress: s.courseProgress,
-        selectedTrackId: s.selectedTrackId,
-        testRunCompleted: s.testRunCompleted,
-        config: s.config,
-        carConfig: s.carConfig,
-        garageSelection: s.garageSelection,
-      }),
+      partialize: partializeGameStorePersistedState,
     },
   ),
 );

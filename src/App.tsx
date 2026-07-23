@@ -10,6 +10,8 @@ import { Glossary } from './components/Glossary'
 import { LegacyDataNotice } from './components/LegacyDataNotice'
 import { ExperimentNotebook } from './components/ExperimentNotebook'
 import { MotorAudioControl } from './components/MotorAudioControl'
+import { ShopScreen } from './components/ShopScreen'
+import { InventoryScreen } from './components/InventoryScreen'
 
 // spec docs/spec.md §4: 「[タイトル] → [モード選択]」
 function TitleScreen({ onOpenGlossary, onOpenNotebook }: { onOpenGlossary: () => void; onOpenNotebook: () => void }) {
@@ -109,6 +111,8 @@ function App() {
           {mode === 'assembly' && <AssemblyMode />}
           {mode === 'testRun' && <TestRunMode />}
           {mode === 'course' && <CourseMode />}
+          {mode === 'shop' && <ShopScreen />}
+          {mode === 'inventory' && <InventoryScreen />}
         </>
       )}
     </main>
