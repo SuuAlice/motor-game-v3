@@ -5,6 +5,7 @@ import { PIXEL_FONT_10, PIXEL_FONT_12 } from '../text/pixelFonts';
 import { MATERIAL_ICON_DRAWERS } from './materialIcons';
 import { formatWearState } from './formatMaterial';
 import { computeRowLayout } from './layout';
+import { drawScrollIndicator } from './scrollIndicator';
 import { INVENTORY_HEADER_HEIGHT_PX, INVENTORY_ROW_HEIGHT_PX, ICON_SIZE_PX } from './constants';
 import type { InventoryRow } from '../../store/shopEconomy';
 
@@ -73,4 +74,5 @@ export function drawInventoryScreen(ctx: CanvasRenderingContext2D, options: Draw
   ctx.restore();
 
   drawHeader(ctx, contentWidthPx, cashG);
+  drawScrollIndicator(ctx, rows.length, INVENTORY_ROW_HEIGHT_PX, INVENTORY_HEADER_HEIGHT_PX, contentWidthPx, contentHeightPx, scrollOffsetPx);
 }

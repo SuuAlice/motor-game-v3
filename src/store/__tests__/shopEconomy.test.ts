@@ -2,10 +2,13 @@ import { describe, expect, it } from 'vitest';
 import {
   FIXTURE_ID_PREFIX,
   INITIAL_CASH_G,
+  MAX_CART_LINE_QUANTITY,
   PURCHASABLE_FAMILIES,
   SESSION_ID_PREFIX,
   buildInventoryRows,
+  canAffordCartPurchase,
   canAffordPurchase,
+  computeCartTotalG,
   computeSalvageAmountG,
   confirmSalvage,
   createInitialShopEconomyState,
@@ -14,6 +17,7 @@ import {
   isPurchasableFamily,
   previewSalvage,
   previewSalvageForMaterial,
+  purchaseCart,
   purchaseMaterial,
   type ShopEconomyState,
 } from '../shopEconomy';
@@ -123,6 +127,133 @@ describe('purchaseMaterial', () => {
     const secondId = second.state.items[second.state.items.length - 1].itemId;
     expect(secondId).toBe(`${SESSION_ID_PREFIX}0002`);
     expect(secondId).not.toBe(firstId);
+  });
+});
+
+// ショッピングカート方式(人間確定仕様2026-07-23、Suu_mot3コードレビュー指摘反映)。
+describe('computeCartTotalG', () => {
+  it('空カートはok:falseを返す', () => {
+    const result = computeCartTotalG([]);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toContain('空');
+  });
+
+  it('個体品+スタック品混在の合計を正しく計算する', () => {
+    const result = computeCartTotalG([
+      { materialId: 'magnet-ferrite', quantity: 2 },
+      { materialId: 'wire-aluminum', quantity: 3 },
+    ]);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const ferrite = materialOf('magnet-ferrite');
+    const aluminum = materialOf('wire-aluminum');
+    expect(result.totalG).toBe(ferrite.priceProvisionalG * 2 + aluminum.priceProvisionalG * 3);
+    expect(result.lines).toHaveLength(2);
+  });
+
+  it('同一materialIdの複数行は数量を合算して1行にする', () => {
+    const result = computeCartTotalG([
+      { materialId: 'magnet-ferrite', quantity: 1 },
+      { materialId: 'magnet-ferrite', quantity: 2 },
+    ]);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.lines).toHaveLength(1);
+    expect(result.lines[0].quantity).toBe(3);
+  });
+
+  it('存在しないmaterialIdはok:falseを返す', () => {
+    const result = computeCartTotalG([{ materialId: 'not-a-real-material' as never, quantity: 1 }]);
+    expect(result.ok).toBe(false);
+  });
+
+  it('購入不可ファミリー(substrate等)はok:falseを返す', () => {
+    const result = computeCartTotalG([{ materialId: 'substrate-cardboard' as never, quantity: 1 }]);
+    expect(result.ok).toBe(false);
+  });
+
+  it('数量が上限(MAX_CART_LINE_QUANTITY)を超えるとok:falseを返す', () => {
+    const result = computeCartTotalG([{ materialId: 'magnet-ferrite', quantity: MAX_CART_LINE_QUANTITY + 1 }]);
+    expect(result.ok).toBe(false);
+  });
+
+  it('合算後にMAX_CART_LINE_QUANTITYを超える場合もok:falseを返す', () => {
+    const result = computeCartTotalG([
+      { materialId: 'magnet-ferrite', quantity: MAX_CART_LINE_QUANTITY },
+      { materialId: 'magnet-ferrite', quantity: 1 },
+    ]);
+    expect(result.ok).toBe(false);
+  });
+
+  it('数量が非正整数(0・負・NaN)はok:falseを返す', () => {
+    expect(computeCartTotalG([{ materialId: 'magnet-ferrite', quantity: 0 }]).ok).toBe(false);
+    expect(computeCartTotalG([{ materialId: 'magnet-ferrite', quantity: -1 }]).ok).toBe(false);
+    expect(computeCartTotalG([{ materialId: 'magnet-ferrite', quantity: Number.NaN }]).ok).toBe(false);
+  });
+});
+
+describe('canAffordCartPurchase', () => {
+  it('所持金が合計以上ならtrue、未満ならfalse', () => {
+    expect(canAffordCartPurchase(100, 100)).toBe(true);
+    expect(canAffordCartPurchase(100, 101)).toBe(false);
+  });
+});
+
+describe('purchaseCart', () => {
+  it('複数行を一括購入し、所持金が合計分だけ減り在庫が反映される', () => {
+    const state = createInitialShopEconomyState();
+    const result = purchaseCart(state, [
+      { materialId: 'magnet-ferrite', quantity: 2 },
+      { materialId: 'wire-aluminum', quantity: 3 },
+    ]);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const ferrite = materialOf('magnet-ferrite');
+    const aluminum = materialOf('wire-aluminum');
+    const expectedTotal = ferrite.priceProvisionalG * 2 + aluminum.priceProvisionalG * 3;
+    expect(result.state.cashG).toBe(INITIAL_CASH_G - expectedTotal);
+    // 初期フィクスチャに既存のmagnet-ferrite個体が1件あるため、購入2件+1で計3件になる。
+    expect(result.state.items.filter((i) => i.materialId === 'magnet-ferrite')).toHaveLength(3);
+    const aluminumStock = result.state.stackableStock.find((e) => e.materialId === 'wire-aluminum');
+    expect(aluminumStock?.family === 'wire' ? aluminumStock.quantityM : undefined).toBe(3);
+  });
+
+  it('原子性: 残高不足で一部だけ購入できる構成では全体を拒否し状態を不変に保つ', () => {
+    // 1行目は購入できるが、2行目まで到達すると残高が尽きる数量を用意する。
+    const cheap = materialOf('wire-aluminum'); // 50G
+    const state: ShopEconomyState = { ...createInitialShopEconomyState(), cashG: cheap.priceProvisionalG * 2 };
+    const result = purchaseCart(state, [{ materialId: 'wire-aluminum', quantity: 3 }]);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toContain('不足');
+  });
+
+  it('空カートは拒否し状態不変', () => {
+    const state = createInitialShopEconomyState();
+    const result = purchaseCart(state, []);
+    expect(result.ok).toBe(false);
+  });
+
+  it('存在しないmaterialIdを含む場合は全体を拒否する(1行目が正常でも購入しない)', () => {
+    const state = createInitialShopEconomyState();
+    const result = purchaseCart(state, [
+      { materialId: 'magnet-ferrite', quantity: 1 },
+      { materialId: 'not-a-real-material' as never, quantity: 1 },
+    ]);
+    expect(result.ok).toBe(false);
+  });
+
+  it('同一materialIdの複数行は合算した数量ぶん購入する', () => {
+    const state = createInitialShopEconomyState();
+    const result = purchaseCart(state, [
+      { materialId: 'magnet-ferrite', quantity: 1 },
+      { materialId: 'magnet-ferrite', quantity: 2 },
+    ]);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // 初期フィクスチャの既存1件+合算購入3件で計4件になる。
+    expect(result.state.items.filter((i) => i.materialId === 'magnet-ferrite')).toHaveLength(4);
   });
 });
 

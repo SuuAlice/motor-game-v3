@@ -263,6 +263,135 @@ export function purchaseMaterial(state: ShopEconomyState, materialId: MaterialId
 }
 
 // ---------------------------------------------------------------------------
+// カート(ショッピングカート方式、人間確定仕様2026-07-23)
+// ---------------------------------------------------------------------------
+
+export interface CartLine {
+  readonly materialId: MaterialId;
+  readonly quantity: number;
+}
+
+/** カート1行あたりの数量上限(Suu_mot3レビュー指摘: 巨大数量によるループ暴走の防止)。 */
+export const MAX_CART_LINE_QUANTITY = 99;
+
+interface NormalizedCartLine {
+  readonly materialId: MaterialId;
+  readonly quantity: number;
+}
+
+type ValidateCartLinesResult =
+  | { readonly ok: true; readonly lines: readonly NormalizedCartLine[] }
+  | { readonly ok: false; readonly reason: string };
+
+/**
+ * カート行を一括検証する(Suu_mot3コードレビュー指摘)。重複materialIdはquantityを合算して
+ * 正規化し、合算後の数量にも上限・安全整数チェックを再適用する。materialId解決可否・
+ * 購入可能ファミリー・価格の健全性・小計のsafe integer性まで、purchaseMaterialのループへ
+ * 入る前にすべて検証する。1件でも不正ならok:falseを返し、呼び出し側は状態を一切変更しない。
+ */
+function validateCartLines(cartLines: readonly CartLine[]): ValidateCartLinesResult {
+  if (cartLines.length === 0) return { ok: false, reason: 'カートが空です' };
+
+  const mergedQuantities = new Map<string, number>();
+  for (const line of cartLines) {
+    if (!isFiniteNonNegativeInteger(line.quantity) || line.quantity <= 0) {
+      return { ok: false, reason: `${line.materialId}の数量が正しくありません` };
+    }
+    const current = mergedQuantities.get(line.materialId) ?? 0;
+    const merged = current + line.quantity;
+    if (!Number.isSafeInteger(merged)) {
+      return { ok: false, reason: `${line.materialId}の数量の合算結果が安全な範囲を超えています` };
+    }
+    mergedQuantities.set(line.materialId, merged);
+  }
+
+  const lines: NormalizedCartLine[] = [];
+  for (const [materialId, quantity] of mergedQuantities) {
+    if (quantity > MAX_CART_LINE_QUANTITY) {
+      return { ok: false, reason: `${materialId}の数量が上限(${MAX_CART_LINE_QUANTITY})を超えています` };
+    }
+    const material = findMaterial(materialId);
+    if (!material) return { ok: false, reason: '該当する素材が見つかりません' };
+    if (!isPurchasableFamily(material.family)) {
+      return { ok: false, reason: 'この素材ファミリーは試遊版では閲覧のみで、購入できません' };
+    }
+    const priceError = invalidNumberReason(material.priceProvisionalG, '価格');
+    if (priceError) return { ok: false, reason: priceError };
+    const subtotalG = material.priceProvisionalG * quantity;
+    if (!Number.isSafeInteger(subtotalG)) {
+      return { ok: false, reason: `${materialId}の小計の計算が安全な範囲を超えています` };
+    }
+    lines.push({ materialId: materialId as MaterialId, quantity });
+  }
+
+  return { ok: true, lines };
+}
+
+export interface CartTotalLine {
+  readonly materialId: MaterialId;
+  readonly quantity: number;
+  readonly unitPriceG: number;
+  readonly subtotalG: number;
+}
+
+export type CartTotalResult =
+  | { readonly ok: true; readonly totalG: number; readonly lines: readonly CartTotalLine[] }
+  | { readonly ok: false; readonly reason: string };
+
+/**
+ * カート内訳オーバーレイの表示・まとめて購入の事前判定に使う。不正なcartLinesを
+ * 成功値として返さない(Suu_mot3コードレビュー指摘: UI側だけを信用しない)。
+ */
+export function computeCartTotalG(cartLines: readonly CartLine[]): CartTotalResult {
+  const validated = validateCartLines(cartLines);
+  if (!validated.ok) return validated;
+
+  const lines: CartTotalLine[] = [];
+  let totalG = 0;
+  for (const line of validated.lines) {
+    const material = findMaterial(line.materialId);
+    if (!material) return { ok: false, reason: '該当する素材が見つかりません' };
+    const subtotalG = material.priceProvisionalG * line.quantity;
+    if (!Number.isSafeInteger(subtotalG)) return { ok: false, reason: '小計の計算が安全な範囲を超えています' };
+    const nextTotalG = totalG + subtotalG;
+    if (!Number.isSafeInteger(nextTotalG)) return { ok: false, reason: '合計の計算が安全な範囲を超えています' };
+    totalG = nextTotalG;
+    lines.push({ materialId: line.materialId, quantity: line.quantity, unitPriceG: material.priceProvisionalG, subtotalG });
+  }
+
+  return { ok: true, totalG, lines };
+}
+
+/** 購入ダイアログのcanAffordPurchaseと同じ形の、カート合計版の事前判定。 */
+export function canAffordCartPurchase(cashG: number, totalG: number): boolean {
+  return isFiniteNonNegativeInteger(cashG) && isFiniteNonNegativeInteger(totalG) && cashG >= totalG;
+}
+
+/**
+ * カートを一括購入する(原子的更新)。全行を先にvalidateCartLinesで検証してから、
+ * 既存purchaseMaterialをローカルdraftへ繰り返し適用する。途中で1回でも失敗したら
+ * その理由を返して終了し、呼び出し元のstateはdraftへ一切反映しない(全件成功か全件不変)。
+ */
+export function purchaseCart(state: ShopEconomyState, cartLines: readonly CartLine[]): PurchaseResult {
+  const validated = validateCartLines(cartLines);
+  if (!validated.ok) return { ok: false, reason: validated.reason };
+
+  const cashError = invalidNumberReason(state.cashG, '所持金');
+  if (cashError) return { ok: false, reason: cashError };
+
+  let draft = state;
+  for (const line of validated.lines) {
+    for (let i = 0; i < line.quantity; i++) {
+      const result = purchaseMaterial(draft, line.materialId);
+      if (!result.ok) return { ok: false, reason: result.reason };
+      draft = result.state;
+    }
+  }
+
+  return { ok: true, state: draft };
+}
+
+// ---------------------------------------------------------------------------
 // サルベージ
 // ---------------------------------------------------------------------------
 

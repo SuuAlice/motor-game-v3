@@ -10,7 +10,9 @@ import {
   confirmSalvage,
   createInitialShopEconomyState,
   previewSalvage,
+  purchaseCart,
   purchaseMaterial,
+  type CartLine,
   type ShopEconomyState,
 } from './shopEconomy';
 import type { InventoryItem } from '../materials/inventoryItem';
@@ -21,6 +23,8 @@ interface ShopEconomyStore {
   lastErrorJa: string | null;
   lastSalvageAmountG: number | null;
   purchase: (materialId: MaterialId) => void;
+  /** 成功/失敗をUIへ返す。呼び出し側(ShopScreen.tsx)はtrueのときだけカートを空にする。 */
+  purchaseCart: (cartLines: readonly CartLine[]) => boolean;
   salvage: (itemId: string) => void;
   clearLastError: () => void;
 }
@@ -36,6 +40,17 @@ export const useShopEconomyStore = create<ShopEconomyStore>()((set) => ({
       if (!result.ok) return { lastErrorJa: result.reason };
       return { state: result.state, lastErrorJa: null };
     }),
+
+  purchaseCart: (cartLines) => {
+    let succeeded = false;
+    set((s) => {
+      const result = purchaseCart(s.state, cartLines);
+      if (!result.ok) return { lastErrorJa: result.reason };
+      succeeded = true;
+      return { state: result.state, lastErrorJa: null };
+    });
+    return succeeded;
+  },
 
   salvage: (itemId) =>
     set((s) => {

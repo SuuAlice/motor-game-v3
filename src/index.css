@@ -14,6 +14,26 @@ body {
 
 button, input, textarea { touch-action: manipulation; }
 
+/* 店・在庫のカート内訳/サルベージ確認をnative <dialog>+showModal()化(人間確定仕様2026-07-23)。
+   UA既定のmargin/padding/border/background/max-sizeはCanvas座標と合わせるため明示的に解除する。
+   position:fixedはUA既定のまま維持し、JS側でgetBoundingClientRect()からviewport座標を計算する。 */
+dialog.retro-dialog {
+  margin: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+  max-width: none;
+  max-height: none;
+  position: fixed;
+}
+/* ::backdropは疑似要素のためinline styleを直接付けられないが、CSS custom propertyは継承される。
+   色の正本はsrc/retro/palette.tsのPALETTE.N0のみとし、dialog要素側で
+   style={{ '--retro-backdrop-color': PALETTE.N0 }}を都度渡す(Suu_mot3コードレビュー指摘:
+   コメントでの「同値」表記だけでは二重管理を解消できない)。ここではraw hex/rgbを一切書かない。 */
+dialog.retro-dialog::backdrop {
+  background: color-mix(in srgb, var(--retro-backdrop-color) 60%, transparent);
+}
+
 @media (max-width: 420px) {
   button { min-height: 44px; }
 }

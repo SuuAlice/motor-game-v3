@@ -5,6 +5,7 @@ import { PIXEL_FONT_10, PIXEL_FONT_12 } from '../text/pixelFonts';
 import { MATERIAL_ICON_DRAWERS } from './materialIcons';
 import { formatPriceLabel, formatRepresentativeProperty } from './formatMaterial';
 import { computeRowLayout } from './layout';
+import { drawScrollIndicator } from './scrollIndicator';
 import { CATALOG_HEADER_HEIGHT_PX, CATALOG_ROW_HEIGHT_PX, ICON_SIZE_PX } from './constants';
 import type { Material } from '../../materials/materials';
 import { isPurchasableFamily } from '../../store/shopEconomy';
@@ -66,4 +67,5 @@ export function drawCatalogScreen(ctx: CanvasRenderingContext2D, options: DrawCa
   ctx.restore();
 
   drawHeader(ctx, contentWidthPx, cashG);
+  drawScrollIndicator(ctx, materials.length, CATALOG_ROW_HEIGHT_PX, CATALOG_HEADER_HEIGHT_PX, contentWidthPx, contentHeightPx, scrollOffsetPx);
 }

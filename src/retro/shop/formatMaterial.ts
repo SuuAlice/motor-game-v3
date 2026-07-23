@@ -78,7 +78,7 @@ export function formatCatalogRowAriaLabel(material: Material): string {
   if (!isPurchasableFamily(material.family)) {
     return `${material.nameJa}、${propertyLine}、試遊版では閲覧のみ`.replace('、、', '、');
   }
-  return `${material.nameJa}、${propertyLine}、${formatPriceLabel(material)}(購入単位 ${formatPurchaseUnit(material)})を購入`.replace('、、', '、');
+  return `${material.nameJa}、${propertyLine}、${formatPriceLabel(material)}(購入単位 ${formatPurchaseUnit(material)})を選択`.replace('、、', '、');
 }
 
 function formatStockQuantity(stack: NonNullable<InventoryRow['stack']>): string {
@@ -92,7 +92,7 @@ export function formatInventoryRowAriaLabel(row: InventoryRow): string {
   }
   if (row.kind === 'item' && row.item) {
     const wearLine = formatWearState(row.item);
-    return `${row.material.nameJa}${wearLine ? `、${wearLine}` : ''}をサルベージ`;
+    return `${row.material.nameJa}${wearLine ? `、${wearLine}` : ''}を選択(サルベージ可能)`;
   }
   return row.material.nameJa;
 }

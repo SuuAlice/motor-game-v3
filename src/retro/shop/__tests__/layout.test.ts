@@ -1,10 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import {
+  clampRowIndex,
   clampScrollOffsetPx,
   computeDialogRect,
   computeMaxScrollOffsetPx,
   computeRowLayout,
+  computeScrollbarGeometry,
   computeScrollToRevealRow,
+  wrapRowIndex,
 } from '../layout';
 import { CATALOG_HEADER_HEIGHT_PX, CATALOG_ROW_HEIGHT_PX } from '../constants';
 import { ALL_MATERIALS } from '../../../materials/materials';
@@ -89,6 +92,66 @@ describe('末尾行までのフォーカス到達(横480×270・縦270×480)', (
     }
     const rows = computeRowLayout(ALL_MATERIALS.length, CATALOG_ROW_HEIGHT_PX, CATALOG_HEADER_HEIGHT_PX, contentHeightPx, scrollOffsetPx);
     expect(rows[lastIndex].visible).toBe(true);
+  });
+});
+
+// 項目3・6・8修正(Suu_mot3承認2026-07-23): ArrowUp/ArrowDown/Home/Endでの行フォーカス移動、
+// および可視スクロール表示(スクロールバー)の追加。
+describe('clampRowIndex', () => {
+  it('範囲内はそのまま返す', () => {
+    expect(clampRowIndex(3, 10)).toBe(3);
+  });
+
+  it('負の値は0へクランプする', () => {
+    expect(clampRowIndex(-1, 10)).toBe(0);
+  });
+
+  it('末尾を超える値は末尾indexへクランプする', () => {
+    expect(clampRowIndex(99, 10)).toBe(9);
+  });
+
+  it('itemCountが0の場合は0を返す', () => {
+    expect(clampRowIndex(5, 0)).toBe(0);
+  });
+});
+
+// 人間確定仕様(2026-07-23): ArrowUp/ArrowDownは一覧の端で循環する。
+describe('wrapRowIndex', () => {
+  it('通常の移動はそのままindexを進める', () => {
+    expect(wrapRowIndex(3, 1, 10)).toBe(4);
+    expect(wrapRowIndex(3, -1, 10)).toBe(2);
+  });
+
+  it('末尾からさらに進めると先頭へ循環する', () => {
+    expect(wrapRowIndex(9, 1, 10)).toBe(0);
+  });
+
+  it('先頭からさらに戻すと末尾へ循環する', () => {
+    expect(wrapRowIndex(0, -1, 10)).toBe(9);
+  });
+
+  it('itemCountが0の場合は0を返す', () => {
+    expect(wrapRowIndex(5, 1, 0)).toBe(0);
+  });
+});
+
+describe('computeScrollbarGeometry', () => {
+  it('全行が収まる場合はvisible:falseになる', () => {
+    const geometry = computeScrollbarGeometry(3, 20, 10, 270, 0);
+    expect(geometry.visible).toBe(false);
+  });
+
+  it('収まらない場合はvisible:trueで、trackの範囲内にthumbが収まる', () => {
+    const geometry = computeScrollbarGeometry(20, 20, 10, 100, 0);
+    expect(geometry.visible).toBe(true);
+    expect(geometry.thumbYPx).toBeGreaterThanOrEqual(geometry.trackYPx);
+    expect(geometry.thumbYPx + geometry.thumbHeightPx).toBeLessThanOrEqual(geometry.trackYPx + geometry.trackHeightPx + 0.001);
+  });
+
+  it('scrollOffsetPxが最大のとき、thumbはtrack下端に接する', () => {
+    const maxOffsetPx = computeMaxScrollOffsetPx(20, 20, 10, 100);
+    const geometry = computeScrollbarGeometry(20, 20, 10, 100, maxOffsetPx);
+    expect(geometry.thumbYPx + geometry.thumbHeightPx).toBeCloseTo(geometry.trackYPx + geometry.trackHeightPx, 5);
   });
 });
 
