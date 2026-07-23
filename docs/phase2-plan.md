@@ -189,6 +189,8 @@ anchor: 導線tier1「銅線(標準)、16.8nΩ·m」を選択したとき`ratio 
 
 この結果がPhase2ゲート「写像の物性検証sweep」(spec §12)の提出物となる。
 
+(2026-07-23追記)実装時点で写像が存在する4ファミリー(導線・磁石・ギヤ・電池)全組合せに確定、残りはcoverage gap。詳細はsweep報告書(`docs/phase2-material-sweep-report.md`)を参照。
+
 ## 16. 移行順
 
 1. `materials.ts`データ収録(9ファミリー、出典コメント込み)+静的検査テスト
