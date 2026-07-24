@@ -12,6 +12,7 @@ import { useRetroDialog } from './useRetroDialog';
 import { useElementViewportRect } from './useElementViewportRect';
 import { loadPixelFonts } from '../retro/text/pixelFonts';
 import { PALETTE } from '../retro/palette';
+import { applyDirectCanvasBackingSize } from '../retro/canvas/directCanvas';
 import { drawInventoryScreen } from '../retro/shop/drawInventory';
 import { drawConfirmDialogChrome } from '../retro/shop/drawConfirmDialog';
 import {
@@ -68,6 +69,10 @@ export function InventoryScreen() {
 
   const salvageDialogRef = useRetroDialog({ open: isSalvageDialogOpen, onClose: closeSalvageDialog });
   const containerViewportRect = useElementViewportRect(containerRef, isSalvageDialogOpen);
+  const salvageDialogRect = computeDialogRect(contentRes.w, contentRes.h, DIALOG_PREFERRED_WIDTH_PX, DIALOG_PREFERRED_HEIGHT_PX);
+  // サルベージ確認の見た目専用のdialog内Canvas(ShopScreen.tsxのcartCanvasRefと同じ理由:
+  // native dialogのtop layer構成では通常canvasへ描くと::backdropの遮光を受けてしまうため)。
+  const salvageCanvasRef = useRef<HTMLCanvasElement>(null);
 
   useEffect(() => {
     loadPixelFonts().then((result) => setFontStatus(result.ok ? 'ok' : 'error'));
@@ -88,8 +93,20 @@ export function InventoryScreen() {
       focusedIndex: selectedRowIndex,
       cashG: economy.cashG,
     });
-    if (isSalvageDialogOpen && dialogRow) {
-      const rect = computeDialogRect(contentRes.w, contentRes.h, DIALOG_PREFERRED_WIDTH_PX, DIALOG_PREFERRED_HEIGHT_PX);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [contentRes.w, contentRes.h, scaleResult.fits, scrollOffsetPx, selectedRowIndex, economy.cashG, fontStatus, rows.length]);
+
+  // サルベージ確認の見た目はdialog内専用canvasへ描く(ShopScreen.tsxのcartCanvasRefと同じ理由)。
+  useEffect(() => {
+    if (!isSalvageDialogOpen || !dialogRow) return;
+    const canvas = salvageCanvasRef.current;
+    if (!canvas) return;
+    applyDirectCanvasBackingSize(canvas, salvageDialogRect.widthPx, salvageDialogRect.heightPx);
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    ctx.imageSmoothingEnabled = false;
+    {
+      const rect = { xPx: 0, yPx: 0, widthPx: salvageDialogRect.widthPx, heightPx: salvageDialogRect.heightPx };
       const messageLines =
         preview?.ok
           ? [`回収率 ${(preview.rate * 100).toFixed(0)}%`, `回収額 ${preview.amountG} G`]
@@ -97,7 +114,7 @@ export function InventoryScreen() {
       drawConfirmDialogChrome(ctx, rect, `${dialogRow.material.nameJa}のサルベージ`, messageLines);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [contentRes.w, contentRes.h, scaleResult.fits, scrollOffsetPx, selectedRowIndex, economy.cashG, isSalvageDialogOpen, dialogRow, fontStatus, rows.length]);
+  }, [isSalvageDialogOpen, dialogRow, salvageDialogRect.widthPx, salvageDialogRect.heightPx, fontStatus]);
 
   // ダイアログを開いた直後、明確な先頭操作(キャンセル、破壊的操作の確定ボタンではない)へ
   // フォーカスする(ShopScreen.tsxのカート内訳と同じ方針)。useLayoutEffectでペイント前に
@@ -241,7 +258,6 @@ export function InventoryScreen() {
 
   const rowWidthCss = scaleResult.contentWidthPx;
   const rowHeightCss = INVENTORY_ROW_HEIGHT_PX * scaleResult.scale;
-  const salvageDialogRect = computeDialogRect(contentRes.w, contentRes.h, DIALOG_PREFERRED_WIDTH_PX, DIALOG_PREFERRED_HEIGHT_PX);
 
   // containerRefの要素は常に同一サイズのクラスで描画する(ShopScreen.tsxと同じ理由:
   // 「収まらない」表示専用の小さいコンテナに切り替えると、ResizeObserverの再測定でも
@@ -372,7 +388,26 @@ export function InventoryScreen() {
                   ['--retro-backdrop-color' as string]: PALETTE.N0,
                 } as React.CSSProperties}
               >
-                <div className="flex h-full flex-col justify-end gap-1 p-1">
+                {/* 見た目専用。ShopScreen.tsxのcartCanvasRefと同じ理由でdialogの子canvasに描く。
+                    pointer-events:none+aria-hidden=trueで操作ボタン層を一切遮らない。 */}
+                <canvas
+                  ref={salvageCanvasRef}
+                  aria-hidden="true"
+                  style={{
+                    position: 'absolute',
+                    left: 0,
+                    top: 0,
+                    width: salvageDialogRect.widthPx * scaleResult.scale,
+                    height: salvageDialogRect.heightPx * scaleResult.scale,
+                    imageRendering: 'pixelated',
+                    pointerEvents: 'none',
+                    zIndex: 0,
+                  }}
+                />
+                {/* position:staticの要素はposition:absoluteの要素より常に背面になる(z-index未指定
+                    でも同様)ため、position:relativeを明示してcanvasより確実に前面化する
+                    (Suu_mot3コードレビュー指摘: この前提が崩れボタンが不可視になっていた)。 */}
+                <div className="relative flex h-full flex-col justify-end gap-1 p-1" style={{ zIndex: 10 }}>
                   <div className="flex justify-end gap-2">
                     <button ref={cancelButtonRef} type="button" onClick={closeSalvageDialog} className="rounded bg-slate-300 px-3 py-1 text-xs font-bold text-slate-900">
                       キャンセル

@@ -13,6 +13,7 @@ import { useRetroDialog } from './useRetroDialog';
 import { useElementViewportRect } from './useElementViewportRect';
 import { loadPixelFonts } from '../retro/text/pixelFonts';
 import { PALETTE } from '../retro/palette';
+import { applyDirectCanvasBackingSize } from '../retro/canvas/directCanvas';
 import { drawCatalogScreen } from '../retro/shop/drawCatalog';
 import { drawCartOverlay } from '../retro/shop/drawCart';
 import {
@@ -50,6 +51,11 @@ export function ShopScreen() {
   const addToCartButtonRef = useRef<HTMLButtonElement>(null);
   const openCartButtonRef = useRef<HTMLButtonElement>(null);
   const cartCloseButtonRef = useRef<HTMLButtonElement>(null);
+  // カート内訳の見た目専用のdialog内Canvas(Suu_mot3コードレビュー指摘: native dialogの
+  // top layer構成は「dialog→::backdrop→通常コンテンツ」の順のため、通常canvasへ描くと
+  // ::backdropの遮光がカート内訳自体にもかかってしまう。dialogの子として別canvasを置き、
+  // 同じtop layerで合成させることで::backdropの影響を受けないようにする)。
+  const cartCanvasRef = useRef<HTMLCanvasElement>(null);
   const rowButtonRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const cartRowFirstButtonRefs = useRef<Array<HTMLButtonElement | null>>([]);
   // 実キーボードフォーカス位置(再描画不要、選択状態のselectedRowIndexとは別物として追跡)。
@@ -98,30 +104,31 @@ export function ShopScreen() {
       focusedIndex: selectedRowIndex,
       cashG: economy.cashG,
     });
-    if (isCartOverlayOpen) {
-      drawCartOverlay(ctx, {
-        rect: cartOverlayRect,
-        lines: cartTotalResult.ok ? cartTotalResult.lines : [],
-        scrollOffsetPx: cartScrollOffsetPx,
-        totalG: cartTotalResult.ok ? cartTotalResult.totalG : null,
-        cashG: economy.cashG,
-        errorJa: lastErrorJa ?? (cartTotalResult.ok ? null : cartTotalResult.reason),
-      });
-    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [
-    contentRes.w,
-    contentRes.h,
-    scaleResult.fits,
-    scrollOffsetPx,
-    selectedRowIndex,
-    economy.cashG,
-    fontStatus,
-    isCartOverlayOpen,
-    cartScrollOffsetPx,
-    cartLines,
-    lastErrorJa,
-  ]);
+  }, [contentRes.w, contentRes.h, scaleResult.fits, scrollOffsetPx, selectedRowIndex, economy.cashG, fontStatus]);
+
+  // カート内訳の見た目はdialog内専用canvasへ描く(上記の理由でtop layerに置くため)。
+  // backing storeは整数論理解像度(content px)のみとし、CSS表示寸法だけにscaleResult.scale
+  // (整数)を適用する。二重scale・ぼけを避けるため、backing sizeとCSS寸法の管理元を分離する
+  // 既存directCanvas.tsの規律をここでも踏襲する。
+  useEffect(() => {
+    if (!isCartOverlayOpen) return;
+    const canvas = cartCanvasRef.current;
+    if (!canvas) return;
+    applyDirectCanvasBackingSize(canvas, cartOverlayRect.widthPx, cartOverlayRect.heightPx);
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    ctx.imageSmoothingEnabled = false;
+    drawCartOverlay(ctx, {
+      rect: { xPx: 0, yPx: 0, widthPx: cartOverlayRect.widthPx, heightPx: cartOverlayRect.heightPx },
+      lines: cartTotalResult.ok ? cartTotalResult.lines : [],
+      scrollOffsetPx: cartScrollOffsetPx,
+      totalG: cartTotalResult.ok ? cartTotalResult.totalG : null,
+      cashG: economy.cashG,
+      errorJa: lastErrorJa ?? (cartTotalResult.ok ? null : cartTotalResult.reason),
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isCartOverlayOpen, cartOverlayRect.widthPx, cartOverlayRect.heightPx, cartScrollOffsetPx, cartLines, economy.cashG, lastErrorJa, fontStatus]);
 
   // カート内訳オーバーレイを開いた直後、明確な先頭操作(閉じるボタン)へフォーカスする
   // (人間確定仕様2026-07-23、補足条件b)。useLayoutEffectでペイント前に完了させ、
@@ -463,6 +470,26 @@ export function ShopScreen() {
                   ['--retro-backdrop-color' as string]: PALETTE.N0,
                 } as React.CSSProperties}
               >
+                {/* 見た目専用。::backdropより前面(dialogの子=top layer)に置くことで暗くならない。
+                    pointer-events:none+aria-hidden=trueとし、操作ボタン層を一切遮らない
+                    (Suu_mot3コードレビュー指摘の追補条件)。 */}
+                <canvas
+                  ref={cartCanvasRef}
+                  aria-hidden="true"
+                  style={{
+                    position: 'absolute',
+                    left: 0,
+                    top: 0,
+                    width: cartOverlayRect.widthPx * scaleResult.scale,
+                    height: cartOverlayRect.heightPx * scaleResult.scale,
+                    imageRendering: 'pixelated',
+                    pointerEvents: 'none',
+                    zIndex: 0,
+                  }}
+                />
+                {/* DOM順(position:staticの要素はposition:absoluteの要素より常に背面になる、
+                    z-index未指定でも同様)に依存せず、canvasより確実に前面化する(Suu_mot3
+                    コードレビュー指摘: InventoryScreen側でこの前提が崩れボタンが不可視になった)。 */}
                 <div
                   className="absolute overflow-hidden"
                   style={{
@@ -470,6 +497,7 @@ export function ShopScreen() {
                     top: CART_HEADER_HEIGHT_PX * scaleResult.scale,
                     width: cartOverlayRect.widthPx * scaleResult.scale,
                     height: Math.max(0, cartRowsAreaBottomPx - CART_HEADER_HEIGHT_PX) * scaleResult.scale,
+                    zIndex: 10,
                   }}
                 >
                   {cartTotalResult.ok &&
@@ -522,6 +550,7 @@ export function ShopScreen() {
                     top: cartRowsAreaBottomPx * scaleResult.scale,
                     width: cartOverlayRect.widthPx * scaleResult.scale,
                     height: (cartOverlayRect.heightPx - cartRowsAreaBottomPx) * scaleResult.scale,
+                    zIndex: 10,
                   }}
                 >
                   <div className="flex gap-1">
