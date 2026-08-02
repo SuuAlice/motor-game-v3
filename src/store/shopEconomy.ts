@@ -43,6 +43,7 @@ type WireMaterialId = (typeof WIRE_MATERIALS)[number]['id'];
 type CoatingMaterialId = (typeof COATING_MATERIALS)[number]['id'];
 import {
   computeSalvageRate,
+  GEAR_TOTAL_TOOTH_COUNT,
   type InventoryItem,
   type PlayerInventory,
   type StackableStockEntry,
@@ -103,7 +104,7 @@ function freshWearState(family: 'magnet' | 'gear' | 'brush'): WearState {
     case 'magnet':
       return { kind: 'magnet', demagnetizationFraction: 0 };
     case 'gear':
-      return { kind: 'gear', toothDamageFraction: 0 };
+      return { kind: 'gear', totalToothCount: GEAR_TOTAL_TOOTH_COUNT, toothLossCount: 0, seizureFraction: 0 };
     case 'brush':
       return { kind: 'brush', wearFraction: 0 };
   }
@@ -124,6 +125,9 @@ export function createInitialShopEconomyState(): ShopEconomyState {
     cashG: INITIAL_CASH_G,
     items,
     stackableStock,
+    rotorAssemblies: [],
+    bodyParts: [],
+    bearingAssemblies: [],
     nextSessionIdCounter: 1,
   };
 }

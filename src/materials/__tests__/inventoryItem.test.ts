@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { computeSalvageRate, type InventoryItem, type PlayerInventory, type StackableStockEntry, type WearState } from '../inventoryItem';
+import { computeSalvageRate, GEAR_TOTAL_TOOTH_COUNT, type InventoryItem, type PlayerInventory, type StackableStockEntry, type WearState } from '../inventoryItem';
 import {
   ALL_MATERIALS,
   BATTERY_MATERIALS,
@@ -46,7 +46,7 @@ describe('inventoryItem.ts: 型契約(コンパイル時)', () => {
       itemId: 'item-2',
       family: 'gear',
       materialId: 'gear-pom',
-      wearState: { kind: 'gear', toothDamageFraction: 0 },
+      wearState: { kind: 'gear', totalToothCount: GEAR_TOTAL_TOOTH_COUNT, toothLossCount: 0, seizureFraction: 0 },
     };
     const brushItem: InventoryItem = {
       itemId: 'item-3',
@@ -74,6 +74,9 @@ describe('inventoryItem.ts: 型契約(コンパイル時)', () => {
       cashG: 1000,
       items: [{ itemId: 'item-1', family: 'battery', materialId: 'battery-alkaline', wearState: undefined }],
       stackableStock: [{ family: 'wire', materialId: 'wire-copper-standard', quantityM: 10 }],
+      rotorAssemblies: [],
+      bodyParts: [],
+      bearingAssemblies: [],
     };
     expect(inventory.cashG).toBe(1000);
     expect(inventory.items).toHaveLength(1);
@@ -167,7 +170,7 @@ describe('inventoryItem.ts: computeSalvageRateの実行時契約', () => {
   it('11. fraction=0.5(中間点)が補間式どおりの値(低帯域0.15・高帯域0.50)になる(浮動小数点誤差はtoBeCloseToで許容)', () => {
     const pom = GEAR_MATERIALS.find((m) => m.id === 'gear-pom')!;
     const preciousBrush = BRUSH_MATERIALS.find((m) => m.id === 'brush-precious-metal')!;
-    const gearResult = computeSalvageRate(pom, { kind: 'gear', toothDamageFraction: 0.5 });
+    const gearResult = computeSalvageRate(pom, { kind: 'gear', totalToothCount: GEAR_TOTAL_TOOTH_COUNT, toothLossCount: GEAR_TOTAL_TOOTH_COUNT / 2, seizureFraction: 0 });
     const brushResult = computeSalvageRate(preciousBrush, { kind: 'brush', wearFraction: 0.5 });
     expect(gearResult.ok).toBe(true);
     expect(brushResult.ok).toBe(true);
@@ -192,7 +195,7 @@ describe('inventoryItem.ts: computeSalvageRateの実行時契約', () => {
 
   it('14. 決定論: 同一入力への複数回呼び出しが常に同一の値になる', () => {
     const gear = GEAR_MATERIALS.find((m) => m.id === 'gear-titanium')!;
-    const wearState: WearState = { kind: 'gear', toothDamageFraction: 0.4 };
+    const wearState: WearState = { kind: 'gear', totalToothCount: GEAR_TOTAL_TOOTH_COUNT, toothLossCount: 4, seizureFraction: 0 };
     expect(computeSalvageRate(gear, wearState)).toEqual(computeSalvageRate(gear, wearState));
   });
 
@@ -213,7 +216,7 @@ describe('inventoryItem.ts: computeSalvageRateの実行時契約', () => {
         material.family === 'magnet'
           ? representativeFractions.map((f): WearState => ({ kind: 'magnet', demagnetizationFraction: f }))
           : material.family === 'gear'
-            ? representativeFractions.map((f): WearState => ({ kind: 'gear', toothDamageFraction: f }))
+            ? representativeFractions.map((f): WearState => ({ kind: 'gear', totalToothCount: GEAR_TOTAL_TOOTH_COUNT, toothLossCount: f * GEAR_TOTAL_TOOTH_COUNT, seizureFraction: 0 }))
             : material.family === 'brush'
               ? representativeFractions.map((f): WearState => ({ kind: 'brush', wearFraction: f }))
               : [undefined];

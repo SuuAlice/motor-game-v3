@@ -1,5 +1,4 @@
 import { create } from 'zustand';
-import { persist } from 'zustand/middleware';
 import { computeMaxTurns, step, type MotorConfig, type SimState } from '../engine/motorPhysics';
 import { FLICK_INITIAL_OMEGA, MAX_FLICK_OMEGA } from '../engine/constants';
 import {
@@ -14,7 +13,6 @@ import { stepTrackRun } from '../engine/trackPhysics';
 import { evaluateObjectives } from '../engine/scoring';
 import type { CarRecipe } from '../engine/recipeCode';
 import {
-  DEFAULT_GARAGE_SELECTION,
   applyGarageBattery,
   resolveGarageBuild,
   resolveGarageSelectionFromRecipe,
@@ -25,21 +23,7 @@ import {
   useNotebookStore,
   type NotebookSample,
 } from './notebookStore';
-
-// spec docs/spec.md §3.7 設計目標の「適正パラメータ」を初期値とする
-const DEFAULT_CONFIG: MotorConfig = {
-  coilTurns: 80,
-  slitWidthMm: 1.5,
-  sandingQuality: 0.9,
-  brushPressure: 0.3,
-  magnetStrength: 1.0,
-  magnetDistanceMm: 10,
-  batteryVoltage: 3.0,
-  axisOffsetMm: 0,
-  wireGaugeMm: 0.4,
-  parallelStrands: 1,
-  varnished: true,
-};
+import { useSaveStore, type ProgressSlice } from './saveStore';
 
 const REST_STATE: SimState = {
   theta: 0,
@@ -67,12 +51,12 @@ export const STANDARD_CAR_CONFIG: CarConfig = {
   motorMountOffsetMm: 0,
 };
 
-// persistのpartializeを名前付きexportとして切り出す(docs/phase2-ui-shop-plan.md v4 §10・
-// Fable技術レビュー指摘の回帰テスト用)。テスト環境(vitest、jsdom未使用)では
-// zustand persistミドルウェアがlocalStorage不在によりapi.persistを一切公開しないため、
-// `useGameStore.persist`経由の検証ができない。この純関数を直接呼び出すことで、
-// 'shop'/'inventory'追加後もmodeがpartialize対象に含まれない(=非永続のまま)ことを
-// ブラウザ環境に依存せず検証できる。
+// P3-0サブステップ3(docs/phase3-p3-0-plan.md v7 8.3節)により、実際の永続化は
+// gameStore.ts自身のpersistミドルウェアからsaveStore.ts(v16:save)へ移管した。本関数は
+// 「進捗としてミラーする7フィールド」の単一の一覧として引き続き使う(commitWithProgressGate、
+// 本ファイル内の各setterから呼ぶ)。'shop'/'inventory'追加後もmodeがこの一覧に
+// 含まれない(=永続対象外のまま)ことを検証する既存テストの回帰対象でもある
+// (docs/phase2-ui-shop-plan.md v4 §10)。
 export function partializeGameStorePersistedState(s: GameStore) {
   return {
     diagnosisProgress: s.diagnosisProgress,
@@ -83,6 +67,26 @@ export function partializeGameStorePersistedState(s: GameStore) {
     carConfig: s.carConfig,
     garageSelection: s.garageSelection,
   };
+}
+
+// 必須9(Suuレビュー2026-08-02T16:15)+追補7(2026-08-02T17:00): ユーザーが明示的に
+// 操作するsetter(スライダー操作・ガレージ選択・診断操作等)は、saveStore.updateProgress
+// の成否を先に確認し、失敗時はgameStore側のローカルstateも一切変更しない(「画面上は
+// 変わったが永続化だけ無視された」という乖離を作らない)。高頻度物理ループ
+// (stepSim/stepTestRun/stepCourseRun)の毎フレーム実行自体はlease/pending状態で止めない
+// (60fps物理ループを永続化層の都合で止めないというCLAUDE.mdの非機能要件を優先する、
+// 明示的な設計判断)一方、terminal到達時に一度だけ確定するtestRunCompleted/courseProgress
+// は、stepTestRun/stepCourseRun内でset()の外からこのゲートと同じ「先に永続化、成功時のみ
+// ローカル反映」の構造をインラインで適用する(追補7、旧実装はfire-and-forgetでローカル
+// stateと永続化が乖離しうる欠陥があった)。
+function commitWithProgressGate(
+  set: (partial: Partial<GameStore>) => void,
+  progressPartial: Partial<ProgressSlice>,
+  fullPartial: Partial<GameStore>,
+): boolean {
+  const ok = useSaveStore.getState().updateProgress(progressPartial);
+  if (ok) set(fullPartial);
+  return ok;
 }
 
 export const TEST_RUN_COURSE_LENGTH_M = 10;
@@ -239,28 +243,32 @@ interface GameStore {
   finishAssembly: (config: MotorConfig, initialOmega: number) => void;
 }
 
+// P3-0サブステップ3: 進捗7フィールドの初期値はsaveStore.tsの起動時bootstrap結果
+// (v16:save、または v15:progressからの移行)から読み取る(gameStore.ts自身は
+// これらのフィールドをもう永続化しない)。
+const _initialProgress = useSaveStore.getState().progress;
+
 export const useGameStore = create<GameStore>()(
-  persist(
-    (set, get) => ({
-      config: DEFAULT_CONFIG,
+  (set, get) => ({
+      config: _initialProgress.config,
       simState: REST_STATE,
       history: [],
       mode: 'title',
-      garageSelection: DEFAULT_GARAGE_SELECTION,
-      selectedTrackId: 'straight-10m',
-      carConfig: STANDARD_CAR_CONFIG,
-      vehicleState: createInitialVehicleState(DEFAULT_CONFIG, STANDARD_CAR_CONFIG),
+      garageSelection: _initialProgress.garageSelection,
+      selectedTrackId: _initialProgress.selectedTrackId,
+      carConfig: _initialProgress.carConfig,
+      vehicleState: createInitialVehicleState(_initialProgress.config, _initialProgress.carConfig),
       testRunPhase: 'ready',
       testRunHistory: [],
-      testRunCompleted: false,
+      testRunCompleted: _initialProgress.testRunCompleted,
       courseRunPhase: 'ready',
       courseRunHistory: [],
       courseRunSpeed: 1,
-      courseProgress: {},
+      courseProgress: _initialProgress.courseProgress,
       activeBrokenMotorId: null,
       lockedKeys: new Set(),
       paramRanges: {},
-      diagnosisProgress: {},
+      diagnosisProgress: _initialProgress.diagnosisProgress,
       diagnosisRepairableCarKeys: new Set(),
       recipeSeed: createSessionSeed(),
       _elapsedSec: 0,
@@ -277,41 +285,38 @@ export const useGameStore = create<GameStore>()(
       // チャレンジ中はlockedKeysに含まれるパラメータへの変更を無視し、
       // paramRangesに含まれるパラメータはその範囲へクランプする
       // (UI側のスライダーmin/max・disabled表示と二重に防御する)
-      setConfig: (partial) =>
-        set((s) => {
-          const filtered: Partial<MotorConfig> = { ...partial };
-          for (const key of Object.keys(filtered) as (keyof MotorConfig)[]) {
-            if (s.lockedKeys.has(key)) delete filtered[key];
-          }
-          const ranged = clampToRanges({ ...s.config, ...filtered }, s.paramRanges);
-          return { config: clampToCoilWindow(ranged) };
-        }),
+      setConfig: (partial) => {
+        const s = get();
+        const filtered: Partial<MotorConfig> = { ...partial };
+        for (const key of Object.keys(filtered) as (keyof MotorConfig)[]) {
+          if (s.lockedKeys.has(key)) delete filtered[key];
+        }
+        const ranged = clampToRanges({ ...s.config, ...filtered }, s.paramRanges);
+        const config = clampToCoilWindow(ranged);
+        commitWithProgressGate(set, { config }, { config });
+      },
 
-      setGarageSelection: (partial) => set((s) => {
+      setGarageSelection: (partial) => {
+        const s = get();
         const garageSelection = { ...s.garageSelection, ...partial };
         const { carConfig } = resolveGarageBuild(garageSelection);
-        return {
-          garageSelection,
-          carConfig,
-          config: applyGarageBattery(s.config, garageSelection),
-          vehicleState: createInitialVehicleState(applyGarageBattery(s.config, garageSelection), carConfig),
-        };
-      }),
+        const config = applyGarageBattery(s.config, garageSelection);
+        const vehicleState = createInitialVehicleState(config, carConfig);
+        commitWithProgressGate(set, { garageSelection, config, carConfig }, { garageSelection, carConfig, config, vehicleState });
+      },
 
-      setLabCarConfig: (partial) => set((s) => {
+      setLabCarConfig: (partial) => {
+        const s = get();
         const carConfig = { ...s.carConfig, ...partial };
-        return {
-          carConfig,
-          vehicleState: createInitialVehicleState(s.config, carConfig),
-          testRunPhase: 'ready',
-          testRunHistory: [],
-        };
-      }),
+        const vehicleState = createInitialVehicleState(s.config, carConfig);
+        commitWithProgressGate(set, { carConfig }, { carConfig, vehicleState, testRunPhase: 'ready', testRunHistory: [] });
+      },
 
       loadRecipe: (config, seed) => {
         finishActiveSession(get());
-        set({
-          config: clampToCoilWindow(config),
+        const nextConfig = clampToCoilWindow(config);
+        commitWithProgressGate(set, { config: nextConfig }, {
+          config: nextConfig,
           recipeSeed: seed >>> 0,
           simState: { ...REST_STATE },
           history: [],
@@ -333,7 +338,7 @@ export const useGameStore = create<GameStore>()(
           config.batteryVoltage,
           recipe.appearance,
         );
-        set({
+        commitWithProgressGate(set, { config, carConfig, garageSelection, testRunCompleted: false }, {
           config,
           carConfig,
           garageSelection,
@@ -358,13 +363,17 @@ export const useGameStore = create<GameStore>()(
 
       randomizeRecipeSeed: () => set({ recipeSeed: createSessionSeed() }),
 
-      selectTrack: (trackId) => set((s) => ({
-        selectedTrackId: trackId,
-        vehicleState: createInitialVehicleState(s.config, s.carConfig),
-        courseRunPhase: 'ready',
-        courseRunSpeed: 0,
-        courseRunHistory: [],
-      })),
+      selectTrack: (trackId) => {
+        const s = get();
+        const vehicleState = createInitialVehicleState(s.config, s.carConfig);
+        commitWithProgressGate(set, { selectedTrackId: trackId }, {
+          selectedTrackId: trackId,
+          vehicleState,
+          courseRunPhase: 'ready',
+          courseRunSpeed: 0,
+          courseRunHistory: [],
+        });
+      },
 
       stepSim: (dt) =>
         set((s) => {
@@ -470,7 +479,8 @@ export const useGameStore = create<GameStore>()(
         }));
       },
 
-      stepTestRun: (dt) =>
+      stepTestRun: (dt) => {
+        let justCompleted = false;
         set((s) => {
           if (s.testRunPhase !== 'running') return s;
           let rngState = s._vehicleRngState;
@@ -505,15 +515,28 @@ export const useGameStore = create<GameStore>()(
             || nextVehicleState.status === 'stalled'
             || nextVehicleState.status === 'overheated'
             || nextVehicleState.status === 'derailed';
+          // testRunCompletedがfalse→trueへ初めて切り替わる瞬間だけ検知する
+          // (mirrorProgressを毎フレーム呼ばないようにするため)
+          if (!s.testRunCompleted && nextVehicleState.status === 'finished') justCompleted = true;
+          // 追補7(Suuレビュー2026-08-02T17:00): 物理phase(testRunPhase/vehicleState/history)は
+          // 60fps物理ループを止めないため無条件で進める一方、永続progressフィールド
+          // (testRunCompleted)はここでは確定せず、set()の外でupdateProgress成功時にのみ
+          // 反映する(下記)。失敗時は物理は'complete'のまま、testRunCompletedだけ旧値を
+          // 維持する(gameStoreのローカルstateが永続化結果と乖離しない、必須9の精神を
+          // 高頻度ループにも適用する)。
           return {
             vehicleState: nextVehicleState,
             testRunPhase: terminal ? 'complete' : 'running',
             testRunHistory,
-            testRunCompleted: s.testRunCompleted || nextVehicleState.status === 'finished',
             _vehicleRngState: rngState,
             _vehicleSampleAccumulatorSec: sampleAccumulator,
           };
-        }),
+        });
+        if (justCompleted) {
+          const ok = useSaveStore.getState().updateProgress({ testRunCompleted: true });
+          if (ok) set({ testRunCompleted: true });
+        }
+      },
 
       abortTestRun: () => set((s) => s.testRunPhase === 'running' ? { testRunPhase: 'aborted' } : s),
 
@@ -537,7 +560,9 @@ export const useGameStore = create<GameStore>()(
         }));
       },
 
-      stepCourseRun: (dt) => set((s) => {
+      stepCourseRun: (dt) => {
+        let pendingCourseProgress: GameStore['courseProgress'] | null = null;
+        set((s) => {
         if (s.courseRunPhase !== 'running') return s;
         const track = TRACK_BY_ID.get(s.selectedTrackId);
         if (!track) return { courseRunPhase: 'aborted' };
@@ -564,7 +589,10 @@ export const useGameStore = create<GameStore>()(
         }
         const terminal = nextVehicleState.status === 'finished' || nextVehicleState.status === 'stalled'
           || nextVehicleState.status === 'overheated' || nextVehicleState.status === 'derailed';
-        let courseProgress = s.courseProgress;
+        // 追補7: 永続progressフィールド(courseProgress)の確定候補はここでは計算するだけに
+        // 留め、set()の外でupdateProgress成功時にのみgameStoreへ反映する(下記)。terminal
+        // 到達時の物理phase自体(courseRunPhase:'complete')は常に確定させ、報酬・達成状態
+        // (courseProgress)だけがlease未取得/pending中は旧値を維持する。
         if (terminal) {
           const objectiveContext = {
             finalState: nextVehicleState,
@@ -590,7 +618,7 @@ export const useGameStore = create<GameStore>()(
             && (!previousProgress?.best || record.elapsedTimeS < previousProgress.best.elapsedTimeS)
             ? record
             : previousProgress?.best;
-          courseProgress = {
+          pendingCourseProgress = {
             ...s.courseProgress,
             [track.id]: {
               attempts: (previousProgress?.attempts ?? 0) + 1,
@@ -611,11 +639,15 @@ export const useGameStore = create<GameStore>()(
           vehicleState: nextVehicleState,
           courseRunPhase: terminal ? 'complete' : 'running',
           courseRunHistory,
-          courseProgress,
           _vehicleRngState: rngState,
           _vehicleSampleAccumulatorSec: sampleAccumulator,
         };
-      }),
+        });
+        if (pendingCourseProgress) {
+          const ok = useSaveStore.getState().updateProgress({ courseProgress: pendingCourseProgress });
+          if (ok) set({ courseProgress: pendingCourseProgress });
+        }
+      },
 
       abortCourseRun: () => set((s) => s.courseRunPhase === 'running' ? { courseRunPhase: 'aborted' } : s),
 
@@ -630,8 +662,8 @@ export const useGameStore = create<GameStore>()(
       })),
 
       // 診断データが許可した項目だけを調整可能にする。
-      startDiagnosis: (brokenCar) =>
-        set({
+      startDiagnosis: (brokenCar) => {
+        commitWithProgressGate(set, { config: { ...brokenCar.motorConfig }, carConfig: { ...brokenCar.carConfig } }, {
           mode: 'diagnosis',
           activeBrokenMotorId: brokenCar.id,
           lockedKeys: new Set(
@@ -650,15 +682,18 @@ export const useGameStore = create<GameStore>()(
           testRunHistory: [],
           _elapsedSec: 0,
           _sampleAccumulatorSec: 0,
-        }),
+        });
+      },
 
-      setDiagnosisCarConfig: (partial) => set((s) => {
+      setDiagnosisCarConfig: (partial) => {
+        const s = get();
         const allowed = Object.fromEntries(
           Object.entries(partial).filter(([key]) => s.diagnosisRepairableCarKeys.has(key as keyof CarConfig)),
         ) as Partial<CarConfig>;
         const carConfig = { ...s.carConfig, ...allowed };
-        return { carConfig, vehicleState: createInitialVehicleState(s.config, carConfig), testRunPhase: 'ready', testRunHistory: [] };
-      }),
+        const vehicleState = createInitialVehicleState(s.config, carConfig);
+        commitWithProgressGate(set, { carConfig }, { carConfig, vehicleState, testRunPhase: 'ready', testRunHistory: [] });
+      },
 
       stopDiagnosis: () => {
         finishActiveSession(get());
@@ -674,14 +709,16 @@ export const useGameStore = create<GameStore>()(
         });
       },
 
-      recordDiagnosisSolved: (brokenMotorId) =>
-        set((s) => ({ diagnosisProgress: { ...s.diagnosisProgress, [brokenMotorId]: true } })),
+      recordDiagnosisSolved: (brokenMotorId) => {
+        const diagnosisProgress = { ...get().diagnosisProgress, [brokenMotorId]: true };
+        commitWithProgressGate(set, { diagnosisProgress }, { diagnosisProgress });
+      },
 
       finishAssembly: (config, initialOmega) => {
         finishActiveSession(get());
         const clampedOmega = Math.min(MAX_FLICK_OMEGA, Math.max(-MAX_FLICK_OMEGA, initialOmega));
         const seed = createSessionSeed();
-        set({
+        commitWithProgressGate(set, { config }, {
           config,
           recipeSeed: seed,
           simState: { ...REST_STATE, omega: clampedOmega },
@@ -696,14 +733,28 @@ export const useGameStore = create<GameStore>()(
         });
       },
     }),
-    {
-      // spec docs/spec.md §7タスク6「進捗のlocalStorage保存」。CLAUDE.mdの
-      // 「localStorage以外の永続化・外部通信は行わない」に従い、進捗のみ保存する。
-      name: 'v15:progress',
-      partialize: partializeGameStorePersistedState,
-    },
-  ),
 );
+
+// 追補2(2026-08-02T17:43再レビュー、必須修正1): saveStore.progressのクロスタブ最新化を
+// gameStoreへ反応同期する(notebookStore.ts/shopEconomyStore.tsと同じ「薄い反応的ビュー」
+// パターン)。旧実装はモジュール生成時の_initialProgressを読むだけでこの購読がなく、
+// 待機中に他タブが進捗を更新→このタブがstale後にlease取得しても、gameStore側の
+// 計算元(courseProgress等)は旧値のままだった(特にstepCourseRunは自分のローカル
+// courseProgress全体から次値を作ってupdateProgressするため、他タブの更新を上書き
+// しかねなかった)。物理runtime(simState/vehicleState/testRunPhase/courseRunPhase/
+// history等)はここでは一切変更しない(進捗7フィールドのみを同期する境界を固定する)。
+useSaveStore.subscribe((state) => {
+  const p = state.progress;
+  useGameStore.setState({
+    diagnosisProgress: p.diagnosisProgress,
+    courseProgress: p.courseProgress,
+    selectedTrackId: p.selectedTrackId,
+    testRunCompleted: p.testRunCompleted,
+    config: p.config,
+    carConfig: p.carConfig,
+    garageSelection: p.garageSelection,
+  });
+});
 
 function finishActiveSession(state: GameStore): void {
   if (

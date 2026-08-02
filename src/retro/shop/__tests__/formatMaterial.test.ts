@@ -9,7 +9,7 @@ import {
 } from '../formatMaterial';
 import type { InventoryRow } from '../../../store/shopEconomy';
 import { ALL_MATERIALS } from '../../../materials/materials';
-import type { InventoryItem } from '../../../materials/inventoryItem';
+import { GEAR_TOTAL_TOOTH_COUNT, type InventoryItem } from '../../../materials/inventoryItem';
 
 function materialOf(id: string) {
   const material = ALL_MATERIALS.find((m) => m.id === id);
@@ -69,6 +69,18 @@ describe('formatWearState', () => {
       wearState: { kind: 'magnet', demagnetizationFraction: 0.12 },
     };
     expect(formatWearState(magnetItem)).toBe('減磁度 12%');
+  });
+
+  it('ギヤは歯欠け数/総歯数の比率を「歯欠け度」として表示する(P3-0新型WearState.gear)', () => {
+    const gearItem: InventoryItem = {
+      itemId: 'fixture-gear-01',
+      family: 'gear',
+      materialId: 'gear-pom',
+      wearState: { kind: 'gear', totalToothCount: GEAR_TOTAL_TOOTH_COUNT, toothLossCount: 3, seizureFraction: 0.4 },
+    };
+    // 表示はtoothLossCount/totalToothCountのみを反映する。seizureFraction(サルベージ等の
+    // 経済評価専用、Fable裁定の補完乗算入力)はこの表示に一切流用しない。
+    expect(formatWearState(gearItem)).toBe(`歯欠け度 ${Math.round((3 / GEAR_TOTAL_TOOTH_COUNT) * 100)}%`);
   });
 
   it('電池はwearState未追跡のためnullを返す', () => {

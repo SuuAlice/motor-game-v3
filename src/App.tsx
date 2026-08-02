@@ -1,5 +1,7 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useGameStore } from './store/gameStore'
+import { useSaveStore } from './store/saveStore'
+import { SaveGate } from './components/SaveGate'
 import { LabMode } from './modes/LabMode'
 import { DiagnosisMode } from './modes/DiagnosisMode'
 import { AssemblyMode } from './modes/AssemblyMode'
@@ -89,6 +91,29 @@ function App() {
   const setMode = useGameStore((s) => s.setMode)
   const [utilityPage, setUtilityPage] = useState<'glossary' | 'notebook' | null>(null)
 
+  // 必須2(Suuレビュー2026-08-02T16:15): lease lifecycle(heartbeat・待機ポーリング)を
+  // アプリのmount/unmountへ配線する。startLeaseLifecycle自体が内部でタイマーを
+  // 止めてから起動し直すため、React StrictMode(開発時のeffect二重発火)やHMRでの
+  // 再mountでもタイマーが二重化しない。pagehideではbest-effortでタイマーだけ止める
+  // (v12 4.3節「pagehideは補助であって正しさの根拠にしない」との整合、heartbeat時刻
+  // 自体は書き換えない)。
+  // 追補4(Suuレビュー2026-08-02T17:00): BFCache(back/forward cache)からの復帰は
+  // unmount/remountを伴わないため、pagehideだけではheartbeatが永久停止する
+  // (leaseStateはacquiredのままタイマーだけ止まる)。pageshowで必ずstartLeaseLifecycle
+  // を再開する(startLeaseLifecycleは冪等なため、通常のmount経路と重複しても安全)。
+  useEffect(() => {
+    useSaveStore.getState().startLeaseLifecycle()
+    const onPageHide = () => useSaveStore.getState().stopLeaseLifecycle()
+    const onPageShow = () => useSaveStore.getState().startLeaseLifecycle()
+    window.addEventListener('pagehide', onPageHide)
+    window.addEventListener('pageshow', onPageShow)
+    return () => {
+      window.removeEventListener('pagehide', onPageHide)
+      window.removeEventListener('pageshow', onPageShow)
+      useSaveStore.getState().stopLeaseLifecycle()
+    }
+  }, [])
+
   return (
     <main className="min-h-svh bg-slate-50">
       <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-2 px-4 pt-4">
@@ -98,23 +123,32 @@ function App() {
         )}</div>
       </div>
       <LegacyDataNotice />
-      {utilityPage === 'glossary' ? (
-        <Glossary onClose={() => setUtilityPage(null)} />
-      ) : utilityPage === 'notebook' ? (
-        <ExperimentNotebook onClose={() => setUtilityPage(null)} />
-      ) : (
-        <>
-          {mode === 'title' && <TitleScreen onOpenGlossary={() => setUtilityPage('glossary')} onOpenNotebook={() => setUtilityPage('notebook')} />}
-          {mode === 'garage' && <GarageMode />}
-          {mode === 'lab' && <LabMode />}
-          {mode === 'diagnosis' && <DiagnosisMode />}
-          {mode === 'assembly' && <AssemblyMode />}
-          {mode === 'testRun' && <TestRunMode />}
-          {mode === 'course' && <CourseMode />}
-          {mode === 'shop' && <ShopScreen />}
-          {mode === 'inventory' && <InventoryScreen />}
-        </>
-      )}
+      {/* 追補3(Suuレビュー2026-08-02T17:00): utilityPage(用語集・実験ノート)を
+          SaveGateより先に分岐させていた旧実装は、破損(bootstrapError)発生時に
+          utilityPage表示中だと専用エラー画面へ遷移できない欠陥と、実験ノートの
+          JSON読み込み(=replaceSessions、書き込み入口)がlease/pending中でも
+          実行できてしまう欠陥の二つを持っていた。両方ともutilityPageをSaveGateの
+          内側へ置くことで解消する(bootstrapError/lease/pendingいずれの場合も
+          実験ノート・用語集を含め通常画面への到達を一切許可しない)。 */}
+      <SaveGate>
+        {utilityPage === 'glossary' ? (
+          <Glossary onClose={() => setUtilityPage(null)} />
+        ) : utilityPage === 'notebook' ? (
+          <ExperimentNotebook onClose={() => setUtilityPage(null)} />
+        ) : (
+          <>
+            {mode === 'title' && <TitleScreen onOpenGlossary={() => setUtilityPage('glossary')} onOpenNotebook={() => setUtilityPage('notebook')} />}
+            {mode === 'garage' && <GarageMode />}
+            {mode === 'lab' && <LabMode />}
+            {mode === 'diagnosis' && <DiagnosisMode />}
+            {mode === 'assembly' && <AssemblyMode />}
+            {mode === 'testRun' && <TestRunMode />}
+            {mode === 'course' && <CourseMode />}
+            {mode === 'shop' && <ShopScreen />}
+            {mode === 'inventory' && <InventoryScreen />}
+          </>
+        )}
+      </SaveGate>
     </main>
   )
 }

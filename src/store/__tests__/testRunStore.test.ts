@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { TEST_RUN_COURSE_LENGTH_M, useGameStore } from '../gameStore';
+import { useSaveStore } from '../saveStore';
 import { DEFAULT_GARAGE_SELECTION } from '../../data/partPresets';
 import { decodeRecipe, encodeRecipe } from '../../engine/recipeCode';
 import { BROKEN_CARS } from '../../data/brokenCars';
@@ -38,6 +39,12 @@ describe('テスト走行store', () => {
   });
 
   beforeEach(() => {
+    // 追補2(2026-08-02T17:43再レビュー、必須修正1): gameStoreはsaveStore.progressへ
+    // 反応同期する購読を持つため、gameStore側だけをリセットしてもsaveStore側に前の
+    // テストの進捗が残っていると、直後のcommitWithProgressGate経由の操作(下のsetGarageSelection等)
+    // が購読を発火させてgameStoreの進捗フィールドを巻き戻してしまう。saveStore側も
+    // 直接リセットしておく(lease事前ゲートを経由する必要はないテスト専用の初期化)。
+    useSaveStore.setState((s) => ({ progress: { ...s.progress, courseProgress: {}, testRunCompleted: false } }));
     useGameStore.setState({ courseProgress: {}, testRunCompleted: false, courseRunSpeed: 1 });
     useGameStore.getState().setGarageSelection(DEFAULT_GARAGE_SELECTION);
     useGameStore.getState().setMode('testRun');
@@ -70,6 +77,27 @@ describe('テスト走行store', () => {
     const snapshot = completed.vehicleState;
     useGameStore.getState().stepTestRun(DT);
     expect(useGameStore.getState().vehicleState).toBe(snapshot);
+  });
+
+  it('追補7(Suuレビュー2026-08-02T17:00): updateProgress失敗時は物理phaseはcompleteになるがtestRunCompletedは旧値を維持する', () => {
+    const updateProgressSpy = vi.spyOn(useSaveStore.getState(), 'updateProgress').mockReturnValue(false);
+    try {
+      useGameStore.getState().startTestRun();
+      let steps = 0;
+      while (useGameStore.getState().testRunPhase === 'running' && steps < 120 * 30) {
+        useGameStore.getState().stepTestRun(DT);
+        steps += 1;
+      }
+      const completed = useGameStore.getState();
+      // 物理は60fps優先で無条件に完走状態まで進む
+      expect(completed.testRunPhase).toBe('complete');
+      expect(completed.vehicleState.status).toBe('finished');
+      // 永続化(updateProgress)が失敗したため、報酬/達成状態に相当するtestRunCompletedは
+      // falseのまま(gameStoreのローカルstateが永続化結果と乖離しない、必須9の高頻度ループ版)。
+      expect(completed.testRunCompleted).toBe(false);
+    } finally {
+      updateProgressSpy.mockRestore();
+    }
   });
 
   it('中止後は物理ステップを進めず、再スタートで履歴を消去する', () => {
@@ -231,5 +259,25 @@ describe('テスト走行store', () => {
     expect(progress.best?.status).toBe('finished');
     expect(typeof progress.normalCompleted).toBe('boolean');
     expect(progress.achievedObjectiveIds).toContain('straight-finish');
+  });
+
+  it('追補7: updateProgress失敗時は物理phaseはcompleteになるがcourseProgressは旧値を維持する', () => {
+    useGameStore.getState().setMode('course');
+    useGameStore.getState().selectTrack('straight-10m');
+    const before = useGameStore.getState().courseProgress;
+    const updateProgressSpy = vi.spyOn(useSaveStore.getState(), 'updateProgress').mockReturnValue(false);
+    try {
+      useGameStore.getState().startCourseRun();
+      let steps = 0;
+      while (useGameStore.getState().courseRunPhase === 'running' && steps < 120 * 30) {
+        useGameStore.getState().stepCourseRun(DT);
+        steps += 1;
+      }
+      expect(useGameStore.getState().courseRunPhase).toBe('complete');
+      expect(useGameStore.getState().courseProgress).toBe(before);
+      expect(useGameStore.getState().courseProgress['straight-10m']).toBeUndefined();
+    } finally {
+      updateProgressSpy.mockRestore();
+    }
   });
 });

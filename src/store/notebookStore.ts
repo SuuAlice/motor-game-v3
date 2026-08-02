@@ -1,10 +1,10 @@
 import { create } from 'zustand';
-import { persist } from 'zustand/middleware';
 import type { MotorConfig, SessionEventType } from '../engine/motorPhysics';
 import type { HistorySample } from '../engine/scoring';
 import type { CarConfig, EnergyBreakdown, VehicleSimState } from '../engine/vehiclePhysics';
+import { NOTEBOOK_LIMIT, useSaveStore } from './saveStore';
 
-export const NOTEBOOK_LIMIT = 50;
+export { NOTEBOOK_LIMIT };
 
 export interface NotebookSample extends HistorySample {
   theta: number;
@@ -71,11 +71,11 @@ interface NotebookExport {
 interface NotebookStore {
   sessions: ExperimentSession[];
   courseRuns: CourseRunNotebookRecord[];
-  pendingSession: ExperimentSession | null;
   addSession: (session: ExperimentSession) => void;
-  confirmEviction: () => void;
-  cancelEviction: () => void;
-  replaceSessions: (sessions: ExperimentSession[]) => void;
+  // 追補3(Suuレビュー2026-08-02T17:00): 書き込み結果を呼び出し元(ExperimentNotebook.tsx)へ
+  // 伝える。以前はsaveStore.replaceSessionsRecordの戻り値(lease/pending拒否等)を
+  // 握りつぶしており、UI側は常に成功したものとして扱っていた。
+  replaceSessions: (sessions: ExperimentSession[]) => { ok: true } | { ok: false; reason: string };
   clear: () => void;
   addCourseRun: (record: CourseRunNotebookRecord) => void;
 }
@@ -163,33 +163,26 @@ export function stringifyNotebook(sessions: ExperimentSession[]): string {
   return JSON.stringify(value, null, 2);
 }
 
-export const useNotebookStore = create<NotebookStore>()(
-  persist(
-    (set, get) => ({
-      sessions: [],
-      courseRuns: [],
-      pendingSession: null,
-      addSession: (session) => {
-        const { sessions } = get();
-        if (sessions.length >= NOTEBOOK_LIMIT) {
-          set({ pendingSession: session });
-          return;
-        }
-        set({ sessions: [session, ...sessions] });
-      },
-      confirmEviction: () => {
-        const { sessions, pendingSession } = get();
-        if (!pendingSession) return;
-        set({ sessions: [pendingSession, ...sessions.slice(0, NOTEBOOK_LIMIT - 1)], pendingSession: null });
-      },
-      cancelEviction: () => set({ pendingSession: null }),
-      replaceSessions: (sessions) => set({ sessions: sessions.slice(0, NOTEBOOK_LIMIT), pendingSession: null }),
-      clear: () => set({ sessions: [], courseRuns: [], pendingSession: null }),
-      addCourseRun: (record) => set((state) => ({ courseRuns: [record, ...state.courseRuns].slice(0, NOTEBOOK_LIMIT) })),
-    }),
-    {
-      name: 'v15:notebook',
-      partialize: (state) => ({ sessions: state.sessions, courseRuns: state.courseRuns }),
-    },
-  ),
-);
+// P3-0サブステップ3(docs/phase3-p3-0-plan.md v7 8.3節): 永続化はsaveStore.ts(v16:save)
+// へ移管した。本storeはsaveStore.notebookスライスへの薄い反応的ビュー+action委譲のみを
+// 担う(単一の正はsaveStore側)。上限到達時の確認バナー(pendingSession/confirmEviction/
+// cancelEviction)は正式Fable Q3裁定により撤去し、3腕とも自動trimへ統一する
+// (src/components/ExperimentNotebook.tsx側のUIも同時に撤去済み)。
+export const useNotebookStore = create<NotebookStore>()(() => ({
+  sessions: useSaveStore.getState().notebook.sessions,
+  courseRuns: useSaveStore.getState().notebook.courseRuns,
+  addSession: (session) => {
+    useSaveStore.getState().addSessionRecord(session);
+  },
+  replaceSessions: (sessions) => useSaveStore.getState().replaceSessionsRecord(sessions),
+  clear: () => {
+    useSaveStore.getState().clearNotebook();
+  },
+  addCourseRun: (record) => {
+    useSaveStore.getState().addCourseRunRecord(record);
+  },
+}));
+
+useSaveStore.subscribe((state) => {
+  useNotebookStore.setState({ sessions: state.notebook.sessions, courseRuns: state.notebook.courseRuns });
+});

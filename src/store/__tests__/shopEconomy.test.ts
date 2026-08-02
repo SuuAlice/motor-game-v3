@@ -21,6 +21,7 @@ import {
   purchaseMaterial,
   type ShopEconomyState,
 } from '../shopEconomy';
+import { GEAR_TOTAL_TOOTH_COUNT } from '../../materials/inventoryItem';
 import type { InventoryItem, StackableStockEntry } from '../../materials/inventoryItem';
 import { ALL_MATERIALS, type Material } from '../../materials/materials';
 
@@ -339,7 +340,7 @@ describe('数値検証(壊れたstate/fixtureを模擬した異常系)', () => {
 
   it('価格(priceProvisionalG)が負値の素材もサルベージのプレビューを拒否する', () => {
     const brokenMaterial: Material = { ...materialOf('gear-pom'), priceProvisionalG: -10 };
-    const preview = previewSalvageForMaterial(brokenMaterial, { kind: 'gear', toothDamageFraction: 0 });
+    const preview = previewSalvageForMaterial(brokenMaterial, { kind: 'gear', totalToothCount: GEAR_TOTAL_TOOTH_COUNT, toothLossCount: 0, seizureFraction: 0 });
     expect(preview.ok).toBe(false);
   });
 });
@@ -409,7 +410,7 @@ describe('previewSalvage / confirmSalvage', () => {
       itemId: `${FIXTURE_ID_PREFIX}broken-01`,
       family: 'magnet',
       materialId: 'magnet-ferrite',
-      wearState: { kind: 'gear', toothDamageFraction: 0.5 },
+      wearState: { kind: 'gear', totalToothCount: GEAR_TOTAL_TOOTH_COUNT, toothLossCount: 5, seizureFraction: 0 },
     } as unknown as InventoryItem;
     const brokenState: ShopEconomyState = { ...state, items: [...state.items, brokenItem] };
 

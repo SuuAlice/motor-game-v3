@@ -55,7 +55,7 @@ function wearFraction(wearState: WearState): number {
     case 'magnet':
       return wearState.demagnetizationFraction;
     case 'gear':
-      return wearState.toothDamageFraction;
+      return wearState.toothLossCount / wearState.totalToothCount;
     case 'brush':
       return wearState.wearFraction;
   }

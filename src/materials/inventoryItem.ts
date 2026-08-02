@@ -2,9 +2,15 @@
 // docs/phase2-step8-plan.md v5)。engine/・materialMapping.tsのいずれにも依存しない
 // 在庫データ層(Suu_mot3レビューv3、層境界)。恒久状態はデータとして保持するのみで、
 // engineへの反映(composeConfigFromMaterials等への接続)はPhase3で行う(Phase2の境界)。
+//
+// P3-0(docs/phase3-p3-0-plan.md v7、附録A.3)でrotor/body/bearingアセンブリ・
+// gear WearStateの拡張を追加した。computeCompositeGearDamageFractionは
+// src/materials/degradationApplication.tsに定義し、本ファイルからimportする
+// (適用関数群と同じ場所に置く、2.2節ファイル配置表)。
 
-import { BATTERY_MATERIALS, BRUSH_MATERIALS, COATING_MATERIALS, GEAR_MATERIALS, MAGNET_MATERIALS, WIRE_MATERIALS } from './materials';
+import { BATTERY_MATERIALS, BODY_MATERIALS, BRUSH_MATERIALS, COATING_MATERIALS, GEAR_MATERIALS, MAGNET_MATERIALS, WIRE_MATERIALS } from './materials';
 import type { Material } from './materials';
+import { computeCompositeGearDamageFraction } from './degradationApplication';
 
 // materialMapping.tsが同型のID型(MagnetMaterialId等)を独自にexportしているが、
 // inventoryItem.tsは写像層へ依存させないため意図的に重複させる(層境界、v3レビュー)。
@@ -14,6 +20,11 @@ type BatteryMaterialId = (typeof BATTERY_MATERIALS)[number]['id'];
 type BrushMaterialId = (typeof BRUSH_MATERIALS)[number]['id'];
 type WireMaterialId = (typeof WIRE_MATERIALS)[number]['id'];
 type CoatingMaterialId = (typeof COATING_MATERIALS)[number]['id'];
+type BodyMaterialId = (typeof BODY_MATERIALS)[number]['id'];
+
+// 軽微条件1(正式Fable指摘): gear総歯数はこの単一の設計較正値定数からのみ参照する
+// (v12 3.4節確定値=10、Phase3全ギヤ共通)。リテラル散在を禁じる。
+export const GEAR_TOTAL_TOOTH_COUNT = 10;
 
 /**
  * 恒久劣化状態(spec §5.2)。Phase2で個体劣化を追跡するのは磁石・ギヤ・ブラシの3ファミリーのみ。
@@ -26,8 +37,37 @@ type CoatingMaterialId = (typeof COATING_MATERIALS)[number]['id'];
  */
 export type WearState =
   | { readonly kind: 'magnet'; readonly demagnetizationFraction: number }
-  | { readonly kind: 'gear'; readonly toothDamageFraction: number }
+  | { readonly kind: 'gear'; readonly totalToothCount: number; readonly toothLossCount: number; readonly seizureFraction: number }
   | { readonly kind: 'brush'; readonly wearFraction: number };
+
+// EquipmentRole: 装備・恒久劣化を横断する役割の全体集合(v12 1.2節、P3-0附録A.3)。
+export type EquipmentRole = 'rotor' | 'battery' | 'gear' | 'brush' | 'magnet' | 'bearing' | 'body';
+
+/**
+ * 損壊可能アセンブリ(v12 1.2節、P3-0附録A.3)。実在素材カタログ(WearState)とは別の、
+ * ローター組立物・ボディ個体・軸受部の恒久損壊状態を表すスキーマ。Q7(正式Fable必須修正P2、
+ * 遡及申告・承認済み): `sourceWireMaterialId`は既存StackableStockEntry(wire)がmaterialId+
+ * quantityMのスタック在庫であり個体IDを持たないため、線材素材IDを保持する(個体IDではない)。
+ */
+export interface RotorAssemblyState {
+  assemblyId: string;
+  sourceWireMaterialId: WireMaterialId | null;
+  consumedWireM: number;
+  collapsed: boolean;
+  burnedOut: boolean;
+}
+
+export interface BodyPartState {
+  assemblyId: string;
+  materialId: BodyMaterialId;
+  scorchFraction: number;
+}
+
+export interface BearingAssemblyState {
+  assemblyId: string;
+  gearItemId: string;
+  seizureFraction: number;
+}
 
 /**
  * 個体管理アイテム(spec §5.2「個体管理するパーツ=磁石・ギヤ・電池・ブラシ」)。
@@ -65,6 +105,9 @@ export interface PlayerInventory {
   readonly cashG: number;
   readonly items: readonly InventoryItem[];
   readonly stackableStock: readonly StackableStockEntry[];
+  readonly rotorAssemblies: readonly RotorAssemblyState[];
+  readonly bodyParts: readonly BodyPartState[];
+  readonly bearingAssemblies: readonly BearingAssemblyState[];
 }
 
 // ---------------------------------------------------------------------------
@@ -104,7 +147,7 @@ function resolveFraction(wearState: WearState): number {
     case 'magnet':
       return wearState.demagnetizationFraction;
     case 'gear':
-      return wearState.toothDamageFraction;
+      return computeCompositeGearDamageFraction(wearState);
     case 'brush':
       return wearState.wearFraction;
   }

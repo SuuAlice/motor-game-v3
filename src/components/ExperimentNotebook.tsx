@@ -213,9 +213,6 @@ function CourseComparison({ first, second }: { first: CourseRunNotebookRecord; s
 export function ExperimentNotebook({ onClose }: ExperimentNotebookProps) {
   const sessions = useNotebookStore((s) => s.sessions);
   const courseRuns = useNotebookStore((s) => s.courseRuns);
-  const pendingSession = useNotebookStore((s) => s.pendingSession);
-  const confirmEviction = useNotebookStore((s) => s.confirmEviction);
-  const cancelEviction = useNotebookStore((s) => s.cancelEviction);
   const replaceSessions = useNotebookStore((s) => s.replaceSessions);
   const [detailId, setDetailId] = useState<string | null>(null);
   const [compareIds, setCompareIds] = useState<string[]>([]);
@@ -241,14 +238,16 @@ export function ExperimentNotebook({ onClose }: ExperimentNotebookProps) {
         <label className="cursor-pointer rounded border border-slate-300 bg-white px-3 py-2 text-sm font-bold">
           JSON読み込み<input type="file" accept="application/json" className="sr-only" onChange={async (event) => {
             const file = event.target.files?.[0]; if (!file) return;
-            try { replaceSessions(parseNotebookJson(await file.text())); setImportError(null); }
-            catch (error) { setImportError(error instanceof Error ? error.message : '読み込みに失敗しました。'); }
+            try {
+              const parsed = parseNotebookJson(await file.text());
+              const result = replaceSessions(parsed);
+              setImportError(result.ok ? null : result.reason);
+            } catch (error) { setImportError(error instanceof Error ? error.message : '読み込みに失敗しました。'); }
             event.target.value = '';
           }} />
         </label>
       </div>
       {importError && <p role="alert" className="rounded bg-red-50 p-2 text-sm text-red-700">{importError}</p>}
-      {pendingSession && <div role="alert" className="rounded border border-amber-300 bg-amber-50 p-3 text-sm"><p>上限50件です。最も古い記録を削除して新しい記録を保存しますか？</p><div className="mt-2 flex gap-2"><button onClick={confirmEviction} className="rounded bg-amber-600 px-2 py-1 font-bold text-white">保存する</button><button onClick={cancelEviction} className="underline">破棄する</button></div></div>}
       <section className="grid gap-2">
         <h3 className="font-bold text-slate-900">車体付きコース走行</h3>
         {courseComparison.length === 2 && <CourseComparison first={courseComparison[0]} second={courseComparison[1]} />}
