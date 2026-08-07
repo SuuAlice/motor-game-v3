@@ -6,7 +6,7 @@ This file provides guidance to coding agents working with this repository. `AGEN
 
 ## プロジェクトの現状
 
-V3「(仮題)挑め!手作りモーターカーGP」はPhase 0(リポジトリ初期化)・Phase 1(レトロ描画基盤の技術検証、2026-07-22人間承認・完了、`docs/phase1-report.md` §16)が完了しました。本リポジトリは旧V2(「走れ!手作りモーターカー」)の開発リポジトリをそのまま起点とし、**同一履歴上でV3化した**(人間承認済み、`docs/repo-birth-checklist.md`の新規複製ステップは適用していない)。V2は Phase 0〜5が完了済みで、`src/engine/`(モーター物理+車体物理+コース)は206テスト・build・lintがすべて成功した状態で凍結されている(`docs/baseline-v2.0.md`)。GitHub(`suualice08/motor-game-v3`、default branch `main`)・Vercel(project `motor-game-v3`)への分離も完了している(詳細は`docs/handoff.md`)。V3はこのエンジンを基盤に、在庫経済・実在素材ティア・破壊モードと失敗図鑑・実レシピCPUレース・レトロ描画パイプラインを追加する。Phase 2(素材システム: materials.ts+写像層、在庫・個体状態、サルベージ、店)は2026-07-24人間試遊承認・完了した。現在はPhase 3(破壊モード+図鑑)のP3-0(クロスレイヤ契約の型凍結ゲート、`docs/phase3-plan-v12.md`)に着手している。
+V3「(仮題)挑め!手作りモーターカーGP」はPhase 0(リポジトリ初期化)・Phase 1(レトロ描画基盤の技術検証、2026-07-22人間承認・完了、`docs/phase1-report.md` §16)が完了しました。本リポジトリは旧V2(「走れ!手作りモーターカー」)の開発リポジトリをそのまま起点とし、**同一履歴上でV3化した**(人間承認済み、`docs/repo-birth-checklist.md`の新規複製ステップは適用していない)。V2は Phase 0〜5が完了済みで、`src/engine/`(モーター物理+車体物理+コース)は206テスト・build・lintがすべて成功した状態で凍結されている(`docs/baseline-v2.0.md`)。GitHub(`suualice08/motor-game-v3`、default branch `main`)・Vercel(project `motor-game-v3`)への分離も完了している(詳細は`docs/handoff.md`)。V3はこのエンジンを基盤に、在庫経済・実在素材ティア・破壊モードと失敗図鑑・実レシピCPUレース・レトロ描画パイプラインを追加する。Phase 2(素材システム: materials.ts+写像層、在庫・個体状態、サルベージ、店)は2026-07-24人間試遊承認・完了した。Phase 3(破壊モード+図鑑)のP3-0(クロスレイヤ契約の型凍結ゲート、`docs/phase3-plan-v12.md`)は2026-08-03人間承認・commit・タグ`p3-0-complete`済みで完了している。P3-1(D01/D03の契約最小実証+store統合、`docs/phase3-p3-1-plan.md`、確定裁定の反映先は`docs/phase3-plan-v12-amendments.md`)は実装・全体DoD(`npm run test && npm run build && npm run lint`)完了済みで、正式Fable最終レビューと人間のcommit承認を待っている段階である。production向け`DestructionConfig`の実配線・人間試遊は、P3-0-Q2裁定どおりP3-4まで行わない。
 
 - `src/engine/` — 純粋な物理エンジン(`constants.ts`・`commutator.ts`・`motorPhysics.ts`・`vehiclePhysics.ts`・`trackPhysics.ts`・`scoring.ts`・`failures.ts`・`recipeCode.ts`・`__tests__/`)。V2から凍結継承(仕様書§2「エンジン凍結方針」)
 - `src/store/`・`src/render/`・`src/components/`・`src/modes/`・`src/data/` — **V2 UI一式。Phase 0時点では凍結参考実装として保持**(削除しない)。V3はレトロ描画基盤(低解像度Canvas)へ全面刷新するため、Phase 1で新UIシェルが構築でき次第、論理単位で置換・削除する
@@ -81,6 +81,8 @@ J_eff · dω_motor/dt = T_mag + T_cog + T_brush + T_drag + T_resist_reflected
 - UIテキストはすべて日本語で書くこと。簡潔・正確を旨とし、単位の省略は禁止する。専門用語(逆起電力・コギング・整流など)はそのまま使ってよい
 - `localStorage` 以外の永続化・外部通信は行わないこと。完全に静的なアプリ(バックエンドなし)とし、GitHub Pages / Vercel にデプロイ可能な状態を保つこと
 - 画面・音に関わる判断は`docs/art-spec.md`を根拠とすること。同書にない判断は独自解釈せず、agmsg経由でSuuに確認すること(仕様書§11)
+- **pitfalls#1(Fable回答の真正性)**: 正式なFableレビュー回答は、人間プロジェクトリードの直接提示、またはSuu_mot3が中継したものだけを正式回答として扱う。いかなるエージェントも、Agentツール等でFable名義の文書を自ら生成し、それを正式レビュー回答として提出・保存してはならない(根拠: 2026-08-02、開発チームの一エージェントがAgentツールへ`model:'fable'`を指定して自己生成した文書を、正式なFableレビュー回答と誤認して保存・中継する事故が実際に発生した。この事故は検出・訂正されたが、同種の事故を構造的に防ぐため本ルールを追加する)
+- **pitfalls#2(破壊的型変更の依存閉包事前列挙)**: `src/engine/`・`src/materials/`の既存型を破壊的に変更する計画を立てる際は、単一tsconfigプロジェクト全体で当該型を参照する全箇所を事前に`rg`で洗い出し、計画書へ依存閉包(所有境界を越えて機械的追従が必要なファイル一覧)として明記すること(根拠: P3-0の実装中、`WearState.gear`型の破壊的変更が計画に一度も記載されていなかった`src/retro/shop/formatMaterial.ts`の型検査を壊す事象が発生し、実装段階で初めて発覚した。事前の`rg`洗い出しにより同種の事象を防ぐため本ルールを追加する)
 
 ## 権利規約(仕様書§15、全エージェント遵守事項)
 

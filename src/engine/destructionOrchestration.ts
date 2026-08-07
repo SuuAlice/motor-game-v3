@@ -1,15 +1,32 @@
-// P3-0(docs/phase3-p3-0-plan.md v7、docs/phase3-plan-v12.md)。RunAccumulator操作・
-// RunOutcome生成・RunSnapshot capture/restore・DestructionConfig検証を担う。
-// `classifyTerminalModes`・`stampPhysicsSnapshot`・`asNonEmpty`・`buildMotorOnlyFrameInput`・
-// `stepMotorWithDestruction`・`stepTestRunWithDestruction`・`stepTrackRunWithDestruction`は
-// P3-1以降で追加する(P3-0では作らない)。
+// P3-0(docs/phase3-p3-0-plan.md v7、docs/phase3-plan-v12.md)+P3-1(docs/phase3-p3-1-plan.md v7)。
+// RunAccumulator操作・RunOutcome生成・RunSnapshot capture/restore・DestructionConfig検証・
+// stepMotorWithDestruction(motor-onlyラッパー)を担う。`stepTestRunWithDestruction`・
+// `stepTrackRunWithDestruction`はP3-2/P3-4以降で追加する。
 
+import { computeElectricalState, didCollapseJustHappen, step } from './motorPhysics';
 import type { MotorConfig, SimState } from './motorPhysics';
 import type { CarConfig, FailureCode, VehicleSimState } from './vehiclePhysics';
 import { createValidatedTrack } from './trackPhysics';
 import type { TrackDefinition, ValidatedTrackDefinition } from './trackPhysics';
-import { createInitialDestructionState } from './destructionModes';
-import type { DestructionModeId, DestructionState, FireExposureRole, PhysicsSnapshotAtT, UnstampedDestructionEvent } from './destructionModes';
+import { advanceDestructionState, createInitialDestructionState, validateFireExposureProfile } from './destructionModes';
+import type {
+  BatteryDestructionConfig,
+  DestructionConfig,
+  DestructionFrameInput,
+  DestructionModeId,
+  DestructionRunContext,
+  DestructionState,
+  FireExposureProfile,
+  GearBreakageProfile,
+  PhysicsSnapshotAtT,
+  UnstampedDestructionEvent,
+} from './destructionModes';
+
+// 正式Fable P3-1-Q2(a)・P3-1-Q7(a)裁定(2026-08-03T09:05・2026-08-03T16:13確定): 型の所有は
+// destructionModes.ts(leaf)。ここでは既存の公開importパスを維持するためre-exportのみ行う
+// (公開面不変、契約変更ではない)。
+export type { BatteryDestructionConfig, DestructionConfig, DestructionRunContext, FireExposureProfile, GearBreakageProfile };
+export { validateFireExposureProfile };
 
 // ---------------------------------------------------------------------------
 // DegradationDiff・DestructionEvent(公開型)
@@ -43,8 +60,17 @@ export interface RunAccumulator {
   terminalModeCandidates: readonly DestructionModeId[]; // D02発火到達・D03・D04炎上到達・D06全損・D09焼付き
 }
 
-export function createRunAccumulator(replaySnapshot: RunSnapshot, batteryProfile: 'lipo' | 'nonLipo'): RunAccumulator {
-  return { events: [], destructionState: createInitialDestructionState(batteryProfile), replaySnapshot, terminalModeCandidates: [] };
+// 正式Fable P3-1-Q6(a)裁定(2026-08-03T09:05確定、人間再承認済み2026-08-04): batteryProfileを
+// 独立引数として受け取らず、replaySnapshot.destructionConfig.battery.profileから一意に導出する。
+// 不一致状態(destructionStateとdestructionConfigのbattery.profileの食い違い)を構築不能にする
+// (fail-fastではなく構造的に不可能化。P3-0公開シグネチャの変更のため人間再承認対象、済)。
+export function createRunAccumulator(replaySnapshot: RunSnapshot): RunAccumulator {
+  return {
+    events: [],
+    destructionState: createInitialDestructionState(replaySnapshot.destructionConfig.battery.profile),
+    replaySnapshot,
+    terminalModeCandidates: [],
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -99,7 +125,7 @@ export function finalizeRun(accumulator: RunAccumulator, endSignal: RunEndSignal
 }
 
 // ---------------------------------------------------------------------------
-// deriveDegradationDiffs(正式Fable Q6裁定=案(a)。2値/カウント差分のみP3-0実装。
+// deriveDegradationDiffs(正式Fable P3-0-Q6裁定=案(a)。2値/カウント差分のみP3-0実装。
 // 連続量deltaFraction換算(D04のmagnet/body scorch・D05・D07・D09)は較正定数が
 // 未確定のためP3-2〜P3-4の各該当ステップで追加する。段階実装の不変条件
 // 「advanceDestructionStateは差分換算が実装済みのモードのイベントしか発行してはならない」
@@ -125,7 +151,7 @@ export function deriveDegradationDiffs(events: readonly DestructionEvent[], _fin
         break;
       case 'D04':
         // D04イベントは炎上到達(stage:'burning')時のみ発行される設計(v12 2.4節)。
-        // magnet/body延焼のdeltaFraction換算はQ6裁定によりP3-2で追加する。
+        // magnet/body延焼のdeltaFraction換算はP3-0-Q6裁定によりP3-2で追加する。
         if (event.causeLog.stage === 'burning') batteryConsumed = true;
         break;
       case 'D06':
@@ -134,7 +160,7 @@ export function deriveDegradationDiffs(events: readonly DestructionEvent[], _fin
       case 'D05':
       case 'D07':
       case 'D09':
-        // 連続量deltaFraction換算はQ6裁定によりD05→P3-3、D07/D09→P3-4で追加する。
+        // 連続量deltaFraction換算はP3-0-Q6裁定によりD05→P3-3、D07/D09→P3-4で追加する。
         break;
     }
   }
@@ -148,44 +174,12 @@ export function deriveDegradationDiffs(events: readonly DestructionEvent[], _fin
 }
 
 // ---------------------------------------------------------------------------
-// FireExposureProfile・DestructionRunContext
+// DestructionConfigDraft(段階導入対応、Draft/完成版分離)。BatteryDestructionConfig・
+// GearBreakageProfile・DestructionConfig自体はdestructionModes.ts所有(正式Fable P3-1-Q7(a)
+// 裁定、上記でimport/re-export済み)。ここに残るのはDraft・validator・restore用raw
+// validatorのみ——復元・値域検証はstoreのRunSnapshot責務に属するorchestration固有の役割
+// であり、leafに引きずり込むべきでないため。
 // ---------------------------------------------------------------------------
-
-export interface FireExposureProfile {
-  bodyEquipped: boolean;
-  adjacentRolesEquipped: readonly Exclude<FireExposureRole, 'body'>[];
-}
-
-export function validateFireExposureProfile(raw: {
-  bodyEquipped: boolean;
-  adjacentRolesEquipped: readonly Exclude<FireExposureRole, 'body'>[];
-}): { ok: true; profile: FireExposureProfile } | { ok: false; reason: string } {
-  const validRoles: readonly string[] = ['magnet'];
-  for (const role of raw.adjacentRolesEquipped) {
-    if (!validRoles.includes(role as string)) {
-      return { ok: false, reason: `adjacentRolesEquippedに不正な値が含まれています: ${String(role)}` };
-    }
-  }
-  return { ok: true, profile: { bodyEquipped: raw.bodyEquipped, adjacentRolesEquipped: raw.adjacentRolesEquipped } };
-}
-
-export type DestructionRunContext =
-  | { context: 'motor'; fireExposureProfile: FireExposureProfile; gearTotalToothCount: null }
-  | { context: 'vehicle'; fireExposureProfile: FireExposureProfile; gearTotalToothCount: number };
-
-// ---------------------------------------------------------------------------
-// DestructionConfig(段階導入対応、Draft/完成版分離)
-// ---------------------------------------------------------------------------
-
-export type BatteryDestructionConfig =
-  | { profile: 'nonLipo'; shortCircuitDurationLimitS: number }
-  | {
-      profile: 'lipo';
-      shortCircuitDurationLimitS: number;
-      runawayHeatThreshold: number;
-      unsafeDischargeStartRatio: number;
-      stageDurations: { swellingS: number; smokingS: number };
-    };
 
 export interface DestructionConfigDraft {
   battery?: BatteryDestructionConfig;
@@ -194,17 +188,6 @@ export interface DestructionConfigDraft {
   d06?: { breakage: GearBreakageProfile };
   d07?: { magnetHeatGaugeLimit: number; reversibleDroopThreshold: number };
   d09?: { bearingSeizureGaugeLimit: number };
-}
-
-export type GearBreakageProfile = { kind: 'breakable'; gearStrengthThresholdNm: number } | { kind: 'nonBreakable' };
-
-export interface DestructionConfig {
-  battery: BatteryDestructionConfig;
-  d02: { smokeGaugeThreshold: number; coilOverheatGaugeLimit: number };
-  d05: { brushSparkDurationLimitS: number; brushSparkCurrentThresholdA: number };
-  d06: { breakage: GearBreakageProfile };
-  d07: { magnetHeatGaugeLimit: number; reversibleDroopThreshold: number };
-  d09: { bearingSeizureGaugeLimit: number };
 }
 
 export interface InvalidConfigField {
@@ -721,11 +704,98 @@ export function restoreRunSnapshot(raw: unknown): RestoreRunSnapshotResult {
 }
 
 // ---------------------------------------------------------------------------
-// DestructionStepResult(型のみ。stepXxxWithDestructionラッパー本体はP3-1以降)
+// DestructionStepResult・stepMotorWithDestruction(P3-1)。stepTestRunWithDestruction・
+// stepTrackRunWithDestruction(vehicle/track版)はP3-2/P3-4以降で追加する。
 // ---------------------------------------------------------------------------
 
 export interface DestructionStepResult<TPhysicsState> {
   physicsState: TPhysicsState;
   accumulator: RunAccumulator;
   termination: RunOutcome | null;
+}
+
+/**
+ * 本関数は分類規則のみを定める。各モードのイベントが実際に発行可能かは正式Fable P3-0-Q6
+ * 不変条件(deriveDegradationDiffsの段階実装、`createRunAccumulator`に関するP3-1-Q6とは別物)が
+ * 別途統制する。
+ */
+export function classifyTerminalModes(events: readonly UnstampedDestructionEvent[]): readonly DestructionModeId[] {
+  const result: DestructionModeId[] = [];
+  for (const event of events) {
+    if (event.mode === 'D02') result.push('D02');
+    if (event.mode === 'D03') result.push('D03');
+    if (event.mode === 'D04' && event.causeLog.stage === 'burning') result.push('D04');
+    if (event.mode === 'D06' && event.isTotalLoss) result.push('D06');
+    if (event.mode === 'D09') result.push('D09');
+  }
+  return result;
+}
+
+function stampPhysicsSnapshot(
+  events: readonly UnstampedDestructionEvent[],
+  snapshot: PhysicsSnapshotAtT,
+): readonly DestructionEvent[] {
+  return events.map((e) => ({ ...e, physicsSnapshotAtT: snapshot }));
+}
+
+function asNonEmpty<T>(arr: readonly T[]): readonly [T, ...T[]] | null {
+  return arr.length > 0 ? (arr as readonly [T, ...T[]]) : null;
+}
+
+function buildMotorOnlyFrameInput(config: MotorConfig, prev: SimState, next: SimState): DestructionFrameInput {
+  const theoreticalCurrentA = computeElectricalState(config, prev.theta, prev.omega).current;
+  return {
+    currentA: next.current,
+    theoreticalCurrentA,
+    rpm: next.rpm,
+    batteryHeat: next.batteryHeat,
+    shorted: next.shorted,
+    chatterFramesLeft: next.chatterFramesLeft,
+    coilCollapsedRisingEdge: didCollapseJustHappen(prev, next),
+    loadTorqueNm: undefined,
+    energyUsedRatio: undefined,
+  };
+}
+
+// motorPhysics.tsの`type Rng = () => number`は非exportのため、destructionOrchestration.ts側から
+// 直接参照できない。motorPhysics.tsは無改修のまま、既存`step`の公開シグネチャから型を導出する。
+type MotorStepRng = NonNullable<Parameters<typeof step>[3]>;
+
+/**
+ * Phase 3 wrapper共通不変条件(正式Fable裁定P3-1-Q9-2確定): 走行開始時に確定する構成情報
+ * (config・destructionConfig)は`accumulator.replaySnapshot`を唯一の出典とし、引数として
+ * 独立に受け取らない。引数はフレームごとに変わりうる動的入力(motorState・dt・rng・
+ * loadTorque・effectiveInertia)に限る。同一の`RunSnapshot`から生成した`accumulator`を使う限り、
+ * config・destructionConfigの不一致は型上構築不能である(P3-1-Q6(a)と同じ「fail-fastではなく
+ * 構築不能」の原則を全base configへ一貫適用する、P3-1-Q9確定)。
+ */
+export function stepMotorWithDestruction(
+  motorState: SimState,
+  accumulator: RunAccumulator,
+  dt: number,
+  rng?: MotorStepRng,
+  loadTorque?: number,
+  effectiveInertia?: number,
+): DestructionStepResult<SimState> {
+  const config = accumulator.replaySnapshot.motorConfig; // 唯一の出典(P3-1-Q9-2)
+  const destructionConfig = accumulator.replaySnapshot.destructionConfig; // 唯一の出典(P3-1-Q9-2)
+  const physicsState = step(config, motorState, dt, rng, loadTorque, effectiveInertia); // 既存、無改修
+  const frame = buildMotorOnlyFrameInput(config, motorState, physicsState); // 同一のconfigを使用(P3-1-Q9-2)
+  const { state, events } = advanceDestructionState(
+    accumulator.destructionState, frame, destructionConfig, accumulator.replaySnapshot.runContext, dt,
+  );
+  const snapshot: PhysicsSnapshotAtT = { context: 'motor', state: physicsState };
+  const stampedEvents = stampPhysicsSnapshot(events, snapshot);
+  const nextTerminalModeCandidates = [...accumulator.terminalModeCandidates, ...classifyTerminalModes(events)];
+  const nextAccumulator: RunAccumulator = {
+    ...accumulator,
+    destructionState: state,
+    events: [...accumulator.events, ...stampedEvents],
+    terminalModeCandidates: nextTerminalModeCandidates,
+  };
+  const nonEmptyTerminalModes = asNonEmpty(nextTerminalModeCandidates);
+  const termination = nonEmptyTerminalModes
+    ? finalizeDestructionRun({ ...nextAccumulator, terminalModeCandidates: nonEmptyTerminalModes })
+    : null;
+  return { physicsState, accumulator: nextAccumulator, termination };
 }

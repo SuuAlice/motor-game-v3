@@ -1,8 +1,11 @@
-// P3-0サブステップ2(docs/phase3-p3-0-plan.md v7 8.1節)。runOutcomeApplication.tsの
-// 純粋ロジックをテストする。lease stale判定(isLeaseHeartbeatStale)自体はpure関数として
-// 本ファイルでテストするが、heartbeat間隔5秒のタイマー管理・performApplyRunOutcomeの
-// 単一set()・codexRecords配列管理はsaveStore.ts(サブステップ3、brabit_mot3実装)側の
-// 責務のため、本ファイルでは扱わない。
+// P3-0サブステップ2(docs/phase3-p3-0-plan.md v7 8.1節)+P3-1サブステップ4(docs/phase3-p3-1-plan.md
+// v11 §1.2・§7)。runOutcomeApplication.tsの純粋ロジックをテストする。lease stale判定
+// (isLeaseHeartbeatStale)自体はpure関数として本ファイルでテストするが、heartbeat間隔5秒の
+// タイマー管理・performApplyRunOutcomeの単一set()・codexRecords配列管理はsaveStore.ts
+// (サブステップ3、brabit_mot3実装)側の責務のため、本ファイルでは扱わない。
+// P3-1サブステップ4は、stepMotorWithDestructionが実際に生成したRunOutcomeをapplyRunOutcomeへ
+// 流し込む統合テストのみを追加する(1.2節)。applyRunOutcome自体のaction契約(P3-0で検証済み)は
+// 再検証しない。saveStore.ts・gameStore.tsはいずれも無改修(P3-0-Q2裁定、production配線はP3-4)。
 import { describe, expect, it } from 'vitest';
 import {
   abandonPendingApplication,
@@ -27,8 +30,24 @@ import {
 import type { PlayerInventory } from '../../materials/inventoryItem';
 import { GEAR_TOTAL_TOOTH_COUNT } from '../../materials/inventoryItem';
 import { INITIAL_CASH_G } from '../shopEconomy';
-import type { DestructionRunContext, RunOutcome } from '../../engine/destructionOrchestration';
+import {
+  captureRunSnapshot,
+  createRunAccumulator,
+  finalizeRun,
+  restoreRunSnapshot,
+  stepMotorWithDestruction,
+  type CaptureRunSnapshotInput,
+  type DestructionConfig,
+  type RunAccumulator,
+} from '../../engine/destructionOrchestration';
+import type { DestructionRunContext, RunOutcome, RunSnapshot } from '../../engine/destructionOrchestration';
 import type { DestructionModeId } from '../../engine/destructionModes';
+import { createInitialDestructionState } from '../../engine/destructionModes';
+import type { MotorConfig, SimState } from '../../engine/motorPhysics';
+import { COIL_DEFORM_FRAMES, COIL_DEFORM_OMEGA } from '../../engine/constants';
+import type { CarConfig, VehicleSimState } from '../../engine/vehiclePhysics';
+import { createInitialVehicleState } from '../../engine/vehiclePhysics';
+import type { TrackDefinition } from '../../engine/trackPhysics';
 
 function baseInventory(): PlayerInventory {
   return createInitialPlayerInventoryAndLoadout().inventory;
@@ -559,5 +578,272 @@ describe('runOutcomeApplication.ts: validator負例の補強(Suu指摘#6)', () =
   it('59. validateEquipmentLoadout: magnetItemIdがfamily不一致(gearの個体を指す)を検出する(battery以外の代表例)', () => {
     const result = validateEquipmentLoadout({ ...baseLoadout(), magnetItemId: 'initial-gear-01' }, baseInventory());
     expect(result).toMatchObject({ ok: false, missingRole: 'magnet' });
+  });
+});
+
+// P3-1サブステップ4(docs/phase3-p3-1-plan.md v11 §1.2・§7): stepMotorWithDestructionが実際に
+// 生成したRunOutcomeをapplyRunOutcomeへ流し込む統合テスト。applyRunOutcome自体のaction契約
+// (lease/runSequence/原子性、P3-0で検証済み)は再検証しない。saveStore.ts・gameStore.tsは無改修
+// (P3-0-Q2裁定、production配線はP3-4)。
+describe('P3-1サブステップ4: stepMotorWithDestruction → applyRunOutcome統合(fixtureベース)', () => {
+  function goodMotorConfig(overrides: Partial<MotorConfig> = {}): MotorConfig {
+    return {
+      coilTurns: 80,
+      slitWidthMm: 1.5,
+      sandingQuality: 0.9,
+      brushPressure: 0.3,
+      magnetStrength: 1.0,
+      magnetDistanceMm: 10,
+      batteryVoltage: 3.0,
+      axisOffsetMm: 0,
+      ...overrides,
+    };
+  }
+
+  function goodDestructionConfig(shortCircuitDurationLimitS: number): DestructionConfig {
+    return {
+      battery: { profile: 'nonLipo', shortCircuitDurationLimitS },
+      d02: { smokeGaugeThreshold: 0.6, coilOverheatGaugeLimit: 1 },
+      d05: { brushSparkDurationLimitS: 0.5, brushSparkCurrentThresholdA: 3 },
+      d06: { breakage: { kind: 'breakable', gearStrengthThresholdNm: 0.5 } },
+      d07: { magnetHeatGaugeLimit: 1, reversibleDroopThreshold: 0.7 },
+      d09: { bearingSeizureGaugeLimit: 1 },
+    };
+  }
+
+  function initialSimState(overrides: Partial<SimState> = {}): SimState {
+    return { theta: 0, omega: 0, current: 0, backEmf: 0, shorted: false, running: true, rpm: 0, chatterFramesLeft: 0, batteryHeat: 0, coilCollapsed: false, highSpeedFrameCount: 0, ...overrides };
+  }
+
+  function motorSnapshotInput(overrides: Partial<CaptureRunSnapshotInput> = {}): CaptureRunSnapshotInput {
+    return {
+      motorConfig: goodMotorConfig(),
+      carConfig: null,
+      destructionConfig: goodDestructionConfig(2),
+      runContext: motorRunContext(),
+      initialMotorState: initialSimState(),
+      initialVehicleState: null,
+      track: null,
+      seed: 1,
+      initialDestructionState: createInitialDestructionState('nonLipo'),
+      ...overrides,
+    };
+  }
+
+  // destructionOrchestration.test.tsのstandardCarConfig/vehicleSnapshotInput/goodTrackと
+  // 同型のvehicle文脈fixture(63番のtest-run/track-run文脈で使用)。
+  function standardCarConfig(overrides: Partial<CarConfig> = {}): CarConfig {
+    return {
+      massG: 150,
+      gearRatio: 4,
+      gearEfficiency: 0.8,
+      wheelDiameterMm: 30,
+      tireGrip: 0.7,
+      axleFriction: 0,
+      wheelAlignmentMm: 0,
+      centerOfMassHeightMm: 20,
+      motorMountOffsetMm: 0,
+      ...overrides,
+    };
+  }
+
+  function goodTrack(): TrackDefinition {
+    return { id: 'track-1', name: 'テストコース', description: '', segments: [{ lengthM: 10, slopeDeg: 0, surfaceGrip: 0.7, roughness: 0.2 }], objectives: [] };
+  }
+
+  function vehicleSnapshotInput(overrides: Partial<CaptureRunSnapshotInput> = {}): CaptureRunSnapshotInput {
+    const motorConfig = goodMotorConfig();
+    const carConfig = standardCarConfig();
+    const vehicleState: VehicleSimState = createInitialVehicleState(motorConfig, carConfig);
+    return {
+      motorConfig,
+      carConfig,
+      destructionConfig: goodDestructionConfig(2),
+      runContext: vehicleRunContext(),
+      initialMotorState: vehicleState.motor,
+      initialVehicleState: vehicleState,
+      track: null,
+      seed: 1,
+      initialDestructionState: createInitialDestructionState('nonLipo'),
+      ...overrides,
+    };
+  }
+
+  // envelope組み立て用: captureEquipmentIdSnapshotを実際に経由し、production配線を模倣しない
+  // 範囲でテストコード内のみでRunApplicationEnvelopeを構築する。equipmentSnapshotのcontextは
+  // outcome.replaySnapshot.runContext.contextから一意に導出する(63番のcontext非依存性テストが
+  // motor/vehicle双方の文脈を独立に構築できるようにするため、別引数として渡さず単一の出典に従う)。
+  function envelopeFor(outcome: RunOutcome, runSequence: number): RunApplicationEnvelope {
+    const { loadout } = createInitialPlayerInventoryAndLoadout();
+    const snapshot = captureEquipmentIdSnapshot(loadout as EquipmentLoadout & { batteryItemId: string }, outcome.replaySnapshot.runContext.context);
+    return {
+      runKey: { saveId: 'save-1', runSequence },
+      leaseToken: 'lease-a',
+      outcome,
+      equipmentSnapshot: snapshot,
+      notebookRecord: { kind: 'session', record: {} as never },
+    };
+  }
+
+  it('60. motor-only、manualAbort終了: D01の恒久劣化(rotorAssemblies.collapsed)がapplyRunOutcomeで正しく反映される', () => {
+    const snapshot = captureRunSnapshot(motorSnapshotInput({
+      motorConfig: goodMotorConfig({ varnished: false, brushPressure: 0.05, magnetDistanceMm: 5 }),
+    }));
+    let accumulator: RunAccumulator = createRunAccumulator(snapshot);
+    let motorState: SimState = initialSimState({ omega: COIL_DEFORM_OMEGA * 3 });
+    let sawD01 = false;
+
+    for (let i = 0; i < COIL_DEFORM_FRAMES + 60 && !sawD01; i++) {
+      const result = stepMotorWithDestruction(motorState, accumulator, 1 / 120);
+      motorState = result.physicsState;
+      accumulator = result.accumulator;
+      expect(result.termination).toBeNull(); // D01は非終端。この構成でD03(短絡)条件は満たされない
+      sawD01 = accumulator.events.some((e) => e.mode === 'D01');
+    }
+    expect(sawD01).toBe(true);
+
+    const outcome = finalizeRun(accumulator, { kind: 'manualAbort' });
+    expect(outcome.endReason).toBe('manualAbort');
+    expect(outcome.degradationDiffs).toContainEqual({ role: 'rotor', kind: 'collapse' });
+
+    const envelope = envelopeFor(outcome, 1);
+    const result = applyRunOutcome(envelope, baseInventory(), new Set(), goodSaveMeta());
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      const rotor = result.nextInventory.rotorAssemblies.find((r) => r.assemblyId === envelope.equipmentSnapshot.rotorAssemblyId);
+      expect(rotor?.collapsed).toBe(true);
+      expect(result.result.applied).toBe(true);
+    }
+  });
+
+  it('61. motor-only、D03発火: battery個体消滅+destructionTerminal終了がapplyRunOutcomeで正しく反映される', () => {
+    const snapshot = captureRunSnapshot(motorSnapshotInput({
+      motorConfig: goodMotorConfig({ slitWidthMm: 0 }), // 持続短絡
+      destructionConfig: goodDestructionConfig(1 / 120),
+    }));
+    let accumulator: RunAccumulator = createRunAccumulator(snapshot);
+    let motorState: SimState = initialSimState();
+    let termination: RunOutcome | null = null;
+
+    for (let i = 0; i < 30 && termination === null; i++) {
+      const result = stepMotorWithDestruction(motorState, accumulator, 1 / 120);
+      motorState = result.physicsState;
+      accumulator = result.accumulator;
+      termination = result.termination;
+    }
+    expect(termination).not.toBeNull();
+    expect(termination!.endReason).toBe('destructionTerminal');
+    expect(termination!.degradationDiffs).toContainEqual({ role: 'battery', kind: 'consumed' });
+
+    const envelope = envelopeFor(termination!, 1);
+    const result = applyRunOutcome(envelope, baseInventory(), new Set(), goodSaveMeta());
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.nextInventory.items.some((item) => item.itemId === envelope.equipmentSnapshot.batteryItemId)).toBe(false);
+      expect(result.result.consumedEquipmentIds).toContainEqual({ role: 'battery', id: envelope.equipmentSnapshot.batteryItemId });
+    }
+  });
+
+  it('62. 同一run内でD01(非終端)発火後にD03(終端)が発火した場合、両方のdegradationDiffsが単一のRunOutcomeへ集約され、単一のapplyRunOutcome呼び出しで両方反映される', () => {
+    // 実測(scratch script、npx tsx)で確認済み: この構成ではD01がframe 359で発火する。
+    // shortCircuitDurationLimitSをそれより十分後(3.2s=frame 384相当)に設定し、D01が先に、
+    // D03がその後に同一run内で発火する順序を固定する。
+    const snapshot = captureRunSnapshot(motorSnapshotInput({
+      motorConfig: goodMotorConfig({ varnished: false, brushPressure: 0.05, magnetDistanceMm: 5, slitWidthMm: 0 }),
+      destructionConfig: goodDestructionConfig(3.2),
+    }));
+    let accumulator: RunAccumulator = createRunAccumulator(snapshot);
+    let motorState: SimState = initialSimState({ omega: COIL_DEFORM_OMEGA * 3 });
+    let termination: RunOutcome | null = null;
+
+    for (let i = 0; i < 400 && termination === null; i++) {
+      const result = stepMotorWithDestruction(motorState, accumulator, 1 / 120);
+      motorState = result.physicsState;
+      accumulator = result.accumulator;
+      termination = result.termination;
+    }
+    expect(termination).not.toBeNull();
+    expect(termination!.endReason).toBe('destructionTerminal');
+    // D01が先・D03が後という順序を、コメント上の実測時刻だけでなくevents配列そのもので機械検証する。
+    // P3-1はD01/D03の2分岐のみを実装しているため、mode列は['D01','D03']に一意に定まる。
+    expect(termination!.events.map((e) => e.mode)).toEqual(['D01', 'D03']);
+    const d01Index = termination!.events.findIndex((e) => e.mode === 'D01');
+    const d03Index = termination!.events.findIndex((e) => e.mode === 'D03');
+    expect(d01Index).toBeGreaterThanOrEqual(0);
+    expect(d03Index).toBeGreaterThan(d01Index);
+    expect(termination!.degradationDiffs).toContainEqual({ role: 'rotor', kind: 'collapse' });
+    expect(termination!.degradationDiffs).toContainEqual({ role: 'battery', kind: 'consumed' });
+
+    const envelope = envelopeFor(termination!, 1);
+    const result = applyRunOutcome(envelope, baseInventory(), new Set(), goodSaveMeta());
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      const rotor = result.nextInventory.rotorAssemblies.find((r) => r.assemblyId === envelope.equipmentSnapshot.rotorAssemblyId);
+      expect(rotor?.collapsed).toBe(true);
+      expect(result.nextInventory.items.some((item) => item.itemId === envelope.equipmentSnapshot.batteryItemId)).toBe(false);
+      expect(result.result.resolvedDegradations).toHaveLength(2); // rotor collapse + battery consumed、単一呼び出しで両方反映
+    }
+  });
+
+  // 63. context非依存性(正式Fable P3-1-Q4(a)裁定、計画v11 §7.2・§7.3): motor-only/test-run/
+  // track-runの3文脈それぞれで、手構築RunOutcomeが有効なRunSnapshot(空castではなくcaptureRunSnapshot
+  // が実際に生成した値)を積んでいてもapplyRunOutcomeへ正しく到達することをtable-drivenで検証する。
+  // test-run/track-runは実wrapper未導入(P3-2/P3-4)のため手構築RunOutcome fixtureでよいという
+  // 正式Fable裁定どおりだが、中のRunSnapshotはrestoreRunSnapshot(実行時validator契約)を
+  // 満たす有効値でなければならない。
+  const contextCases: Array<{
+    label: 'motor-only' | 'test-run' | 'track-run';
+    expectedContext: 'motor' | 'vehicle';
+    expectedTrackNonNull: boolean;
+    buildSnapshot: () => RunSnapshot;
+  }> = [
+    {
+      label: 'motor-only',
+      expectedContext: 'motor',
+      expectedTrackNonNull: false,
+      buildSnapshot: () => captureRunSnapshot(motorSnapshotInput()),
+    },
+    {
+      label: 'test-run',
+      expectedContext: 'vehicle',
+      expectedTrackNonNull: false,
+      buildSnapshot: () => captureRunSnapshot(vehicleSnapshotInput({ track: null })),
+    },
+    {
+      label: 'track-run',
+      expectedContext: 'vehicle',
+      expectedTrackNonNull: true,
+      buildSnapshot: () => captureRunSnapshot(vehicleSnapshotInput({ track: goodTrack() })),
+    },
+  ];
+
+  it.each(contextCases)('63-$label. context非依存性(正式Fable P3-1-Q4(a)裁定): $label文脈の手構築RunOutcome(有効なRunSnapshot込み)fixtureもapplyRunOutcomeへ正しく到達する', ({ expectedContext, expectedTrackNonNull, buildSnapshot }) => {
+    const snapshot = buildSnapshot();
+
+    // fixtureが本当に意図した文脈であることを先に確認する(track null/non-nullを含む)。
+    expect(snapshot.runContext.context).toBe(expectedContext);
+    expect(snapshot.track !== null).toBe(expectedTrackNonNull);
+
+    // 実行時validator契約(restoreRunSnapshot)を満たす有効値であることを確認する
+    // (captureRunSnapshotの出力をJSON round-tripしても壊れない、production同型の経路)。
+    const restored = restoreRunSnapshot(JSON.parse(JSON.stringify(snapshot)));
+    expect(restored.ok).toBe(true);
+
+    const outcome: RunOutcome = {
+      endReason: 'manualAbort',
+      events: [],
+      destructionState: createInitialDestructionState('nonLipo'), // 空castではなく有効値
+      degradationDiffs: [{ role: 'rotor', kind: 'collapse' }],
+      replaySnapshot: snapshot,
+    };
+    const envelope = envelopeFor(outcome, 1);
+    expect(envelope.equipmentSnapshot.context).toBe(expectedContext); // envelopeForのcontext自動導出を確認
+
+    const result = applyRunOutcome(envelope, baseInventory(), new Set(), goodSaveMeta());
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      const rotor = result.nextInventory.rotorAssemblies.find((r) => r.assemblyId === envelope.equipmentSnapshot.rotorAssemblyId);
+      expect(rotor?.collapsed).toBe(true);
+    }
   });
 });

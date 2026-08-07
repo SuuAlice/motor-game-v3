@@ -8,12 +8,15 @@ import {
   computeMagnetStrengthCalibration,
   computeWireDensityRatio,
   computeWireResistivityRatio,
+  mapBatteryDestructionProfile,
+  mapD03DestructionConfig,
   type MaterialCompositionBaseline,
   type MaterialSelection,
   type WireMaterialId,
 } from '../materialMapping';
-import { BATTERY_MATERIALS, GEAR_MATERIALS, MAGNET_MATERIALS, WIRE_MATERIALS, type WireMaterial } from '../materials';
+import { BATTERY_MATERIALS, GEAR_MATERIALS, MAGNET_MATERIALS, WIRE_MATERIALS, type BatteryMaterial, type WireMaterial } from '../materials';
 import { step, type MotorConfig, type SimState } from '../../engine/motorPhysics';
+import { BATTERY_HEAT_LIMIT } from '../../engine/constants';
 import { createInitialVehicleState, type CarConfig } from '../../engine/vehiclePhysics';
 import { createValidatedTrack, stepTrackRun, type TrackDefinition, type TrackSegment } from '../../engine/trackPhysics';
 
@@ -690,6 +693,159 @@ describe('materialMapping.ts Step7a(composeConfigFromMaterials: 合成純関数)
           expect(capacity.ratio).toBeGreaterThan(0);
         }
       }
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P3-1: 電池profile写像+D03較正値(docs/phase3-p3-1-plan.md v4 §2.3、正式Fable P3-1-Q3裁定)
+// ---------------------------------------------------------------------------
+
+const DT_P3_1 = 1 / 120;
+const NO_NOISE_RNG_P3_1 = () => 0.5;
+
+function p31BaseMotorConfig(overrides: Partial<MotorConfig> = {}): MotorConfig {
+  return {
+    coilTurns: 80,
+    slitWidthMm: 1.5,
+    sandingQuality: 0.9,
+    brushPressure: 0.3,
+    magnetStrength: 1.0,
+    magnetDistanceMm: 10,
+    batteryVoltage: 3.0,
+    axisOffsetMm: 0,
+    ...overrides,
+  };
+}
+
+function p31RestState(): SimState {
+  return {
+    theta: Math.PI / 4,
+    omega: 0,
+    current: 0,
+    backEmf: 0,
+    shorted: false,
+    running: true,
+    rpm: 0,
+    chatterFramesLeft: 0,
+    batteryHeat: 0,
+    coilCollapsed: false,
+    highSpeedFrameCount: 0,
+  };
+}
+
+// held-short(slitWidthMm=0固定)でBATTERY_HEAT_LIMITへ到達するまでのフレーム数を測定する
+// (sweep証跡)。到達しなければnullを返す。
+function measureHeatCapReachFrames(internalResistanceRatio: number, maxFrames = 3600): number | null {
+  const config = p31BaseMotorConfig({ slitWidthMm: 0, batteryInternalResistanceRatio: internalResistanceRatio });
+  let s = p31RestState();
+  for (let i = 1; i <= maxFrames; i++) {
+    s = step(config, s, DT_P3_1, NO_NOISE_RNG_P3_1);
+    if (s.batteryHeat >= BATTERY_HEAT_LIMIT) return i;
+  }
+  return null;
+}
+
+// アルカリ/NiMHの内部抵抗ratioを、裸の数値ではなくBATTERY_MATERIALS実データ+既存較正関数
+// (computeBatteryInternalResistanceRatioCalibration)から導出する(Suu指摘、素材写像が
+// 将来変わった場合にsweep証跡が乖離しないようにするため)。
+function findBatteryMaterial(id: 'battery-alkaline' | 'battery-nickel-metal-hydride'): BatteryMaterial {
+  const material = BATTERY_MATERIALS.find((b) => b.id === id);
+  if (!material) throw new Error(`テスト前提が崩れています: ${id}がBATTERY_MATERIALSに存在しません`);
+  return material;
+}
+
+function resolveInternalResistanceRatio(id: 'battery-alkaline' | 'battery-nickel-metal-hydride'): number {
+  const result = computeBatteryInternalResistanceRatioCalibration(findBatteryMaterial(id));
+  if (!result.ok) throw new Error(`テスト前提が崩れています: ${id}の内部抵抗較正値取得に失敗: ${result.reason}`);
+  return result.ratio;
+}
+
+describe('P3-1: 電池destruction profile写像とD03較正値のsweep証跡', () => {
+  it('mapBatteryDestructionProfileがBATTERY_MATERIALS実データどおりprofileを写像する', () => {
+    expect(mapBatteryDestructionProfile('battery-alkaline')).toBe('nonLipo');
+    expect(mapBatteryDestructionProfile('battery-nickel-metal-hydride')).toBe('nonLipo');
+    expect(mapBatteryDestructionProfile('battery-lithium-polymer')).toBe('lipo');
+  });
+
+  it('mapD03DestructionConfigが候補値3.0秒(profile: nonLipo)を返す(アルカリ・NiMH)', () => {
+    expect(mapD03DestructionConfig('battery-alkaline')).toEqual({ profile: 'nonLipo', shortCircuitDurationLimitS: 3.0 });
+    expect(mapD03DestructionConfig('battery-nickel-metal-hydride')).toEqual({ profile: 'nonLipo', shortCircuitDurationLimitS: 3.0 });
+  });
+
+  describe('sweep証跡(正式Fable P3-1-Q3確定手順: 受け入れ条件3点+heat上限到達時間との関係)', () => {
+    // 実測値(2026-08-04計測、npx tsxによる直接実行、本テストと同一の物理式・DT=1/120s):
+    //   アルカリ(内部抵抗ratio=computeBatteryInternalResistanceRatioCalibration経由=1.0):
+    //     held-short時、15フレーム(0.125秒)でBATTERY_HEAT_LIMIT到達
+    //   NiMH(同ratio=0.3): held-short時、16フレーム(0.1333秒)でBATTERY_HEAT_LIMIT到達
+    //   通常運用(短絡なし、120秒間): batteryHeatはアルカリ・NiMHとも終始0のまま。
+    //     訂正(Suu指摘): nextBatteryHeatは非短絡時もlossCurrent=currentとしてI²R発熱項を
+    //     計算しており、「短絡時のみ発熱を生む」設計ではない。この通常構成(適度な初速の
+    //     フリー走行、追加負荷なし)では、電流由来の発熱項をHEAT_DISSIPATION(自然放熱)が
+    //     上回るため蓄積しないだけであり、発熱項自体は非短絡時にも存在する。
+    // heat上限到達時間(約0.13秒)は候補値3.0秒よりはるかに早いため、この構成でのD03実発火
+    // タイミングは短絡持続下限(3.0秒)そのものに支配される(heat条件は先に満たされ待機状態になる)。
+
+    it('受け入れ条件1: 通常運用(短絡なし)ではBATTERY_HEAT_LIMITに到達しない(アルカリ・NiMHそれぞれ120秒間)', () => {
+      const alkalineRatio = resolveInternalResistanceRatio('battery-alkaline');
+      const nimhRatio = resolveInternalResistanceRatio('battery-nickel-metal-hydride');
+      const frames = Math.round(120 / DT_P3_1);
+
+      const runNormalOperation = (ratio: number): number => {
+        const config = p31BaseMotorConfig({ batteryInternalResistanceRatio: ratio });
+        let s: SimState = { ...p31RestState(), omega: 50 };
+        let maxHeat = 0;
+        for (let i = 0; i < frames; i++) {
+          s = step(config, s, DT_P3_1, NO_NOISE_RNG_P3_1);
+          maxHeat = Math.max(maxHeat, s.batteryHeat);
+        }
+        return maxHeat;
+      };
+
+      expect(runNormalOperation(alkalineRatio), 'アルカリ: 120秒間の通常運用でBATTERY_HEAT_LIMIT未到達であること').toBeLessThan(BATTERY_HEAT_LIMIT);
+      expect(runNormalOperation(nimhRatio), 'NiMH: 120秒間の通常運用でBATTERY_HEAT_LIMIT未到達であること').toBeLessThan(BATTERY_HEAT_LIMIT);
+    });
+
+    it('受け入れ条件2: held-short(持続短絡)でアルカリ・NiMHともに設計較正時点の実測フレーム数でBATTERY_HEAT_LIMITへ到達する(数値回帰)', () => {
+      const alkalineRatio = resolveInternalResistanceRatio('battery-alkaline');
+      const nimhRatio = resolveInternalResistanceRatio('battery-nickel-metal-hydride');
+      const alkalineFrames = measureHeatCapReachFrames(alkalineRatio);
+      const nimhFrames = measureHeatCapReachFrames(nimhRatio);
+
+      // 設計較正時点(2026-08-04)の実測値を数値回帰として固定する。既存nextBatteryHeatの
+      // 発熱式が将来意図的に変わった場合、この回帰が変化を検出し、sweep証跡の再取得・
+      // 再レビューを促す警報になる(Suu指摘)。
+      expect(alkalineFrames, 'アルカリのheat上限到達フレーム数(設計較正時点の回帰)').toBe(15);
+      expect(nimhFrames, 'NiMHのheat上限到達フレーム数(設計較正時点の回帰)').toBe(16);
+
+      const alkalineSeconds = alkalineFrames! * DT_P3_1;
+      const nimhSeconds = nimhFrames! * DT_P3_1;
+      expect(alkalineSeconds, 'アルカリのheat上限到達秒数').toBeCloseTo(0.125, 6);
+      expect(nimhSeconds, 'NiMHのheat上限到達秒数').toBeCloseTo(1 / 7.5, 6); // 16/120 ≈ 0.1333秒
+      // heat上限到達時間は候補値3.0秒より十分早い
+      expect(alkalineSeconds).toBeLessThan(3.0);
+      expect(nimhSeconds).toBeLessThan(3.0);
+    });
+
+    it('受け入れ条件3(境界実装前提の数値実測、サブステップ2で実経路検証予定): dt=1/120sの360回加算が3.0を僅かに下回る', () => {
+      // 本テストはadvanceD03(P3-1サブステップ2、未実装)をまだ呼ばない。ここではdt蓄積の
+      // 浮動小数点特性を実測するだけであり、「D03のオン・オフが正確に切り替わる」ことの
+      // 受け入れ完了はサブステップ2(advanceDestructionState実経路での359/360フレーム
+      // テスト)へ持ち越す(Suu指摘)。
+      //
+      // 実測: dt=1/120sを360回加算した値は2.999999999999992であり、厳密な3.0にはならない
+      // (浮動小数点誤差)。サブステップ2のadvanceD03実装では、物理較正値ではなく浮動小数点
+      // 誤差吸収のためのprivateなepsilon(1e-9秒、既存scoring.ts等の先例と同型)を用いて
+      // durationS + epsilon >= limitS として判定し、359フレーム未発火・360フレーム発火を
+      // 実経路でテストする(361フレームへの遅延は許容仕様にしない)。
+      const limitS = mapD03DestructionConfig('battery-alkaline').shortCircuitDurationLimitS;
+      const framesToLimit = Math.round(limitS / DT_P3_1); // 3.0 / (1/120) = 360
+      let shortCircuitDurationS = 0;
+      for (let i = 1; i <= framesToLimit; i++) {
+        shortCircuitDurationS += DT_P3_1;
+      }
+      expect(shortCircuitDurationS).toBeLessThan(limitS);
+      expect(shortCircuitDurationS).toBeCloseTo(limitS, 12); // 誤差の大きさ自体は極小であることを確認
     });
   });
 });

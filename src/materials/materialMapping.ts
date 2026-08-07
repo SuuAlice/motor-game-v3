@@ -15,6 +15,7 @@ import {
 import { BATTERY_MATERIALS, GEAR_MATERIALS, MAGNET_MATERIALS, WIRE_MATERIALS, type BatteryMaterial, type GearMaterial, type MagnetMaterial, type WireMaterial } from './materials';
 import type { MotorConfig } from '../engine/motorPhysics';
 import type { CarConfig } from '../engine/vehiclePhysics';
+import type { BatteryDestructionConfig } from '../engine/destructionOrchestration';
 
 export type GearMaterialId = (typeof GEAR_MATERIALS)[number]['id'];
 export type MagnetMaterialId = (typeof MAGNET_MATERIALS)[number]['id'];
@@ -366,5 +367,65 @@ export function composeConfigFromMaterials(
       gearEfficiency: gearEfficiency.efficiency,
       massG: massG.massG,
     },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// P3-1: 電池profile写像+D03較正値(docs/phase3-p3-1-plan.md v4 §2.3、正式Fable P3-1-Q3裁定)
+// ---------------------------------------------------------------------------
+
+const BATTERY_DESTRUCTION_PROFILE: Record<BatteryMaterialId, 'lipo' | 'nonLipo'> = {
+  'battery-alkaline': 'nonLipo',
+  'battery-nickel-metal-hydride': 'nonLipo',
+  'battery-lithium-polymer': 'lipo',
+};
+
+/** 電池素材→destruction profile(D03/D04どちらの経路が有効か)の写像純関数。 */
+export function mapBatteryDestructionProfile(batteryId: BatteryMaterialId): 'lipo' | 'nonLipo' {
+  return BATTERY_DESTRUCTION_PROFILE[batteryId];
+}
+
+// D03較正値: 短絡「開始」からの連続継続時間の下限(秒)。実際の判定式は
+// destructionModes.tsのadvanceD03の
+//   sharedShortCircuitDurationS >= config.shortCircuitDurationLimitS && frame.batteryHeat >= BATTERY_HEAT_LIMIT
+// であり、「batteryHeatがBATTERY_HEAT_LIMITへ到達した後さらにこの秒数だけ待つ」という意味では
+// ない。両条件は同一フレームで同時に満たされて初めて発火する(短絡が閾値秒数以上連続し、
+// かつそのフレームで発熱ゲージも上限に達している、という単一の複合条件)。
+//
+// この定数はP3-1(Phase3のD03物理較正)の対象であり、Phase5(経済結線・数値保証)の対象では
+// ない。値自体は実測較正ではなく設計値である。
+//
+// 正式Fable裁定(2026-08-03T09:05、P3-1-Q3、確定): 候補値3.0秒での実装開始を承認する。確定は
+// sweep実測をもって行う。物理所見(Fable原文の要旨): 実物の乾電池短絡破裂は分単位の現象であり
+// 3.0秒は実時間として短いが、この値は単独の破裂タイマーではなく「既存発熱物理でheatゲージが
+// 上限に達していること」との複合条件の持続下限であり、実効的な到達時間は既存nextBatteryHeatの
+// 物理が支配する。ゲーム時間スケール(数十秒〜数分の走行)に対する設計較正値として妥当な出発点
+// である。アルカリ/NiMHの単一値も正しい——一次資料なしに差を発明するのは捏造側であり、差が
+// 必要になる根拠が出るまで単一値が正直である。
+//
+// 受け入れ条件(sweepテストで満たすこと、__tests__/materialMapping.test.tsに実装):
+//   - アルカリ・NiMHそれぞれについて、既存nextBatteryHeatの発熱式(motorPhysics.ts)を用いた
+//     sweepで、通常運用(短絡なし)ではBATTERY_HEAT_LIMIT到達前にD03が発火しないこと
+//   - 意図的に持続短絡(shorted=trueを固定してdt刻みで進める)させた場合、有限のシミュレーション
+//     時間内にD03が発火すること(held-short到達性テスト)
+//   - dt境界(shortCircuitDurationLimitSちょうどの直前/直後)でのオン・オフが1フレーム単位で
+//     正確に切り替わること
+//
+// 確定手順(Fable指定): 実装報告に、上記3条件のsweep実測データ全文と、短絡構成でのheatゲージ
+// 上限到達時間と3.0秒の関係の実測を含める(4種の証跡)。実測が受け入れ条件を満たせばFable
+// 再裁定不要でこの値を確定してよい。満たさず値の変更が必要な場合のみ、変更値と実測をSuu_mot3
+// 経由で報告する。
+const BATTERY_SHORT_CIRCUIT_DURATION_LIMIT_S_CANDIDATE: Record<Extract<BatteryMaterialId, 'battery-alkaline' | 'battery-nickel-metal-hydride'>, number> = {
+  'battery-alkaline': 3.0,
+  'battery-nickel-metal-hydride': 3.0, // 内部抵抗差を反映する一次資料が現時点でなく単一値とする
+};
+
+/** 非リポ電池素材→D03用DestructionConfig(battery枝)の写像純関数。P3-1はfixtureのみが直接呼ぶ(gameStore配線なし)。 */
+export function mapD03DestructionConfig(
+  batteryId: Extract<BatteryMaterialId, 'battery-alkaline' | 'battery-nickel-metal-hydride'>,
+): Extract<BatteryDestructionConfig, { profile: 'nonLipo' }> {
+  return {
+    profile: 'nonLipo',
+    shortCircuitDurationLimitS: BATTERY_SHORT_CIRCUIT_DURATION_LIMIT_S_CANDIDATE[batteryId],
   };
 }
