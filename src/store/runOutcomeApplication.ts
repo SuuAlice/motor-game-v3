@@ -6,7 +6,7 @@
 
 import type { MotorConfig } from '../engine/motorPhysics';
 import type { CarConfig, EnergyBreakdown, VehicleSimState } from '../engine/vehiclePhysics';
-import type { DegradationDiff, DestructionEvent, DestructionRunContext, RunOutcome, RunSnapshot } from '../engine/destructionOrchestration';
+import type { DegradationDiff, DestructionEvent, DestructionRunContext, FireExposureProfile, RunOutcome, RunSnapshot } from '../engine/destructionOrchestration';
 import type { DestructionModeId } from '../engine/destructionModes';
 import type { BearingAssemblyState, BodyPartState, EquipmentRole, InventoryItem, PlayerInventory, RotorAssemblyState } from '../materials/inventoryItem';
 import { GEAR_TOTAL_TOOTH_COUNT } from '../materials/inventoryItem';
@@ -39,6 +39,19 @@ export type EquipmentIdSnapshot =
 
 function findInventoryItemById(inventory: PlayerInventory, itemId: string, family: InventoryItem['family']): InventoryItem | undefined {
   return inventory.items.find((item) => item.itemId === itemId && item.family === family);
+}
+
+// P3-2ゲート7(docs/phase3-p3-2-plan.md v17 §3.4、正式Fable Q4-5裁定)。
+// 単一のEquipmentIdSnapshotから構築するため、adjacentRolesEquippedが重複を含むことは
+// 構造的に不可能である(magnetItemIdは配列ではなく単一のstringフィールドのため、
+// 高々1要素〈'magnet'〉しか追加しようがない)。gameStore.tsのいかなるactionからも
+// 呼び出さない独立した純関数であり(production配線はP3-4)、P3-0-Q2裁定(production配線の
+// P3-4延期)を破らない。
+export function deriveFireExposureProfileFromLoadout(snapshot: EquipmentIdSnapshot): FireExposureProfile {
+  return {
+    bodyEquipped: snapshot.bodyAssemblyId !== null,
+    adjacentRolesEquipped: ['magnet'], // magnetItemIdは両contextで必須(null不可)のため常に装備済み
+  };
 }
 
 export type ValidateEquipmentLoadoutResult =

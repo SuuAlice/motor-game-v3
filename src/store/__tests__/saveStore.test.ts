@@ -14,10 +14,11 @@ import {
   type RunApplicationEnvelope,
 } from '../runOutcomeApplication';
 import { GEAR_TOTAL_TOOTH_COUNT } from '../../materials/inventoryItem';
-import { captureRunSnapshot, type CaptureRunSnapshotInput, type DestructionConfig, type DestructionRunContext, type RunOutcome } from '../../engine/destructionOrchestration';
+import { captureRunSnapshot, restoreRunSnapshot, type CaptureRunSnapshotInput, type DestructionConfig, type DestructionRunContext, type RunOutcome } from '../../engine/destructionOrchestration';
 import { createInitialDestructionState } from '../../engine/destructionModes';
 import type { DestructionModeId } from '../../engine/destructionModes';
 import type { SimState, MotorConfig } from '../../engine/motorPhysics';
+import { createInitialVehicleState, type CarConfig } from '../../engine/vehiclePhysics';
 import type { ExperimentSession } from '../notebookStore';
 
 // ---------------------------------------------------------------------------
@@ -38,11 +39,15 @@ function goodMotorConfig(): MotorConfig {
 
 function goodDestructionConfig(): DestructionConfig {
   return {
-    battery: { profile: 'lipo', shortCircuitDurationLimitS: 2, runawayHeatThreshold: 0.9, unsafeDischargeStartRatio: 0.9, stageDurations: { swellingS: 1, smokingS: 1 } },
+    battery: { profile: 'lipo', shortCircuitDurationLimitS: 2, runawayHeatThreshold: 0.9, unsafeDischargeStartRatio: 0.9, stageDurations: { swellingS: 1, smokingS: 1 }, internalResistanceDegradationMultiplier: 1.5 },
     d02: { smokeGaugeThreshold: 0.6, coilOverheatGaugeLimit: 1 },
+    d04: { bodyScorchDeltaFraction: 0.2, magnetScorchDeltaFraction: 0.15 },
     d05: { brushSparkDurationLimitS: 0.5, brushSparkCurrentThresholdA: 3 },
     d06: { breakage: { kind: 'breakable', gearStrengthThresholdNm: 0.5 } },
-    d07: { magnetHeatGaugeLimit: 1, reversibleDroopThreshold: 0.7 },
+    d07: {
+      thermal: { conductionCoefficient: 0.1, dissipationCoefficient: 0.05 },
+      irreversible: { kind: 'demagnetizing', magnetHeatGaugeLimit: 1, reversibleDroopThreshold: 0.7, reversibleDroopMultiplier: 0.95, demagnetizationDeltaFraction: 0.1 },
+    },
     d09: { bearingSeizureGaugeLimit: 1 },
   };
 }
@@ -55,12 +60,31 @@ function motorSnapshotInput(): CaptureRunSnapshotInput {
   return {
     motorConfig: goodMotorConfig(), carConfig: null, destructionConfig: goodDestructionConfig(),
     runContext: motorRunContext(), initialMotorState: initialSimState(), initialVehicleState: null,
-    track: null, seed: 1, initialDestructionState: createInitialDestructionState('lipo'),
+    track: null, courseLengthM: null, slopeRad: null, // ゲート6新規。motor文脈はnull必須
+    seed: 1, initialDestructionState: createInitialDestructionState('lipo'),
   };
 }
 
 function validReplaySnapshot() {
   return captureRunSnapshot(motorSnapshotInput());
+}
+
+// P3-2ゲート7(§9): test-run文脈(track===null、courseLengthM/slopeRadが非null)のRunSnapshot
+// round-trip検証専用。既存のvalidCarConfig(4.4節以降で使用中)と同型のCarConfigを使う。
+function vehicleTestRunContext(): DestructionRunContext {
+  return { context: 'vehicle', fireExposureProfile: { bodyEquipped: false, adjacentRolesEquipped: [] }, gearTotalToothCount: GEAR_TOTAL_TOOTH_COUNT };
+}
+
+function vehicleTestRunSnapshotInput(): CaptureRunSnapshotInput {
+  const motorConfig = goodMotorConfig();
+  const carConfig: CarConfig = validCarConfig;
+  const vehicleState = createInitialVehicleState(motorConfig, carConfig);
+  return {
+    motorConfig, carConfig, destructionConfig: goodDestructionConfig(),
+    runContext: vehicleTestRunContext(), initialMotorState: vehicleState.motor, initialVehicleState: vehicleState,
+    track: null, courseLengthM: 10, slopeRad: 0.3, // ゲート6新規。test-run文脈は両方非null必須
+    seed: 1, initialDestructionState: createInitialDestructionState('lipo'),
+  };
 }
 
 function nonDestructionOutcome(events: RunOutcome['events'] = [], degradationDiffs: RunOutcome['degradationDiffs'] = []): RunOutcome {
@@ -199,6 +223,37 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 // bootstrap・migration
 // ---------------------------------------------------------------------------
+
+// P3-2ゲート7(§9末尾): captureRunSnapshot/restoreRunSnapshotのcourseLengthM/slopeRad
+// round-trip(ゲート6でRUN_SNAPSHOT_CONTRACT_VERSION 1→2として追加された2フィールド)を、
+// saveStore.test.tsのfixture(fake localStorage不要、engineレベルの純粋な往復)で確認する。
+describe('RunSnapshot round-trip: courseLengthM/slopeRad(ゲート6新規フィールド、P3-2ゲート7 §9)', () => {
+  it('test-run文脈(track===null)のRunSnapshotをJSON round-tripしても、courseLengthM/slopeRadの実値がrestoreRunSnapshotの復元結果に完全一致する', () => {
+    const snapshot = captureRunSnapshot(vehicleTestRunSnapshotInput());
+    expect(snapshot.courseLengthM).toBe(10);
+    expect(snapshot.slopeRad).toBe(0.3);
+
+    const restored = restoreRunSnapshot(JSON.parse(JSON.stringify(snapshot)));
+    expect(restored.ok).toBe(true);
+    if (restored.ok) {
+      expect(restored.snapshot.courseLengthM).toBe(10);
+      expect(restored.snapshot.slopeRad).toBe(0.3);
+    }
+  });
+
+  it('motor文脈のRunSnapshotをJSON round-tripしても、courseLengthM/slopeRadは両方nullのまま保たれる', () => {
+    const snapshot = validReplaySnapshot();
+    expect(snapshot.courseLengthM).toBeNull();
+    expect(snapshot.slopeRad).toBeNull();
+
+    const restored = restoreRunSnapshot(JSON.parse(JSON.stringify(snapshot)));
+    expect(restored.ok).toBe(true);
+    if (restored.ok) {
+      expect(restored.snapshot.courseLengthM).toBeNull();
+      expect(restored.snapshot.slopeRad).toBeNull();
+    }
+  });
+});
 
 describe('bootstrap(3.2/3.3節)', () => {
   it('localStorage不在時はfresh bootstrapを返す(kind:"ok")', () => {

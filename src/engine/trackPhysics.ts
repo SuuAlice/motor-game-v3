@@ -166,7 +166,7 @@ function resolveBatteryCapacityRatio(motorConfig: MotorConfig): number {
   return motorConfig.batteryCapacityRatio ?? 1;
 }
 
-function computeEnergyBudgetJ(motorConfig: MotorConfig): number {
+export function computeEnergyBudgetJ(motorConfig: MotorConfig): number {
   const base = motorConfig.batteryVoltage === 1.5 ? BATTERY_CAPACITY_J_1_5V : BATTERY_CAPACITY_J_3_0V;
   return base * resolveBatteryCapacityRatio(motorConfig);
 }

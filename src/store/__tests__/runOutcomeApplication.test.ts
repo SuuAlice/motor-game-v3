@@ -13,6 +13,7 @@ import {
   beginRun,
   captureEquipmentIdSnapshot,
   createInitialPlayerInventoryAndLoadout,
+  deriveFireExposureProfileFromLoadout,
   isLeaseHeartbeatStale,
   LEASE_STALE_THRESHOLD_MS,
   PROVISIONAL_DISCOVERY_REWARD_G,
@@ -27,7 +28,7 @@ import {
   type RunApplicationEnvelope,
   type SaveEnvelopeMeta,
 } from '../runOutcomeApplication';
-import type { PlayerInventory } from '../../materials/inventoryItem';
+import type { PlayerInventory, BodyPartState } from '../../materials/inventoryItem';
 import { GEAR_TOTAL_TOOTH_COUNT } from '../../materials/inventoryItem';
 import { INITIAL_CASH_G } from '../shopEconomy';
 import {
@@ -36,13 +37,14 @@ import {
   finalizeRun,
   restoreRunSnapshot,
   stepMotorWithDestruction,
+  stepTestRunWithDestruction,
   type CaptureRunSnapshotInput,
   type DestructionConfig,
   type RunAccumulator,
 } from '../../engine/destructionOrchestration';
-import type { DestructionRunContext, RunOutcome, RunSnapshot } from '../../engine/destructionOrchestration';
+import type { DestructionRunContext, FireExposureProfile, RunOutcome, RunSnapshot } from '../../engine/destructionOrchestration';
 import type { DestructionModeId } from '../../engine/destructionModes';
-import { createInitialDestructionState } from '../../engine/destructionModes';
+import { createInitialDestructionState, validateFireExposureProfile } from '../../engine/destructionModes';
 import type { MotorConfig, SimState } from '../../engine/motorPhysics';
 import { COIL_DEFORM_FRAMES, COIL_DEFORM_OMEGA } from '../../engine/constants';
 import type { CarConfig, VehicleSimState } from '../../engine/vehiclePhysics';
@@ -581,6 +583,45 @@ describe('runOutcomeApplication.ts: validator負例の補強(Suu指摘#6)', () =
   });
 });
 
+// P3-2ゲート7(docs/phase3-p3-2-plan.md v17 §3.4、正式Fable Q4-5裁定): 単一のEquipmentIdSnapshot
+// からFireExposureProfileを導出する純関数。adjacentRolesEquippedの重複はmagnetItemIdが
+// 両contextで必須の単一string(配列でもnullでもない)であるため構造的に不可能——本節はその
+// 構造的性質を実行時にも確認する。
+describe('deriveFireExposureProfileFromLoadout(P3-2ゲート7)', () => {
+  it('motor文脈: bodyAssemblyIdが常にnullのためbodyEquipped:falseを返す', () => {
+    const snapshot = captureEquipmentIdSnapshot(baseLoadout() as EquipmentLoadout & { batteryItemId: string }, 'motor');
+    const profile = deriveFireExposureProfileFromLoadout(snapshot);
+    expect(profile.bodyEquipped).toBe(false);
+    expect(profile.adjacentRolesEquipped).toEqual(['magnet']);
+  });
+
+  it('vehicle文脈・bodyAssemblyId===null(既定fixture、未装備): bodyEquipped:falseを返す', () => {
+    const loadout = baseLoadout();
+    expect(loadout.bodyAssemblyId).toBeNull(); // 前提: 既定fixtureはボディ未装備
+    const snapshot = captureEquipmentIdSnapshot(loadout as EquipmentLoadout & { batteryItemId: string }, 'vehicle');
+    const profile = deriveFireExposureProfileFromLoadout(snapshot);
+    expect(profile.bodyEquipped).toBe(false);
+    expect(profile.adjacentRolesEquipped).toEqual(['magnet']);
+  });
+
+  it('vehicle文脈・bodyAssemblyId非null(装備済み): bodyEquipped:trueを返す', () => {
+    const loadout = { ...baseLoadout(), bodyAssemblyId: 'some-body-assembly' };
+    const snapshot = captureEquipmentIdSnapshot(loadout as EquipmentLoadout & { batteryItemId: string }, 'vehicle');
+    const profile = deriveFireExposureProfileFromLoadout(snapshot);
+    expect(profile.bodyEquipped).toBe(true);
+    expect(profile.adjacentRolesEquipped).toEqual(['magnet']);
+  });
+
+  it('adjacentRolesEquippedは重複を含まない(構造的性質の実行時確認)+validateFireExposureProfileに受理される(production構築確認)', () => {
+    const snapshot = captureEquipmentIdSnapshot(baseLoadout() as EquipmentLoadout & { batteryItemId: string }, 'vehicle');
+    const profile: FireExposureProfile = deriveFireExposureProfileFromLoadout(snapshot);
+    expect(new Set(profile.adjacentRolesEquipped).size).toBe(profile.adjacentRolesEquipped.length);
+
+    const validated = validateFireExposureProfile(profile);
+    expect(validated.ok).toBe(true);
+  });
+});
+
 // P3-1サブステップ4(docs/phase3-p3-1-plan.md v11 §1.2・§7): stepMotorWithDestructionが実際に
 // 生成したRunOutcomeをapplyRunOutcomeへ流し込む統合テスト。applyRunOutcome自体のaction契約
 // (lease/runSequence/原子性、P3-0で検証済み)は再検証しない。saveStore.ts・gameStore.tsは無改修
@@ -604,9 +645,13 @@ describe('P3-1サブステップ4: stepMotorWithDestruction → applyRunOutcome�
     return {
       battery: { profile: 'nonLipo', shortCircuitDurationLimitS },
       d02: { smokeGaugeThreshold: 0.6, coilOverheatGaugeLimit: 1 },
+      d04: { bodyScorchDeltaFraction: 0.2, magnetScorchDeltaFraction: 0.15 },
       d05: { brushSparkDurationLimitS: 0.5, brushSparkCurrentThresholdA: 3 },
       d06: { breakage: { kind: 'breakable', gearStrengthThresholdNm: 0.5 } },
-      d07: { magnetHeatGaugeLimit: 1, reversibleDroopThreshold: 0.7 },
+      d07: {
+        thermal: { conductionCoefficient: 0.1, dissipationCoefficient: 0.05 },
+        irreversible: { kind: 'demagnetizing', magnetHeatGaugeLimit: 1, reversibleDroopThreshold: 0.7, reversibleDroopMultiplier: 0.95, demagnetizationDeltaFraction: 0.1 },
+      },
       d09: { bearingSeizureGaugeLimit: 1 },
     };
   }
@@ -624,6 +669,8 @@ describe('P3-1サブステップ4: stepMotorWithDestruction → applyRunOutcome�
       initialMotorState: initialSimState(),
       initialVehicleState: null,
       track: null,
+      courseLengthM: null, // ゲート6新規。motor文脈は正式M2検証によりnull必須
+      slopeRad: null,
       seed: 1,
       initialDestructionState: createInitialDestructionState('nonLipo'),
       ...overrides,
@@ -651,6 +698,9 @@ describe('P3-1サブステップ4: stepMotorWithDestruction → applyRunOutcome�
     return { id: 'track-1', name: 'テストコース', description: '', segments: [{ lengthM: 10, slopeDeg: 0, surfaceGrip: 0.7, roughness: 0.2 }], objectives: [] };
   }
 
+  // ゲート6新規: 既定はtest-run文脈(track===null、courseLengthM/slopeRadが非null)。
+  // track-run文脈(track非null)を作る場合は、呼び出し側でtrack・courseLengthM: null・
+  // slopeRad: nullをまとめて上書きすること(正式M2検証の交差条件、5.2節)。
   function vehicleSnapshotInput(overrides: Partial<CaptureRunSnapshotInput> = {}): CaptureRunSnapshotInput {
     const motorConfig = goodMotorConfig();
     const carConfig = standardCarConfig();
@@ -663,6 +713,8 @@ describe('P3-1サブステップ4: stepMotorWithDestruction → applyRunOutcome�
       initialMotorState: vehicleState.motor,
       initialVehicleState: vehicleState,
       track: null,
+      courseLengthM: 10,
+      slopeRad: 0,
       seed: 1,
       initialDestructionState: createInitialDestructionState('nonLipo'),
       ...overrides,
@@ -683,6 +735,87 @@ describe('P3-1サブステップ4: stepMotorWithDestruction → applyRunOutcome�
       equipmentSnapshot: snapshot,
       notebookRecord: { kind: 'session', record: {} as never },
     };
+  }
+
+  // ゲート7(Suu_mot3レビューR1是正、R4是正: 明示列挙〈allow-list〉はcontractVersionの
+  // 欠落を招いた——将来RunSnapshotへフィールドが追加された場合も同種の穴が再発するため、
+  // track・courseLengthM・slopeRad〈差し替えの対象そのもの〉の3項目だけをrest構文で除外し、
+  // 残りは型構造のまま自動的に返す〈deny-list〉方式にする)。
+  function runSnapshotConfigFingerprint(snapshot: RunSnapshot) {
+    const { track: _track, courseLengthM: _courseLengthM, slopeRad: _slopeRad, ...fingerprint } = snapshot;
+    return fingerprint;
+  }
+
+  // ゲート7: envelopeForと同型だが、呼び出し側が構築したloadout(ボディ装備込み等)を使う版。
+  function envelopeForWithLoadout(outcome: RunOutcome, runSequence: number, loadout: EquipmentLoadout & { batteryItemId: string }): RunApplicationEnvelope {
+    const snapshot = captureEquipmentIdSnapshot(loadout, outcome.replaySnapshot.runContext.context);
+    return {
+      runKey: { saveId: 'save-1', runSequence },
+      leaseToken: 'lease-a',
+      outcome,
+      equipmentSnapshot: snapshot,
+      notebookRecord: { kind: 'session', record: {} as never },
+    };
+  }
+
+  // ゲート7: D04(body/magnet延焼)・D07(磁石熱蓄積・不可逆減磁)を実物理で発火させるためのlipo
+  // destructionConfig。既存goodDestructionConfigはprofile:'nonLipo'固定のため別関数として追加する
+  // (既存61/62番のnonLipo D03テストへの影響を避ける)。d04/d07の較正値は既存goodDestructionConfig
+  // と同一(設計候補値、production写像値ではないテスト専用schema-valid値)。
+  function goodLipoDestructionConfig(overrides: {
+    shortCircuitDurationLimitS?: number;
+    runawayHeatThreshold?: number;
+    stageDurations?: { swellingS: number; smokingS: number };
+    d07?: DestructionConfig['d07'];
+  } = {}): DestructionConfig {
+    return {
+      battery: {
+        profile: 'lipo',
+        shortCircuitDurationLimitS: overrides.shortCircuitDurationLimitS ?? 1 / 120,
+        runawayHeatThreshold: overrides.runawayHeatThreshold ?? 0.01,
+        unsafeDischargeStartRatio: 0.9,
+        stageDurations: overrides.stageDurations ?? { swellingS: 1 / 120, smokingS: 1 / 120 },
+        internalResistanceDegradationMultiplier: 1.5,
+      },
+      d02: { smokeGaugeThreshold: 0.6, coilOverheatGaugeLimit: 1 },
+      d04: { bodyScorchDeltaFraction: 0.2, magnetScorchDeltaFraction: 0.15 },
+      d05: { brushSparkDurationLimitS: 0.5, brushSparkCurrentThresholdA: 3 },
+      d06: { breakage: { kind: 'breakable', gearStrengthThresholdNm: 0.5 } },
+      d07: overrides.d07 ?? {
+        thermal: { conductionCoefficient: 0.1, dissipationCoefficient: 0.05 },
+        irreversible: { kind: 'demagnetizing', magnetHeatGaugeLimit: 1, reversibleDroopThreshold: 0.7, reversibleDroopMultiplier: 0.95, demagnetizationDeltaFraction: 0.1 },
+      },
+      d09: { bearingSeizureGaugeLimit: 1 },
+    };
+  }
+
+  // ゲート7: D04のaffectedRoles(body/magnet)を実際に発火させるためのfireExposureProfile込み文脈。
+  // 既存motorRunContext/vehicleRunContextはbodyEquipped:false・adjacentRolesEquipped:[]のため
+  // D04が発火してもaffectedRolesが空になりbody/magnet scorch diffsが一切生成されない
+  // (destructionModes.tsのadvanceD04、424-428行目参照)。motor-only文脈はbodyEquipped:falseに
+  // 固定する: EquipmentIdSnapshotのmotor判別branchはbodyAssemblyId:null構造で固定されており
+  // (captureEquipmentIdSnapshot)、ボディ個体を伴わない台上試験という物理的実態と一致する
+  // (bodyEquipped:trueにすると、resolveDegradationDiffsのbody分岐がbodyAssemblyId===nullを
+  // 理由に必ずok:falseを返す——motor-onlyでbody延焼を主張するのはschema-validだが
+  // production-validではない構成であることが判明したため、意図的にこの構成を避ける)。
+  function fireExposedMotorRunContext(): DestructionRunContext {
+    return { context: 'motor', fireExposureProfile: { bodyEquipped: false, adjacentRolesEquipped: ['magnet'] }, gearTotalToothCount: null };
+  }
+
+  function fireExposedVehicleRunContext(): DestructionRunContext {
+    return { context: 'vehicle', fireExposureProfile: { bodyEquipped: true, adjacentRolesEquipped: ['magnet'] }, gearTotalToothCount: GEAR_TOTAL_TOOTH_COUNT };
+  }
+
+  // ゲート7: bodyScorchのdegradationDiffs適用を検証するには、bodyAssemblyId非nullかつ
+  // inventory.bodyPartsに対応する個体が実在する構成が必要(既定fixtureはbodyParts:[]・
+  // bodyAssemblyId:nullのため、そのままではvalidateEquipmentSnapshotIntegrityのbody分岐を
+  // 経由できない)。
+  function inventoryAndLoadoutWithBody(): { inventory: PlayerInventory; loadout: EquipmentLoadout & { batteryItemId: string } } {
+    const base = createInitialPlayerInventoryAndLoadout();
+    const bodyPart: BodyPartState = { assemblyId: 'body-assembly-01', materialId: 'body-ps-cowl', scorchFraction: 0 };
+    const inventory: PlayerInventory = { ...base.inventory, bodyParts: [bodyPart] };
+    const loadout = { ...base.loadout, bodyAssemblyId: bodyPart.assemblyId } as EquipmentLoadout & { batteryItemId: string };
+    return { inventory, loadout };
   }
 
   it('60. motor-only、manualAbort終了: D01の恒久劣化(rotorAssemblies.collapsed)がapplyRunOutcomeで正しく反映される', () => {
@@ -813,7 +946,7 @@ describe('P3-1サブステップ4: stepMotorWithDestruction → applyRunOutcome�
       label: 'track-run',
       expectedContext: 'vehicle',
       expectedTrackNonNull: true,
-      buildSnapshot: () => captureRunSnapshot(vehicleSnapshotInput({ track: goodTrack() })),
+      buildSnapshot: () => captureRunSnapshot(vehicleSnapshotInput({ track: goodTrack(), courseLengthM: null, slopeRad: null })),
     },
   ];
 
@@ -845,5 +978,410 @@ describe('P3-1サブステップ4: stepMotorWithDestruction → applyRunOutcome�
       const rotor = result.nextInventory.rotorAssemblies.find((r) => r.assemblyId === envelope.equipmentSnapshot.rotorAssemblyId);
       expect(rotor?.collapsed).toBe(true);
     }
+  });
+
+  // 64〜68. P3-2ゲート7(docs/phase3-p3-2-plan.md v17 §11.7・§9・§10.3): D04/D07劣化の3文脈
+  // (motor-only/test-run/track-run)原子的適用。degradationApplication.ts・applyRunOutcomeの
+  // magnet/body分岐自体はP3-0で既に汎用実装済みのため、ここでは実wrapper(motor-only/test-run)・
+  // 手構築RunOutcome(track-run)がそれぞれ実際にD04/D07由来のdegradationDiffsを生成し、
+  // applyRunOutcomeへ単一呼び出しで正しく到達することを検証する。
+
+  it('64. motor-only、D04発火(実wrapper、fireExposure=magnetのみ。bodyEquipped:falseは台上試験にボディがない物理的実態と一致): battery消滅+magnet scorchのdegradationDiffsが単一呼び出しでapplyRunOutcomeへ反映される(bodyのdegradationDiffは一切生成されない)', () => {
+    const snapshot = captureRunSnapshot(motorSnapshotInput({
+      motorConfig: goodMotorConfig({ slitWidthMm: 0 }), // 持続短絡
+      destructionConfig: goodLipoDestructionConfig(),
+      runContext: fireExposedMotorRunContext(),
+      initialDestructionState: createInitialDestructionState('lipo'),
+    }));
+    let accumulator: RunAccumulator = createRunAccumulator(snapshot);
+    let motorState: SimState = initialSimState();
+    let termination: RunOutcome | null = null;
+
+    for (let i = 0; i < 60 && termination === null; i++) {
+      const result = stepMotorWithDestruction(motorState, accumulator, 1 / 120);
+      motorState = result.physicsState;
+      accumulator = result.accumulator;
+      termination = result.termination;
+    }
+    expect(termination).not.toBeNull();
+    expect(termination!.endReason).toBe('destructionTerminal');
+    if (termination!.endReason === 'destructionTerminal') expect(termination!.terminalModes).toContain('D04');
+    expect(termination!.degradationDiffs).toContainEqual({ role: 'battery', kind: 'consumed' });
+    expect(termination!.degradationDiffs).toContainEqual({ role: 'magnet', kind: 'scorch', deltaFraction: 0.15 });
+    expect(termination!.degradationDiffs.some((d) => d.role === 'body')).toBe(false); // bodyEquipped:falseのため生成されない
+
+    const envelope = envelopeFor(termination!, 1);
+    const result = applyRunOutcome(envelope, baseInventory(), new Set(), goodSaveMeta());
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.nextInventory.items.some((item) => item.itemId === envelope.equipmentSnapshot.batteryItemId)).toBe(false);
+      const magnet = result.nextInventory.items.find((item) => item.itemId === envelope.equipmentSnapshot.magnetItemId);
+      expect(magnet?.wearState).toMatchObject({ demagnetizationFraction: 0.15 });
+      expect(result.result.resolvedDegradations.length).toBeGreaterThanOrEqual(2); // battery+magnetが単一呼び出しで反映
+    }
+  });
+
+  it('65. test-run、D04発火(実wrapper stepTestRunWithDestruction、fireExposure=body+magnet): battery消滅+body/magnet scorchが単一呼び出しでapplyRunOutcomeへ反映される', () => {
+    const snapshot = captureRunSnapshot(vehicleSnapshotInput({
+      motorConfig: goodMotorConfig({ slitWidthMm: 0 }), // 持続短絡
+      destructionConfig: goodLipoDestructionConfig(),
+      runContext: fireExposedVehicleRunContext(),
+      initialDestructionState: createInitialDestructionState('lipo'),
+      track: null,
+      courseLengthM: 10,
+      slopeRad: 0,
+    }));
+    let accumulator: RunAccumulator = createRunAccumulator(snapshot);
+    let vehicleState: VehicleSimState = snapshot.initialVehicleState!;
+    let termination: RunOutcome | null = null;
+
+    for (let i = 0; i < 60 && termination === null; i++) {
+      const result = stepTestRunWithDestruction(vehicleState, accumulator, 1 / 120);
+      vehicleState = result.physicsState;
+      accumulator = result.accumulator;
+      termination = result.termination;
+    }
+    expect(termination).not.toBeNull();
+    expect(termination!.endReason).toBe('destructionTerminal');
+    if (termination!.endReason === 'destructionTerminal') expect(termination!.terminalModes).toContain('D04');
+    expect(termination!.degradationDiffs).toContainEqual({ role: 'battery', kind: 'consumed' });
+    expect(termination!.degradationDiffs).toContainEqual({ role: 'body', kind: 'scorch', deltaFraction: 0.2 });
+    expect(termination!.degradationDiffs).toContainEqual({ role: 'magnet', kind: 'scorch', deltaFraction: 0.15 });
+
+    const { inventory, loadout } = inventoryAndLoadoutWithBody();
+    const envelope = envelopeForWithLoadout(termination!, 1, loadout);
+    const result = applyRunOutcome(envelope, inventory, new Set(), goodSaveMeta());
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.nextInventory.items.some((item) => item.itemId === envelope.equipmentSnapshot.batteryItemId)).toBe(false);
+      const magnet = result.nextInventory.items.find((item) => item.itemId === envelope.equipmentSnapshot.magnetItemId);
+      expect(magnet?.wearState).toMatchObject({ demagnetizationFraction: 0.15 });
+      const body = result.nextInventory.bodyParts.find((b) => b.assemblyId === envelope.equipmentSnapshot.bodyAssemblyId);
+      expect(body?.scorchFraction).toBe(0.2);
+    }
+  });
+
+  it('66. track-run、D04(実wrapperで生成した一貫RunOutcomeのevents/state/diffsをそのまま使い、replaySnapshotだけ有効なtrack-run snapshotへ置換〈実wrapper未導入のtrack-runに対する正式Fable P3-1-Q4(a)裁定と同型の扱い〉): body/magnet scorch+battery消滅が単一呼び出しでapplyRunOutcomeへ反映され、newlyDiscoveredModesにD04が入る。stepTestRunWithDestructionはtrack-run accumulatorへは一切呼ばれないことを構築それ自体で示す(§10.4)', () => {
+    // Suu_mot3ゲート7レビューP1是正: 手構築RunOutcome(events:[]・destructionState=stage:'none')は
+    // terminalModes=['D04']と物理的・契約的に矛盾し(D04発見がevents経由〈computeNewlyDiscoveredModes〉
+    // のためnewlyDiscoveredModesが常に空になる等)、production的に存在しないRunOutcomeだった。
+    // 是正: test-run実wrapper(stepTestRunWithDestruction、65番と同一構成)でevents/destructionState/
+    // degradationDiffsすべて内部一貫性のある本物のD04 termination RunOutcomeを生成し、
+    // replaySnapshotのみ有効なtrack-run snapshot(track非null・courseLengthM/slopeRad両方null)へ
+    // 差し替える。track-run用の実wrapperがまだ存在しない(P3-2/P3-4)ことへの対応であり、
+    // events/state/diffs自体は本物のため二重定義(手で書いたcauseLog等)を避けられる。
+    // Suu_mot3ゲート7是正レビュー2 R1是正: events/state/diffsを生んだ走行config(motorConfig等)と
+    // 差し替え先snapshotのconfigが食い違うと「リプレイの唯一出典」契約に反するため、
+    // 両snapshotへ同一のmotorConfig/destructionConfig/runContext/initialDestructionStateを使う。
+    const sharedMotorConfig = goodMotorConfig({ slitWidthMm: 0 }); // 持続短絡
+    const sharedDestructionConfig = goodLipoDestructionConfig();
+    const sharedRunContext = fireExposedVehicleRunContext();
+
+    const testRunSnapshot = captureRunSnapshot(vehicleSnapshotInput({
+      motorConfig: sharedMotorConfig,
+      destructionConfig: sharedDestructionConfig,
+      runContext: sharedRunContext,
+      initialDestructionState: createInitialDestructionState('lipo'),
+      track: null,
+      courseLengthM: 10,
+      slopeRad: 0,
+    }));
+    let accumulator: RunAccumulator = createRunAccumulator(testRunSnapshot);
+    let vehicleState: VehicleSimState = testRunSnapshot.initialVehicleState!;
+    let termination: RunOutcome | null = null;
+    for (let i = 0; i < 60 && termination === null; i++) {
+      const result = stepTestRunWithDestruction(vehicleState, accumulator, 1 / 120);
+      vehicleState = result.physicsState;
+      accumulator = result.accumulator;
+      termination = result.termination;
+    }
+    expect(termination).not.toBeNull();
+    expect(termination!.endReason).toBe('destructionTerminal');
+    if (termination!.endReason === 'destructionTerminal') expect(termination!.terminalModes).toContain('D04');
+    expect(termination!.events.some((e) => e.mode === 'D04')).toBe(true); // 発見経路(computeNewlyDiscoveredModes)がevents由来であることの前提確認
+
+    const trackRunSnapshot = captureRunSnapshot(vehicleSnapshotInput({
+      motorConfig: sharedMotorConfig,
+      destructionConfig: sharedDestructionConfig,
+      runContext: sharedRunContext,
+      initialDestructionState: createInitialDestructionState('lipo'),
+      track: goodTrack(),
+      courseLengthM: null,
+      slopeRad: null,
+    }));
+    const restored = restoreRunSnapshot(JSON.parse(JSON.stringify(trackRunSnapshot)));
+    expect(restored.ok).toBe(true); // 差し替え先が実際に有効なtrack-run RunSnapshotであることを確認
+    expect(trackRunSnapshot.track).not.toBeNull();
+    // R1是正: track・courseLengthM・slopeRad(差し替えの対象そのもの)以外の全フィールドが
+    // events/state/diffsを生んだtestRunSnapshotと完全一致することを確認する。
+    expect(runSnapshotConfigFingerprint(trackRunSnapshot)).toEqual(runSnapshotConfigFingerprint(testRunSnapshot));
+
+    // replaySnapshotのみtrack-run snapshotへ差し替える(events/destructionState/degradationDiffsは
+    // test-run実wrapperが生成した本物の値のまま、内部一貫性を保つ)。
+    const outcome: RunOutcome = { ...termination!, replaySnapshot: trackRunSnapshot };
+
+    const { inventory, loadout } = inventoryAndLoadoutWithBody();
+    const envelope = envelopeForWithLoadout(outcome, 1, loadout);
+    expect(envelope.equipmentSnapshot.context).toBe('vehicle');
+
+    const result = applyRunOutcome(envelope, inventory, new Set(), goodSaveMeta());
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.result.newlyDiscoveredModes).toContain('D04');
+      expect(result.nextInventory.items.some((item) => item.itemId === envelope.equipmentSnapshot.batteryItemId)).toBe(false);
+      const magnet = result.nextInventory.items.find((item) => item.itemId === envelope.equipmentSnapshot.magnetItemId);
+      expect(magnet?.wearState).toMatchObject({ demagnetizationFraction: 0.15 });
+      const body = result.nextInventory.bodyParts.find((b) => b.assemblyId === envelope.equipmentSnapshot.bodyAssemblyId);
+      expect(body?.scorchFraction).toBe(0.2);
+    }
+  });
+
+  it('67. motor-only、D07発火(実wrapper、通電電流のI²R蓄積による不可逆減磁): magnetのdemagnetizationDeltaFractionがapplyRunOutcomeで正しく反映される(termination===nullのまま非終端で進行、rotor collapse等と混同しない)', () => {
+    const snapshot = captureRunSnapshot(motorSnapshotInput({
+      motorConfig: goodMotorConfig(),
+      destructionConfig: goodLipoDestructionConfig({
+        d07: {
+          thermal: { conductionCoefficient: 1, dissipationCoefficient: 1e-6 },
+          irreversible: { kind: 'demagnetizing', magnetHeatGaugeLimit: 0.05, reversibleDroopThreshold: 0.02, reversibleDroopMultiplier: 0.95, demagnetizationDeltaFraction: 0.1 },
+        },
+      }),
+      runContext: fireExposedMotorRunContext(),
+      initialDestructionState: createInitialDestructionState('lipo'),
+    }));
+    let accumulator: RunAccumulator = createRunAccumulator(snapshot);
+    let motorState: SimState = { ...initialSimState(), theta: 0.01, omega: 50 }; // 通常通電(shortedではない)
+    let sawD07 = false;
+
+    for (let i = 0; i < 60 && !sawD07; i++) {
+      const result = stepMotorWithDestruction(motorState, accumulator, 1 / 120);
+      motorState = result.physicsState;
+      accumulator = result.accumulator;
+      expect(result.termination).toBeNull(); // D07は終端候補に分類されない
+      sawD07 = accumulator.events.some((e) => e.mode === 'D07');
+    }
+    expect(sawD07).toBe(true);
+
+    const outcome = finalizeRun(accumulator, { kind: 'manualAbort' });
+    expect(outcome.degradationDiffs).toContainEqual({ role: 'magnet', kind: 'demagnetization', deltaFraction: 0.1 });
+
+    const envelope = envelopeFor(outcome, 1);
+    const result = applyRunOutcome(envelope, baseInventory(), new Set(), goodSaveMeta());
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      const magnet = result.nextInventory.items.find((item) => item.itemId === envelope.equipmentSnapshot.magnetItemId);
+      expect(magnet?.wearState).toMatchObject({ demagnetizationFraction: 0.1 });
+    }
+  });
+
+  it('68. test-run、D07発火(実wrapper stepTestRunWithDestruction、通電電流のI²R蓄積による不可逆減磁): magnetのdemagnetizationDeltaFractionがapplyRunOutcomeで正しく反映される', () => {
+    const snapshot = captureRunSnapshot(vehicleSnapshotInput({
+      destructionConfig: goodLipoDestructionConfig({
+        d07: {
+          thermal: { conductionCoefficient: 1, dissipationCoefficient: 1e-6 },
+          irreversible: { kind: 'demagnetizing', magnetHeatGaugeLimit: 0.05, reversibleDroopThreshold: 0.02, reversibleDroopMultiplier: 0.95, demagnetizationDeltaFraction: 0.1 },
+        },
+      }),
+      runContext: fireExposedVehicleRunContext(),
+      initialDestructionState: createInitialDestructionState('lipo'),
+      track: null,
+      courseLengthM: 10,
+      slopeRad: 0,
+    }));
+    let accumulator: RunAccumulator = createRunAccumulator(snapshot);
+    let vehicleState: VehicleSimState = snapshot.initialVehicleState!;
+    let sawD07 = false;
+
+    for (let i = 0; i < 120 && !sawD07; i++) {
+      const result = stepTestRunWithDestruction(vehicleState, accumulator, 1 / 120);
+      vehicleState = result.physicsState;
+      accumulator = result.accumulator;
+      expect(result.termination).toBeNull();
+      sawD07 = accumulator.events.some((e) => e.mode === 'D07');
+    }
+    expect(sawD07).toBe(true);
+
+    const outcome = finalizeRun(accumulator, { kind: 'manualAbort' });
+    expect(outcome.degradationDiffs).toContainEqual({ role: 'magnet', kind: 'demagnetization', deltaFraction: 0.1 });
+
+    const envelope = envelopeFor(outcome, 1);
+    const result = applyRunOutcome(envelope, baseInventory(), new Set(), goodSaveMeta());
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      const magnet = result.nextInventory.items.find((item) => item.itemId === envelope.equipmentSnapshot.magnetItemId);
+      expect(magnet?.wearState).toMatchObject({ demagnetizationFraction: 0.1 });
+    }
+  });
+
+  it('68b. track-run、D07(実wrapperで生成した一貫RunOutcomeのevents/state/diffsをそのまま使い、replaySnapshotだけ有効なtrack-run snapshotへ置換。66番と同型の扱い、Suu_mot3ゲート7レビューP2是正): magnetのdemagnetizationDeltaFractionが単一呼び出しでapplyRunOutcomeへ反映され、newlyDiscoveredModesにD07が入る。stepTestRunWithDestructionはtrack-run accumulatorへは一切呼ばれないことを構築それ自体で示す(§10.4)', () => {
+    // Suu_mot3ゲート7レビューP2是正: 「D04/D07を3文脈で統合検証」と主張しながら実際は
+    // D07がmotor/testの2文脈のみでtrack-runが欠落していた。66番と同一の手法(実wrapperで
+    // 内部一貫性のあるRunOutcomeを生成し、replaySnapshotだけtrack-run snapshotへ差し替える)
+    // で、D07のtrack-run文脈を追加する。
+    // Suu_mot3ゲート7是正レビュー2 R1/R2是正: 両snapshotへ同一のmotorConfig/destructionConfig/
+    // runContextを使い(R1)、runContext.fireExposureProfile.bodyEquipped=trueと整合する
+    // body装備済みloadoutからequipment snapshotを捕捉する(R2、bodyEquippedとbodyAssemblyIdの
+    // 不一致はequipment snapshotから導出されるrunContextという契約上production構築不能なため)。
+    const sharedMotorConfig = goodMotorConfig();
+    const sharedDestructionConfig = goodLipoDestructionConfig({
+      d07: {
+        thermal: { conductionCoefficient: 1, dissipationCoefficient: 1e-6 },
+        irreversible: { kind: 'demagnetizing', magnetHeatGaugeLimit: 0.05, reversibleDroopThreshold: 0.02, reversibleDroopMultiplier: 0.95, demagnetizationDeltaFraction: 0.1 },
+      },
+    });
+    const sharedRunContext = fireExposedVehicleRunContext();
+
+    const testRunSnapshot = captureRunSnapshot(vehicleSnapshotInput({
+      motorConfig: sharedMotorConfig,
+      destructionConfig: sharedDestructionConfig,
+      runContext: sharedRunContext,
+      initialDestructionState: createInitialDestructionState('lipo'),
+      track: null,
+      courseLengthM: 10,
+      slopeRad: 0,
+    }));
+    let accumulator: RunAccumulator = createRunAccumulator(testRunSnapshot);
+    let vehicleState: VehicleSimState = testRunSnapshot.initialVehicleState!;
+    let sawD07 = false;
+    for (let i = 0; i < 120 && !sawD07; i++) {
+      const result = stepTestRunWithDestruction(vehicleState, accumulator, 1 / 120);
+      vehicleState = result.physicsState;
+      accumulator = result.accumulator;
+      expect(result.termination).toBeNull();
+      sawD07 = accumulator.events.some((e) => e.mode === 'D07');
+    }
+    expect(sawD07).toBe(true);
+
+    const realOutcome = finalizeRun(accumulator, { kind: 'manualAbort' });
+    expect(realOutcome.degradationDiffs).toContainEqual({ role: 'magnet', kind: 'demagnetization', deltaFraction: 0.1 });
+    expect(realOutcome.events.some((e) => e.mode === 'D07')).toBe(true);
+
+    const trackRunSnapshot = captureRunSnapshot(vehicleSnapshotInput({
+      motorConfig: sharedMotorConfig,
+      destructionConfig: sharedDestructionConfig,
+      runContext: sharedRunContext,
+      initialDestructionState: createInitialDestructionState('lipo'),
+      track: goodTrack(),
+      courseLengthM: null,
+      slopeRad: null,
+    }));
+    const restored = restoreRunSnapshot(JSON.parse(JSON.stringify(trackRunSnapshot)));
+    expect(restored.ok).toBe(true);
+    expect(trackRunSnapshot.track).not.toBeNull();
+    expect(runSnapshotConfigFingerprint(trackRunSnapshot)).toEqual(runSnapshotConfigFingerprint(testRunSnapshot));
+
+    const outcome: RunOutcome = { ...realOutcome, replaySnapshot: trackRunSnapshot };
+    // R2是正: bodyEquipped:trueなrunContextと整合するよう、body装備済みloadoutからsnapshotを捕捉する。
+    const { inventory, loadout } = inventoryAndLoadoutWithBody();
+    const envelope = envelopeForWithLoadout(outcome, 1, loadout);
+    const result = applyRunOutcome(envelope, inventory, new Set(), goodSaveMeta());
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.result.newlyDiscoveredModes).toContain('D07');
+      const magnet = result.nextInventory.items.find((item) => item.itemId === envelope.equipmentSnapshot.magnetItemId);
+      expect(magnet?.wearState).toMatchObject({ demagnetizationFraction: 0.1 });
+      // D07はbody/battery diffsを一切生成しないため、body個体は不変のままであることも確認する。
+      const body = result.nextInventory.bodyParts.find((b) => b.assemblyId === envelope.equipmentSnapshot.bodyAssemblyId);
+      expect(body?.scorchFraction).toBe(0);
+      expect(result.nextInventory.items.some((item) => item.itemId === envelope.equipmentSnapshot.batteryItemId)).toBe(true);
+    }
+  });
+
+  it('69. runSequence冪等性(§10.3): D04由来のdegradationDiffsを含むenvelopeを同一runSequenceで2回適用すると、2回目はapplied:falseでスキップされ、劣化が二重適用されない', () => {
+    const snapshot = captureRunSnapshot(motorSnapshotInput({
+      motorConfig: goodMotorConfig({ slitWidthMm: 0 }),
+      destructionConfig: goodLipoDestructionConfig(),
+      runContext: fireExposedMotorRunContext(),
+      initialDestructionState: createInitialDestructionState('lipo'),
+    }));
+    let accumulator: RunAccumulator = createRunAccumulator(snapshot);
+    let motorState: SimState = initialSimState();
+    let termination: RunOutcome | null = null;
+    for (let i = 0; i < 60 && termination === null; i++) {
+      const result = stepMotorWithDestruction(motorState, accumulator, 1 / 120);
+      motorState = result.physicsState;
+      accumulator = result.accumulator;
+      termination = result.termination;
+    }
+    expect(termination).not.toBeNull();
+
+    const envelope = envelopeFor(termination!, 1);
+
+    const first = applyRunOutcome(envelope, baseInventory(), new Set(), goodSaveMeta());
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    expect(first.result.applied).toBe(true);
+    const magnetAfterFirst = first.nextInventory.items.find((item) => item.itemId === envelope.equipmentSnapshot.magnetItemId);
+    expect(magnetAfterFirst?.wearState).toMatchObject({ demagnetizationFraction: 0.15 });
+
+    // 同一envelope・同一runSequence(1)を、1回目の適用後のnextInventory/nextSaveMetaへ再送する
+    // (lastAppliedRunSequenceが1へ進んでいるため、5.2節の分岐によりok:true・applied:falseで
+    // スキップされるはず)。
+    const second = applyRunOutcome(envelope, first.nextInventory, first.nextDiscoveredModes, first.nextSaveMeta);
+    expect(second.ok).toBe(true);
+    if (!second.ok) return;
+    expect(second.result.applied).toBe(false);
+    expect(second.result.resolvedDegradations).toEqual([]);
+    const magnetAfterSecond = second.nextInventory.items.find((item) => item.itemId === envelope.equipmentSnapshot.magnetItemId);
+    expect(magnetAfterSecond?.wearState).toMatchObject({ demagnetizationFraction: 0.15 }); // 二重適用されていない(0.30ではない)
+  });
+
+  it('70. 原子性(§10.3、D04複合diff負例、Suu_mot3ゲート7レビューP3是正): body未装備の状態でbattery consumed+magnet scorch+body scorchを含むD04 RunOutcomeを適用しようとするとmissingEquipment(role:body)で失敗し、入力inventoryが一切変異しない(検証→適用の2段階原則がD04複合diffでも守られる)', () => {
+    // 既存の汎用原子性テスト(#31、戻りエラーのみをassertするもの)はD04固有の複合diff
+    // (battery+magnet+body)では代替にならないというご指摘どおり、D04実wrapperが生成した
+    // 本物の複合diffを使い、かつ入力inventoryオブジェクト自体の非変異を直接確認する。
+    const snapshot = captureRunSnapshot(vehicleSnapshotInput({
+      motorConfig: goodMotorConfig({ slitWidthMm: 0 }), // 持続短絡
+      destructionConfig: goodLipoDestructionConfig(),
+      runContext: fireExposedVehicleRunContext(),
+      initialDestructionState: createInitialDestructionState('lipo'),
+      track: null,
+      courseLengthM: 10,
+      slopeRad: 0,
+    }));
+    let accumulator: RunAccumulator = createRunAccumulator(snapshot);
+    let vehicleState: VehicleSimState = snapshot.initialVehicleState!;
+    let termination: RunOutcome | null = null;
+    for (let i = 0; i < 60 && termination === null; i++) {
+      const result = stepTestRunWithDestruction(vehicleState, accumulator, 1 / 120);
+      vehicleState = result.physicsState;
+      accumulator = result.accumulator;
+      termination = result.termination;
+    }
+    expect(termination).not.toBeNull();
+    expect(termination!.degradationDiffs).toContainEqual({ role: 'battery', kind: 'consumed' });
+    expect(termination!.degradationDiffs).toContainEqual({ role: 'body', kind: 'scorch', deltaFraction: 0.2 });
+    expect(termination!.degradationDiffs).toContainEqual({ role: 'magnet', kind: 'scorch', deltaFraction: 0.15 });
+
+    // Suu_mot3ゲート7是正レビュー2 R3是正: このoutcomeのrunContext.fireExposureProfile.
+    // bodyEquipped=trueはbody装備済みloadoutから捕捉したequipment snapshotとのみ整合する
+    // (bodyAssemblyId:nullのbase loadoutを使うとrunContextとequipment snapshotが食い違い、
+    // beginRun時点から自己矛盾したproduction構築不能な状態になってしまう)。正当な
+    // missingEquipment負例は「run開始時にはbodyが装備されていたが、適用時のinventoryでは
+    // 当該body個体が欠落している」(走行後・適用前にbodyを売却/分解した等)という状況であるべき
+    // なので、body装備済みloadoutからsnapshotを捕捉したうえで、適用時のinputInventoryからのみ
+    // 当該body個体を除去する。
+    const { inventory: inventoryWithBody, loadout: loadoutWithBody } = inventoryAndLoadoutWithBody();
+    const envelope = envelopeForWithLoadout(termination!, 1, loadoutWithBody);
+    expect(envelope.equipmentSnapshot.bodyAssemblyId).toBe(loadoutWithBody.bodyAssemblyId); // 前提: run開始時点ではbody装備済み
+
+    const inputInventory: PlayerInventory = {
+      ...inventoryWithBody,
+      bodyParts: inventoryWithBody.bodyParts.filter((b) => b.assemblyId !== envelope.equipmentSnapshot.bodyAssemblyId),
+    };
+    const inputInventorySnapshotForComparison: PlayerInventory = JSON.parse(JSON.stringify(inputInventory));
+
+    const result = applyRunOutcome(envelope, inputInventory, new Set(), goodSaveMeta());
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toEqual({ kind: 'missingEquipment', role: 'body' });
+    }
+
+    // 入力inventoryオブジェクト自体が一切変異していないこと(部分適用の禁止)。deep equalで
+    // 全体を確認したうえで、batteryが消えていない・magnetが変化していないことを個別にも確認する。
+    expect(inputInventory).toEqual(inputInventorySnapshotForComparison);
+    expect(inputInventory.items.some((item) => item.itemId === envelope.equipmentSnapshot.batteryItemId)).toBe(true);
+    const magnet = inputInventory.items.find((item) => item.itemId === envelope.equipmentSnapshot.magnetItemId);
+    const magnetBefore = inputInventorySnapshotForComparison.items.find((item) => item.itemId === envelope.equipmentSnapshot.magnetItemId);
+    expect(magnet?.wearState).toEqual(magnetBefore?.wearState);
   });
 });

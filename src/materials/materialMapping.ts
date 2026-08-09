@@ -12,15 +12,17 @@ import {
   applyMassAdjustmentToBaselineG,
   type WindingParams,
 } from './assumedGeometry';
-import { BATTERY_MATERIALS, GEAR_MATERIALS, MAGNET_MATERIALS, WIRE_MATERIALS, type BatteryMaterial, type GearMaterial, type MagnetMaterial, type WireMaterial } from './materials';
+import { BATTERY_MATERIALS, BODY_MATERIALS, GEAR_MATERIALS, MAGNET_MATERIALS, WIRE_MATERIALS, type BatteryMaterial, type GearMaterial, type MagnetMaterial, type WireMaterial } from './materials';
 import type { MotorConfig } from '../engine/motorPhysics';
 import type { CarConfig } from '../engine/vehiclePhysics';
-import type { BatteryDestructionConfig } from '../engine/destructionOrchestration';
+import type { BatteryDestructionConfig, DestructionConfig } from '../engine/destructionOrchestration';
 
 export type GearMaterialId = (typeof GEAR_MATERIALS)[number]['id'];
 export type MagnetMaterialId = (typeof MAGNET_MATERIALS)[number]['id'];
 export type WireMaterialId = (typeof WIRE_MATERIALS)[number]['id'];
 export type BatteryMaterialId = (typeof BATTERY_MATERIALS)[number]['id'];
+// 正式Fable P3-2裁定(0.2節): 既存Gear/Magnet/Wire/Batteryと同じexportパターンを踏襲する新規export。
+export type BodyMaterialId = (typeof BODY_MATERIALS)[number]['id'];
 
 /**
  * ギヤ材質の効率比率(設計較正値、カタログ物性ではない)。
@@ -428,4 +430,167 @@ export function mapD03DestructionConfig(
     profile: 'nonLipo',
     shortCircuitDurationLimitS: BATTERY_SHORT_CIRCUIT_DURATION_LIMIT_S_CANDIDATE[batteryId],
   };
+}
+
+// ---------------------------------------------------------------------------
+// P3-2ゲート2: D04(リポ経路)+D07(三段開示骨格)較正値の写像(docs/phase3-p3-2-plan.md v9 §8、
+// 正式Fable技術レビュー2026-08-08条件付き承認+人間再承認バンドル承認済み)。
+// 本ゲートは純関数の実装+単体テストまでを行う。advanceD04/advanceD07・composeEffectiveMotorConfig
+// への接続、物理到達sweepによる係数確定はゲート3〜5のスコープであり本ゲートには含まない。
+// ---------------------------------------------------------------------------
+
+// D04較正値(P3-2ゲート5)。正式Fable補足裁定(P3-2ゲート5 Q13-1、2026-08-09、
+// 人間再承認済み2026-08-09T06:20)により確定。docs/phase3-p3-2-plan.md 14.1節参照。
+//
+// 経緯: ゲート2の設計初期候補(3.0秒・0.9・2.0+2.0)のままではM4到達可能性条件(3)
+// 「短絡構成がoverheated終端より先にburningへ到達できること」を満たせないことが
+// ゲート5のsweep実測(production-valid構成)で判明し、いったんstageDurations={0.05,0.05}
+// (各3描画フレーム@60fps)へ短縮したが、これはart-spec §7「アニメーション時間規律」の
+// 12fps格子(5描画フレーム=0.0833秒)単位を下回り、膨張→発煙を人間が識別可能な症状として
+// 提示できなかった(Suu_mot3レビューP2指摘)。production-valid held-short構成での
+// feasibility実測(`docs/phase3-p3-2-gate5-calibration-review-request.md`表1〜3)により、
+// 離散時間シミュレーションとして達成可能な真に最速のentryでも、overheated到達までの
+// 残り時間窓は最大19〜21フレーム(0.158〜0.175秒)しかなく、1段階あたり12fps格子1個
+// (0.0833秒)を満たそうとすると2段階合計0.1667秒が必要になり、この窓に収まらない——
+// 「M4条件(3)を満たす」ことと「各段階をUIで識別可能にする」ことが、V2由来のoverheated
+// 終端とD04熱暴走進行という同一物理過程の二重表現のせいで両立不可能だった構造的対立が、
+// Q13-1裁定(overheated保留規則、`src/engine/destructionOrchestration.ts`の
+// `normalizeOverheatedStatusForD04Hold`)により解消された。電池がlipoでD04 stageが
+// {swelling,smoking}の間はoverheated終端が保留されるため、時間予算の制約が消え、
+// 段階を可視の長さへ戻せる。
+const D04_SHORT_CIRCUIT_DURATION_LIMIT_S_CANDIDATE = 0.05; // Q13-1裁定はentry timing自体を変更対象にしていないため現状維持(段階時間の可視化はstageDurationsとoverheated保留規則が担う)
+const D04_RUNAWAY_HEAT_THRESHOLD_CANDIDATE = 0.3; // 同上、現状維持
+const D04_STAGE_DURATIONS_CANDIDATE = { swellingS: 0.35, smokingS: 0.25 }; // Q13-1裁定で確定(12fps格子4個+3個、合計0.6秒)。過放電経路M4条件(2)とのマージンは新M4条件系sweepで再実証する
+const D04_INTERNAL_RESISTANCE_DEGRADATION_MULTIPLIER = 1.5; // 正式Fable P3-2-Q1裁定、人間再承認済みの初期候補値(バンドルで値として提示・承認済み、変更なし)
+
+/**
+ * リポ電池素材→D04用BatteryDestructionConfig(lipo枝)の写像純関数。P3-2はfixtureのみが
+ * 直接呼ぶ(gameStore配線はP3-4)。internalResistanceDegradationMultiplier(1.5)は
+ * 人間再承認バンドルで値として提示・承認された初期候補値。stageDurationsは正式Fable
+ * P3-2ゲート5 Q13-1裁定(2026-08-09、人間再承認済み)で確定した設計較正値
+ * ({swellingS:0.35, smokingS:0.25})。shortCircuitDurationLimitS・runawayHeatThresholdは
+ * Q13-1裁定の対象外のためゲート2時点の値を維持している。
+ * stageDurationsは呼び出しごとに新規オブジェクトを構築する(写像純関数の契約——戻り値の
+ * ネストオブジェクトを呼び出し元が変更しても、他の呼び出しの結果を汚染してはならない)。
+ */
+export function mapD04BatteryDestructionConfig(
+  batteryId: Extract<BatteryMaterialId, 'battery-lithium-polymer'>,
+): Extract<BatteryDestructionConfig, { profile: 'lipo' }> {
+  // batteryIdは現状'battery-lithium-polymer'の1値のみ(型で保証済み)。将来lipo系素材が
+  // 増えた場合はRecord化して網羅チェックをTypeScriptに委ねること(他のmapXxxと同じ規律)。
+  void batteryId;
+  return {
+    profile: 'lipo',
+    shortCircuitDurationLimitS: D04_SHORT_CIRCUIT_DURATION_LIMIT_S_CANDIDATE,
+    runawayHeatThreshold: D04_RUNAWAY_HEAT_THRESHOLD_CANDIDATE,
+    unsafeDischargeStartRatio: 0.9, // 正式P3-0裁定で確定済みの値(P3-0-Q2文脈)
+    stageDurations: { ...D04_STAGE_DURATIONS_CANDIDATE },
+    internalResistanceDegradationMultiplier: D04_INTERNAL_RESISTANCE_DEGRADATION_MULTIPLIER,
+  };
+}
+
+// ボディ素材の延焼deltaFraction(設計候補値)。'body-none'(hasPhysicalMaterial:false、
+// spec.md「なし〈むき出し〉」)は燃える実体自体が存在しないため0で正しい。他3素材は
+// いずれも可燃性の物理素材だが、素材間の焼損しやすさの差を裏付ける一次資料がないため、
+// D03のアルカリ/NiMH単一値と同じ規律で単一の候補値とする(差の発明を避ける)。
+const BODY_SCORCH_DELTA_FRACTION_CANDIDATE: Record<BodyMaterialId, number> = {
+  'body-none': 0,
+  'body-cardboard-cowl': 0.2,
+  'body-ps-cowl': 0.2,
+  'body-polycarbonate-clear': 0.2,
+};
+
+/** ボディ素材→D04延焼時のbodyScorchDeltaFraction較正値の写像純関数(Record全網羅、設計候補値)。 */
+export function mapBodyScorchDeltaFraction(bodyId: BodyMaterialId): number {
+  return BODY_SCORCH_DELTA_FRACTION_CANDIDATE[bodyId];
+}
+
+// 正式Fable P3-2-Q5裁定(確定): magnetScorchDeltaFractionはD07のdemagnetizationDeltaFractionの
+// 再利用ではなく独立フィールドとして維持する(火災は数百℃の急性熱曝露、D07不可逆到達は
+// 動作限界の踏み越えで熱量が桁で異なるため)。ただし全磁石素材でmagnetScorchDeltaFraction >=
+// demagnetizationDeltaFractionを満たす制約があり(火災が閾値踏み越えより軽いことは決してない)、
+// nonDemagnetizing磁石には0を返す(8節)。
+const MAGNET_SCORCH_DELTA_FRACTION_CANDIDATE: Record<MagnetMaterialId, number> = {
+  'magnet-ferrite': 0, // nonDemagnetizing(spec.md 558行目「他は事実上安全」)
+  'magnet-alnico': 0, // nonDemagnetizing(同上。逆磁界減磁はV3本編対象外、spec.md 119・544行目)
+  'magnet-samarium-cobalt': 0, // nonDemagnetizing(同上)
+  'magnet-neodymium': 0.15, // demagnetizing。人間再承認済みの初期候補値。demagnetizationDeltaFraction(0.10)以上を満たす
+};
+
+/**
+ * 磁石素材→D04延焼時のmagnetScorchDeltaFraction較正値の写像純関数(Record全網羅)。
+ * nonDemagnetizing磁石(mapD07DestructionConfigのirreversible.kind==='nonDemagnetizing')には
+ * 常に0を返す。全磁石素材でこの値がmapD07DestructionConfig(m).irreversible.kind==='demagnetizing'
+ * の場合のdemagnetizationDeltaFraction以上であることを単体テストで固定する(付帯条件4)。
+ */
+export function mapMagnetScorchDeltaFraction(magnetId: MagnetMaterialId): number {
+  return MAGNET_SCORCH_DELTA_FRACTION_CANDIDATE[magnetId];
+}
+
+// D07較正値(P3-2ゲート5、2026-08-08計測。production-valid構成での再sweepで裏付け済み、
+// ただしSuu_mot3ゲート5レビューを経て正式にはまだ未確定)。thermalは磁石の種類によらず常に
+// 必要(HUD熱ゲージ、候補(ii)の構造)。一次資料なく磁石種別の熱容量差を発明しないため、
+// D03のアルカリ/NiMH単一値と同じ規律で全磁石共通の単一候補値とする。
+// conductionCoefficient(旧候補0.001)はゲート2で設定した設計初期候補のままではQ11受け入れ条件
+// (1)〜(3)を満たせないことがゲート5のsweep実測で判明したため改訂した(Suu_mot3の事前許可に
+// 基づく)。dissipationCoefficient(0.5)は人間再承認バンドルに個別値の記載がなく、ゲート2で
+// 新たに設定した設計初期候補のまま(変更なし)。
+//
+// 実測根拠(vehicle文脈stepTrackRun経由、production-valid素材写像config——
+// composeConfigFromMaterialsの実出力を主経路に使い、player-adjustable値〈coilTurns・
+// magnetDistanceMm・brushPressure・gearRatio・tireGrip・slopeDeg〉のみを変更、2026-08-09再計測):
+// 熱ゲージの定常平衡値≈電流²×k(k=conduction/dissipation)という式に基づきk=0.5
+// (conduction=0.25, dissipation=0.5)を採用。磁石=neodymium(magnetStrength=0.9、
+// mapMagnetStrengthCalibration実測上限)固定で、通常負荷(battery-alkaline+gear-pom+
+// wire-copper-standard、既定player値、30秒間)でmaxGauge=0.327(droop非到達、条件1)、
+// 高負荷(battery-alkaline+gear-titanium+wire-silver、coilTurns=20・magnetDistanceMm=5・
+// brushPressure=0.5・gearRatio=8・tireGrip=0.9、平坦)でdroopAtStep=21(到達可能、条件2。
+// 最終的にstep147でoverheated終端に達するがdroop到達自体は先に成立)、意図的な持続過負荷
+// (同素材選択、coilTurns=15・magnetDistanceMm=3・brushPressure=0.5・gearRatio=10・
+// tireGrip=1.0・slopeDeg=20)でdroopAtStep=17・irreversibleAtStep=28・overheatedAtStep=72
+// (不可逆到達がoverheated終端より先、条件3)をそれぞれ実測した。旧測定(P1指摘で無効化、
+// magnetStrength=2.0/6.0等の実在写像範囲外の値を使用)より弱いmagnetStrength上限(0.9)でも
+// player-adjustable値側の調整で同等の受け入れ条件到達を再現できることを確認済み。
+const D07_THERMAL_CANDIDATE = { conductionCoefficient: 0.25, dissipationCoefficient: 0.5 };
+
+// irreversible.kind: spec.md(§14相当データ表、558行目)「ネオジムのみ実用域で発生、他は
+// 事実上安全」という確定済みの正典記述に基づく(独自の物理判断の発明ではなく正典の転記)。
+// アルニコの既知の弱点(逆磁界減磁)はV3本編のD07(熱減磁のみ)の対象外であるため
+// nonDemagnetizingに含めて矛盾しない(spec.md 119・544行目)。
+const MAGNET_IS_DEMAGNETIZING: Record<MagnetMaterialId, boolean> = {
+  'magnet-ferrite': false,
+  'magnet-alnico': false,
+  'magnet-samarium-cobalt': false,
+  'magnet-neodymium': true,
+};
+
+// demagnetizing磁石(現状neodymiumのみ)向けの候補値。magnetHeatGaugeLimit(0.8)>
+// reversibleDroopThreshold(0.5)を満たす。人間再承認バンドルで値として提示・承認された
+// 初期候補はreversibleDroopMultiplier(0.95)・demagnetizationDeltaFraction(0.10)の2値のみ。
+// magnetHeatGaugeLimit(0.8)・reversibleDroopThreshold(0.5)はバンドル上個別値の記載がなく、
+// ゲート2で新たに設定した設計初期候補である(Suu_mot3ゲート2追補レビュー指摘の是正)。
+// いずれもゲート5 sweep前で未確定という点は共通。
+const D07_DEMAGNETIZING_CANDIDATE = {
+  magnetHeatGaugeLimit: 0.8,
+  reversibleDroopThreshold: 0.5,
+  reversibleDroopMultiplier: 0.95,
+  demagnetizationDeltaFraction: 0.1,
+};
+
+/**
+ * 磁石素材→D07用DestructionConfig['d07'](候補(ii)の{thermal,irreversible}2部構成)の
+ * 写像純関数。P3-2はfixtureのみが直接呼ぶ(gameStore配線はP3-4)。reversibleDroopMultiplier
+ * (0.95)・demagnetizationDeltaFraction(0.10)は人間再承認バンドルで値として提示・承認された
+ * 初期候補値。thermal係数・magnetHeatGaugeLimit・reversibleDroopThresholdはバンドル上
+ * 個別値の記載がなくゲート2で設定した設計初期候補値である。いずれもゲート5のsweep実測で
+ * 最終確定する(未確定という点は共通)。thermal・irreversibleとも呼び出しごとに新規
+ * オブジェクトを構築する(写像純関数の契約——戻り値のネストオブジェクトを呼び出し元が
+ * 変更しても、他の呼び出しの結果を汚染してはならない)。
+ */
+export function mapD07DestructionConfig(magnetId: MagnetMaterialId): DestructionConfig['d07'] {
+  const thermal = { ...D07_THERMAL_CANDIDATE };
+  if (!MAGNET_IS_DEMAGNETIZING[magnetId]) {
+    return { thermal, irreversible: { kind: 'nonDemagnetizing' } };
+  }
+  return { thermal, irreversible: { kind: 'demagnetizing', ...D07_DEMAGNETIZING_CANDIDATE } };
 }

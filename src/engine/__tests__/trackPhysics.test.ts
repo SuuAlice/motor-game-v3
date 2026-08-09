@@ -474,9 +474,11 @@ describe('Phase3受け入れ基準: createValidatedTrack(fail-fast契約)', () =
 });
 
 // Phase2 Step5b(docs/phase2-plan.md §7・§8、Fable承認済み+訂正済み追加条件2):
-// batteryCapacityRatioのengine拡張(trackPhysics.tsのcomputeEnergyBudgetJのみで
-// 参照される、非export)。budgetはテスト側でBATTERY_CAPACITY_J_1_5V/_3_0V×ratio
-// として算出し、production側のcomputeEnergyBudgetJはexportしない。
+// batteryCapacityRatioのengine拡張(trackPhysics.tsのcomputeEnergyBudgetJが参照する)。
+// budgetはテスト側でBATTERY_CAPACITY_J_1_5V/_3_0V×ratioとして算出する(このテストは
+// Step5bの比率契約自体の検証が目的であり、production側のexportされた実関数の直接呼び出しは
+// P3-2ゲート4のdestructionOrchestration.test.tsで別途検証する、docs/phase3-p3-2-plan.md v11)。
+// なお、computeEnergyBudgetJはP3-2ゲート4でexportへ変更された(本体は無改修)。
 describe('Phase2 Step5b: 電池ratio(容量)のengine拡張', () => {
   function runTrajectory(motorConfig: MotorConfig, carConfig: CarConfig, t: ReturnType<typeof createValidatedTrack>, n: number, rngSeed = 1) {
     const rng = mulberry32(rngSeed);

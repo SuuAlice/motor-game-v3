@@ -226,7 +226,69 @@
 以下は、v12の記述に対する確認事項として裁定を経た項目だが、v12本体の**具体的な記述テキストを上書きするものではない**ため、本台帳のエントリとしては採用しなかった。監査を実施したことの記録として残す。
 
 - **P3-1-Q1(D01漸減物理のスコープ限定)**: v12 §3のD01行は「実効巻数・占積が漸減、振動増…走行継続」という**最終的な設計目標**を記述しており、本裁定はこの目標自体を変更するものではなく、P3-1がこの目標のうち「崩壊開始イベント+既存恒久劣化」のみを実装し、「漸減」の実装をP3-3へ先送りするという**実装順序・スコープの決定**である。v12の記述はP3-3完了時点でそのまま妥当することが意図されており、上書きに当たらない。
+  - **追記(2026-08-08、正式Fable P3-2-Q12裁定による返済記録の追補)**: 返済先はP3-3のまま(変更なし)。ただし「D01漸減は車体層専用パターンに属し`composeEffectiveMotorConfig`〈P3-2新設〉の対象外」という、P3-2計画v1〜v5が抱いていた層の整理は**誤りと訂正**された——spec §7.1.1の「実効巻数・占積の漸減」はトルク定数・抵抗というモーター層の量であり、`composeEffectiveMotorConfig`の対象そのものである(既存の`axisOffsetMm`一回加算は漸減とは別物の暫定実装、`vehiclePhysics.ts`に残る車体層専用パターンである)。P3-3送りの正当な理由は層ではなく**スコープ規律**(P3-2は本フェーズ最大のステップであるため)。**返済形**: 機構(`composeEffectiveMotorConfig`)自体はP3-2で導入済みのため、P3-3での回収は「D01分岐の追加+較正sweep」に縮小する。詳細は`docs/phase3-p3-2-plan.md`(v6)0.3節5・7節Q12を参照。
 - **P3-1-Q3(D03短絡持続時間の較正値3.0秒)**: v12 §3のD03行は`config.battery.shortCircuitDurationLimitS`という**実行時configパラメータ**を参照する形で記述されており、具体的な数値をv12本文が指定していない(値は`materialMapping.ts`が素材写像として供給する設計、v12 §12参照)。本裁定はこのconfigパラメータの候補値(3.0秒)をsweep実測で確定した**較正決定**であり、v12本文の記述を上書きするものではない。
+
+---
+
+## P3-2-Q1〜Q12: D04(リポ経路)+D07(三段開示骨格)実装計画の確定裁定
+
+- **日付**: 2026-08-08(正式Fable技術レビュー、人間プロジェクトリード直接提示)。
+- **対象文書**: `docs/phase3-p3-2-plan.md`(v6、v1〜v5の往復レビュー〈Suu_mot3必須修正計28点相当〉を経て正式Fable提出、条件付き承認)。
+- **置換対象節(v12)**: §3(D04/D07行)・§3.2(実効config合成)・§12(P3-2 DoD)。
+- **人間再承認**: **要(6項目のみ)**。詳細は`docs/phase3-p3-2-human-reapproval-bundle.md`を参照。Q10・Q12は人間再承認不要と明示的に裁定された。
+- **実装ステップ**: P3-2サブステップ0〜7(**人間再承認バンドル承認待ち、未着手**)。
+- **出典**: `docs/phase3-p3-2-plan.md`(v6)7節「確定裁定一覧」に全文引用。
+
+各裁定の要旨(詳細・実装コードは出典を参照):
+
+| 番号 | 要旨 | 人間再承認 |
+|---|---|---|
+| P3-2-Q1 | D04内部抵抗悪化係数を単一値`internalResistanceDegradationMultiplier`(swelling/smoking区別なし、初期候補値1.5)とする | 要 |
+| P3-2-Q2 | D07可逆熱ダレ係数`reversibleDroopMultiplier`(初期候補値0.95) | 要(Q5と統合) |
+| P3-2-Q3 | D04/D07の実効config合成順序は乗算の可換性により無意味、単一式`実効B = base × (1−不可逆分) × 可逆分`で表現する | 不要(実装詳細) |
+| P3-2-Q4 | D04状態機械5点: (i)`overDischargeActive`毎フレーム再評価、(ii)段階タイマー不可逆進行(物理的正当化明記)、(iii)混合原因は`D04CauseLog.initiatingCause`新設で記録、(iv)stage/cause交差不変条件3条をvalidatorで拒否、(v)`affectedRoles`重複禁止は`validateFireExposureProfile`への拒否ロジック追加で保証 | (iii)(v)のみ要 |
+| P3-2-Q5 | 劣化量供給経路はevent埋め込み方式(`DestructionConfig.d04`+`UnstampedDestructionEvent`拡張)。`magnetScorchDeltaFraction`はD07の`demagnetizationDeltaFraction`の再利用ではなく独立フィールド(火災は急性熱曝露で物理的原因が異なるため)、ただし`magnetScorch >= demag`を全磁石素材で不変条件化 | 要 |
+| P3-2-Q6 | `RunSnapshot`へ`courseLengthM`・`slopeRad`を追加(案A、既存`context`+`track`構造への交差検証拡張)。判別union化(案B)は`DestructionRunContext.context`と意味の重複する第二の判別子を作るため不採用。`contractVersion`1→2 | 要 |
+| P3-2-Q7 | `regressionDiff`のbaselineは同一`recipeKey`直近5回(当該run除く)の中央値(`REGRESSION_BASELINE_WINDOW=5`は契約定数)。型設計は`metricKind`から`degradationDirection`を導出する純関数案 | 不要(P3-2内で完結する新規純関数) |
+| P3-2-Q8 | P3-1完了報告の申し送り「実wrapper×全endReason網羅」は、到達不能な`derailed`/`energyExhausted`について構造的証明の引用+到達可能6種の正例テストで充足したとみなす(track-run文脈での必須網羅はP3-4へ台帳送り) | 不要 |
+| P3-2-Q9 | D04途中段階終了時のノート記録は、`PendingNotebookRecord`3腕へ`finalDestructionState: DestructionState`を追加する方針(案B)を承認。型変更の実装はP3-4のgameStore配線サブステップで行う(P3-2時点は書き手不在のため「死にフィールド」を作らない) | 要(方針のみ、実装はP3-4) |
+| P3-2-Q10 | `stepMotorWithDestruction`への実効config合成追加(内部改修、公開シグネチャ不変)は、v12 §3.2の凍結契約(実効configはwrapper内部で毎step合成)の履行であり契約変更ではない | **不要** |
+| P3-2-Q11 | D07熱ゲージ入力源は候補A(I²R/伝導、失速・過負荷時に減磁リスク最大という物理的根拠)。磁石構造は候補(ii)(`{thermal, irreversible}`の2部構成、0〜1ゲージ規約を満たす)。受け入れ条件4点+nonDemagnetizing負例1点 | 要(Q5と統合) |
+| P3-2-Q12 | D01漸減の返済先はP3-3のまま(スコープ規律が理由。層の整理は誤りと訂正、P3-1-Q1エントリへ追記済み) | **不要** |
+
+**付帯条件6点(すべて確定、実装DoDへ反映済み)**: (1)予算不変性テスト(`composeEffectiveMotorConfig`合成前後で`computeEnergyBudgetJ`不変)、(2)`stepTestRunWithDestruction`のJSDocへvehicle文脈専用のtrusted precondition明記、(3)D04較正の結合条件(短絡経路の炎上到達可能性の解析的裏付け)を本文明記、(4)`magnetScorchDeltaFraction >= demagnetizationDeltaFraction`不等式テスト、(5)D07 Q11負例+到達可能性条件(3)をDoDへ明記、(6)test-runでの過放電到達が意図仕様であることを1行明記。
+
+**必須修正2点(v5→v6で反映済み)**: (M-1)dt分割不変性テストの定義誤り——「1/120s×N vs 1/240s×2N」は固定物理dt=1/120sの正典に反する。正しい比較はdt固定のまま「1物理step×2Nフレーム vs 2物理step×Nフレーム」というバッチング比較。(M-2)`RunSnapshot.slopeRad`が`stepTestRun`(既存、7番目の引数)へ実際に渡され消費されることを確認・配線(死にフィールド化の回避)。
+
+---
+
+## P3-2-Q13-1: overheated保留規則+Phase3-Q2適用範囲注記
+
+- **日付**: 2026-08-09T05:29(正式Fable補足裁定、人間プロジェクトリード直接提示、Suu_mot3中継確認済み)。人間再承認: 保留中(本エントリが対象)。
+- **命名の明確化(本エントリ固有の注意)**: 本エントリの見出し「Q13-1」は`docs/phase3-p3-2-plan.md`(P3-2計画)のゲート5較正裁定依頼(`docs/phase3-p3-2-gate5-calibration-review-request.md`)内の質問番号であり、**「Phase3-Q2」(本エントリが適用範囲を注記する対象、`docs/phase3-fable-review.md`59行目「§15重点質問」・`docs/phase3-plan-v12.md`804行目「正式Fable Q2回答」)とも、P3-2固有の質問リスト内「P3-2-Q2」(D07可逆ダレのRPM低下、本台帳の`P3-2-Q1〜Q12`エントリの表内Q2)とも別物である。** 番号の衝突を避けるため、以下の文中では常に「Phase3-Q2」「P3-2-Q2」「P3-2ゲート5のQ13-1」を明示的に書き分ける(過去に同種の命名衝突がP3-2ゲート5の是正過程で発見されている、教訓として`project_phase3_p3_2_gate_progress.md`〈alice_mot3メモリ〉に記録済み)。
+- **置換対象**: `docs/phase3-fable-review.md`59行目・`docs/phase3-plan-v12.md`804行目の「Phase3-Q2」原文——「D04が既存物理終了後に継続stepしない」という確定裁定。本エントリはこの原文自体を書き換えず、**適用範囲を注記として精密化する**(v12本体無編集の原則に従い、本台帳へ追記のみで反映する)。
+- **旧解釈(Phase3-Q2原文が単独で読まれた場合)**: 「D04が既存物理終了後に継続stepしない」という文言は、`overheated`終端(既存物理の終了条件の1つ)がD04進行中に成立した場合でも、物理stepをそこで止めるべきだと読める余地があった。この読み方のまま、D04段階時間(swelling/smoking)にart-spec §7の12fps格子1個(0.0833秒)以上を割り当てようとすると、production-valid構成での実測(ゲート5是正版feasibility表1〜3、`docs/phase3-p3-2-gate5-calibration-review-request.md`)により、離散時間シミュレーションとして達成可能な真に最速のentryでも、D04の2段階分の遷移時間をこの時間予算(最大19〜21フレーム)に収めることが構造的に不可能であることが判明した。
+- **新契約(確定、適用範囲注記)**: Phase3-Q2が禁じるのは「物理終了後の継続step」である。**電池が`lipo`で、D04の`stage`が`{swelling, smoking}`にある間は、`overheated`という物理終了条件そのものが成立しない(保留される)——これは物理終了の定義から、D04熱暴走進行との重複表現を除く措置であり、「終了後にstepを続ける」ことではない。** Phase3-Q2の他の作動規則(`energyExhausted`・`stalled`・`derailed`・`manualAbort`はD04によって保留されず、これらで走行が終われば段階は途中凍結する)は無変更のまま生き残る。保留対象は`overheated`のみ、根拠は「V2由来の`overheated`終端とD04熱暴走進行が、同一の物理過程〈電池の熱的破局〉の二重表現になっていたこと」のみである。
+- **有界性**: 保留は無限延命ではない。正式P3-2-Q4(ii)裁定(D04段階タイマーの不可逆進行)により、`swelling`突入から`swellingS + smokingS`後に`burning`が必ず成立するため、保留窓は段階合計時間で厳密に有界である。
+- **理由**: `docs/phase3-p3-2-plan.md`14.1節を参照(自己完結的な裁定理由・却下案・実装制約を記載、本エントリでは重複記載しない)。
+- **実装ステップ**: 未着手(Suu_mot3照合+人間再承認待ち、`docs/phase3-p3-2-plan.md`14.6節「ゲート5の残作業」参照)。
+- **人間再承認**: **要(未完了、本裁定の中核対象)**。既存確定裁定(Phase3-Q2)の適用範囲を狭める精密化であり、確定裁定を上書きする手続きとして人間再承認の対象とする(無申告の再解釈の前例を作らないため、Fable裁定文の明示的な指示)。
+- **出典**: `docs/phase3-p3-2-gate5-calibration-review-request.md`(v4、Q13-1)、Fable補足裁定原文(2026-08-09T05:29、Suu_mot3中継、agmsg履歴参照)、`docs/phase3-p3-2-plan.md`14節。
+
+---
+
+## P3-2-Q13-2: 「通常運用(NORMAL_OPERATION)で非到達」の正式定義+Q14精密化
+
+- **日付**: 2026-08-09T05:29(正式Fable補足裁定、人間プロジェクトリード直接提示、Suu_mot3中継確認済み。Q14精密化は2026-08-09T07:51、同様に人間プロジェクトリード直接提示・Suu_mot3中継確認済み)。
+- **置換対象節(v12)**: v12本体は「通常運用で非到達」の正式な基準構成・時間窓・電池を定義していない(意図的な空白)。本裁定はこの空白を埋める。
+- **旧契約**: なし(P3-1/P3-2の各sweep証跡が使ってきた「通常運用」の時間窓・構成はモードごとにバラバラで、正式な統一定義が存在しなかった)。
+- **新契約(確定)**: 基準構成(`NORMAL_OPERATION`基準)は素材={copper-standard, neodymium, pom, 対象電池}・player値すべて既定・攻め入力なし。第1条件(実在コース完走)は`src/data/tracks.ts`の実在プレイアブル全コースを自然完走し、`finished`・破壊イベントゼロ・D07 droop/irreversibleなし(全電池共通)。第2条件(持続挙動)は症状の物理型(平衡型/構造型/資源枯渇型)で時間窓の定め方を3分する。詳細は`docs/phase3-p3-2-plan.md`14.3節に自己完結記載(重複記載しない)。
+- **Q14精密化(確定、2026-08-09T07:51)**: 第1条件の予算条件(`maxEnergyUsedRatio`)を電池物理型別に分離する——LiPo(D04過放電経路が構造的に存在)は`maxEnergyUsedRatio ≤ 0.85`、nonLipo(alkaline/NiMH、D04が型レベルで不存在)は自然完走(`finished`、`ratio<1.0`と同値)のみ。**一般原則**(今後の受け入れ条件の作文規則): 受け入れ閾値は、その閾値が防ぐ危険が構造的に存在する対象にのみ適用する。契機: ゲート5是正版でQ13-2を全電池×実在全5コースへ拡張実測した結果、`energy-run`でalkaline(実測0.9970)・NiMH(実測0.9338)が旧`0.85`一律条件を超過することが判明した(`docs/phase3-p3-2-gate5-normal-operation-review-request.md`Q14として提出)。原因はbatteryCapacityRatio較正差(alkaline/NiMH=1.0、LiPo=1.3、人間再承認済み)による物理的に正しい帰結であり、`0.85`自体がD04固有の`unsafeDischargeStartRatio`(0.90)由来のためD04を持たないnonLipoには物理的参照先がなかった。
+- **理由**: 詳細な裁定理由(却下案(b)(c)の理由含む)は`docs/phase3-p3-2-plan.md`14.8節を参照(重複記載しない)。
+- **実装ステップ**: Q13-2本体はゲート5是正版で実装済み(`src/materials/__tests__/materialMapping.test.ts`のQ13-2通常運用確認テスト)。Q14精密化の反映(LiPo/nonLipo分離条件への変更)はGate5完了報告で実施。
+- **人間再承認**: 不要(Q13-2本体・Q14精密化のいずれも数値・閾値・production値・素材写像を変更せず、docs反映+Suu_mot3照合で足りると裁定済み)。
+- **出典**: `docs/phase3-p3-2-plan.md`14.3節・14.8節、`docs/phase3-p3-2-gate5-normal-operation-review-request.md`(Q14)、Fable補足裁定原文(2026-08-09T05:29・2026-08-09T07:51、Suu_mot3中継、agmsg履歴参照)。
 
 ---
 
@@ -247,6 +309,15 @@
 - **P3-1-Q4(fixture context統合)**: サブステップ4で完了。motor-only/test-run/track-runの3文脈それぞれについて、有効な`RunSnapshot`(`captureRunSnapshot`の実際の出力、`restoreRunSnapshot`検証成功済み)を使うtable-drivenテストで`applyRunOutcome`到達を確認済み(`src/store/__tests__/runOutcomeApplication.test.ts`)。
 - **P3-1-Q6**: 人間再承認済み(2026-08-04)。`createRunAccumulator(replaySnapshot)`単一引数化を実装済み(`src/engine/destructionOrchestration.ts`)。
 - **P3-1-Q9**: 人間再承認済み(2026-08-04)。`stepMotorWithDestruction`から`config`・`destructionConfig`両引数を削除する是正実装済み。非自明な破壊経路(held-short `motorConfig`+短時間`destructionConfig`)によるリプレイ等価テスト(`mulberry32(snapshot.seed)`で独立2run、D03発火+`destructionTerminal`終端を比較前にassert)も実装済み。
+- **P3-2-Q13-1(overheated保留規則+Phase3-Q2適用範囲注記)**: **人間再承認済み(2026-08-09T06:20、人間プロジェクトリード「overheated保留規則1点を再承認します」、Suu_mot3中継確認済み)。** ゲート5残作業(`docs/phase3-p3-2-plan.md`14.6節)の着手が解禁された。実装は未着手(本追補時点)。
+
+**Gate9追記(2026-08-09、以下は改訂7で追加。既存の上記各エントリは書き換えず追記のみ)**:
+
+- **P3-2-Q13-1(続報)**: 上記の「実装は未着手」はGate5着手前時点の記述である。**Gate5で実装完了・Suu_mot3照合通過済み。** `normalizeOverheatedStatusForD04Hold(state, destructionState)`を`src/engine/destructionOrchestration.ts`へexport純関数として新設し、`stepTestRunWithDestruction`(後述Gate6)を含む全wrapperがpre/post 2面契約(14.2節)で共通利用する。単体テスト・入力非破壊・同一step境界4ケース・保留窓有界性・terminal分類証跡・D03同一frame優先規則の境界fixtureは`src/engine/__tests__/destructionOrchestration.test.ts`に実装済み。
+- **P3-2-Q13-2/Q14(続報)**: **Gate5で実装完了・Suu_mot3照合通過済み。** `src/materials/__tests__/materialMapping.test.ts`のQ13-2通常運用確認テスト(table-driven)で、実在全5コース×全3電池(alkaline/NiMH/LiPo)=15組合せのうち、LiPoは`maxEnergyUsedRatio≤0.85`、nonLipo(alkaline/NiMH)は自然完走(`finished`)のみを要求する分離条件で15/15全適合を確認済み。
+- **Gate6(`RunSnapshot`拡張+`stepTestRunWithDestruction`)**: **完了・Suu_mot3照合通過済み(2026-08-09T09:07)。** `RunSnapshot`/`CaptureRunSnapshotInput`/`RestoredRunSnapshot`へ`courseLengthM`/`slopeRad`追加(`RUN_SNAPSHOT_CONTRACT_VERSION` 1→2)、`restoreRunSnapshot`へ交差検証3規則(motor⟹両方null/test-run⟹courseLengthM正の有限数・slopeRad有限数/track-run⟹両方null)を追加。`stepTestRunWithDestruction`を`src/engine/destructionOrchestration.ts`へ新設し、`vehiclePhysics.ts`は無改修のまま利用(到達可能6種の`status`全正例、`slopeRad`配線の実効果テスト込み)。
+- **Gate7(store fixture統合、`deriveFireExposureProfileFromLoadout`)**: **完了・Suu_mot3照合通過済み(2026-08-09T11:29)。** `deriveFireExposureProfileFromLoadout(snapshot)`を`src/store/runOutcomeApplication.ts`へ新設(gameStore.tsへの配線はP3-0-Q2裁定どおりP3-4まで延期)。D04/D07の劣化diffsがmotor-only/test-run(実wrapper)・track-run(実wrapperが生成した内部一貫性のあるRunOutcomeのevents/state/diffsをそのまま使い、`replaySnapshot`のみ有効なtrack-run snapshotへ差し替える方式)の3文脈で`applyRunOutcome`へ原子的に反映されることを`src/store/__tests__/runOutcomeApplication.test.ts`のfixtureテストで確認済み。`magnetScorchDeltaFraction >= demagnetizationDeltaFraction`(付帯条件4)は既存のGate2テスト(`src/materials/__tests__/materialMapping.test.ts`)が引き続き充足を固定している(Gate7で新規に狭い重複テストを追加後、既存テストとの重複が判明し削除した)。`RunSnapshot`の`courseLengthM`/`slopeRad`round-trip確認は`src/store/__tests__/saveStore.test.ts`に実装済み。
+- **Gate8(`src/materials/regressionDiff.ts`、三段開示段階2骨格)**: **完了・Suu_mot3照合通過済み(2026-08-09T12:10)。** `detectPerformanceRegression`のbaselineプールは、計画本文が明記する「同一recipeKey」に加えて**「同一metricKind」も一致条件へ含める**精密化をSuu_mot3が承認済み(単位の異なる指標を同一中央値計算に混在させないための実装上の帰結)。非有限値の扱いは「比較候補〈同一recipeKey・同一metricKind〉に1件でも非有限値があれば関数全体でnullを返す」というfail-closed契約(無言修復の禁止)で実装。`directionForMetricKind`はexport済み。単体テスト24件は`src/materials/__tests__/regressionDiff.test.ts`に実装済み。production配線(実行タイミング・永続化・UI表示)はP3-4のスコープ(v12 §5.3のA2裁定どおり)。
 
 ---
 
@@ -256,3 +327,7 @@
 - 改訂1(2026-08-04、Suu_mot3のv9+台帳照合指摘反映): (1) 全裁定番号を名前空間付き表記(`P3-1-Q<n>`等)へ変更し、本文中の相互参照(「Q2(a)と同型」等)も同様に修正。(2) `docs/phase3-p3-0-plan.md` §11を監査し、人間再承認済みでv12を追加・変更したP3-0-Q1〜Q7(`invalidRunSequence`高水位穴意味論・DestructionConfig production配線P3-4延期・RunApplicationEnvelope.notebookRecord等3点・battery消費後loadout null化・consumedEquipmentIds・ValidateDestructionConfigResult.invalidFields・deriveDegradationDiffs段階実装+発行可能event不変条件・RotorAssemblyState sourceWireMaterialId遡及承認)+P3-0-P1(lease未取得時の全saveStore書込みaction共通ブロック)の計9件(Q4a・Q4bは別エントリとして数える)を新規収録。P3-0-Q7はv12本文に既に反映済み(v12草稿段階での無申告変更を遡及承認したもの)である旨を明記し、他エントリと性質が異なることを注記。(3) P3-1-Q4エントリのtypo「endReault」→「endReason」訂正。(4) P3-1-Q6エントリへ、シグネチャ変更自体は実装・検証済みだがサブステップ3全体はP3-1-Q9是正待ちである旨の区別を追記。(5) P3-1-Q5エントリ中の「正式Fable Q6不変条件」表記を「正式Fable P3-0-Q6不変条件」へ訂正(P3-0-Q6エントリとの対応を明確化)。
 - 改訂2(2026-08-04、Suu_mot3のv10+台帳最終照合指摘反映): (1) 本改訂履歴末尾の件数誤記「計8件」を実際のエントリ数と一致する「計9件」へ訂正。(2) P3-0-Q1の実装ステップから不確かな「P3-0サブステップ1」というサブステップ番号表記を削除し、「P3-0で`src/store/runOutcomeApplication.ts`へ実装済み・commit済み」という事実ベースの記載へ変更。(3) P3-0-Q3の実装ステップを、`runOutcomeApplication.ts`(型定義)・`saveStore.ts`(`appendNotebookRecord`による実際の追記・trim処理)・`notebookStore.ts`(薄い委譲ビュー)・`ExperimentNotebook.tsx`(brabit_mot3所有のUI、旧確認ボタン撤去)にまたがる実装であることを明記し、単一ファイル・単一サブステップへの縮約を解消。(4) P3-0-Q4aの実装ステップを、契約型のnullable化(`runOutcomeApplication.ts`)と実際の自動null化適用ロジック(`saveStore.ts`の`commitApplyResult`)を分離して実ファイル名で記載。(5) P3-0-Q4bの実装ステップからサブステップ番号を削除。(6) P3-0-P1の実装ステップを全面訂正——共通ゲート機構が`runOutcomeApplication.ts`にあるという誤った記載を削除し、実際の適用主体である`saveStore.ts`の`readGatedFreshState`/`readFreshForApply`(11箇所の書き込みactionから共通に呼び出されていることを確認)を正しく記載。(7) P3-0-Q2の進捗を「P3-1 fixtureベースのみ、実装済み」から「fixture方針で進行中、production配線なし、P3-1全体は未完了(サブステップ4未着手のため)」へ訂正。(8) P3-1-Q4の進捗を「fixtureベース統合テストで代替検証、実装済み」から「P3-1サブステップ4で実装予定(未着手)」へ訂正。いずれも契約変更ではなく、台帳の実装証跡の事実訂正。
 - 改訂3(2026-08-04、正式Fable最終レビュー提出前の最終同期、Suu_mot3指示): (1) 冒頭運用規則の「番号単体の表記は用いない」bulletへ「※末尾の運用規則追補1で適用範囲を訂正」の一行注記を追加。(2) **運用規則追補1**を新設し、台帳entry見出し・台帳内cross-step参照・現行コードJSDocは完全名前空間必須、詳細計画書の同一P3-1節内shorthand・改訂履歴の原文記録は許容、P3-0/P3-1をまたぐ参照・複数文書をまたぐ参照は完全名前空間必須、と適用範囲を明文化(命名運用の自己矛盾解消、契約変更ではない)。(3) **実装状態追補**を新設し、既存エントリを書き換えずP3-1-Q4(サブステップ4完了、3文脈・有効snapshot)・P3-1-Q6(人間再承認済み・実装済み)・P3-1-Q9(人間再承認済み・是正実装済み・非自明リプレイ等価テスト済み)の現在状態を追記。
+- 改訂4(2026-08-08、正式Fable P3-2技術レビュー反映、Suu_mot3指示): (1) **P3-2-Q1〜Q12**エントリを新設し、`docs/phase3-p3-2-plan.md`(v6)の確定裁定12件+付帯条件6点+必須修正2点(M-1・M-2)の要旨を記録。人間再承認が必要な6項目(Q1・Q4-iii・Q4-v・Q5・Q6・Q9〈方針のみ〉)と不要な項目(Q3・Q7・Q8・Q10・Q12)を明示。(2) P3-1-Q1エントリ(「監査で対象外と判断した裁定」節)へ、正式Fable P3-2-Q12裁定による返済記録の追記(返済先はP3-3のまま変更なし、ただし層の整理の誤りを訂正、返済形を「D01分岐の追加+較正sweepへ縮小」と明確化)を追加(既存記述は書き換えず追記のみ)。
+- 改訂5(2026-08-09、正式Fable補足裁定〈ゲート5較正裁定、人間プロジェクトリード直接提示、Suu_mot3中継確認済み〉反映、Suu_mot3指示): **P3-2-Q13-1**エントリを新設し、overheated保留規則(電池がlipoでD04 stageが`{swelling, smoking}`の間`overheated`終端を保留する)+Phase3-Q2適用範囲注記(Phase3-Q2が禁じるのは「物理終了後の継続step」であり、本裁定は物理終了の定義から重複表現を除く措置であって終了後の継続stepではないこと、`energyExhausted`/`stalled`/`derailed`/`manualAbort`は保留対象に含まれないこと)を記録した。本エントリの見出し「Q13-1」・注記対象「Phase3-Q2」・別文書内の「P3-2-Q2」(D07 RPM低下)を版・対象で明確に区別する命名の注意書きを付した(過去のP3-2ゲート5是正過程で発見された命名衝突の教訓を踏まえる)。人間再承認は**保留中**(本裁定の中核対象、確定裁定の適用範囲を狭める精密化のため再承認手続きを要する)。詳細な裁定理由・却下案・実装制約は`docs/phase3-p3-2-plan.md`14節に自己完結記載し、本台帳エントリでは重複記載していない。
+- 改訂6(2026-08-09、正式Fable補足裁定〈P3-2ゲート5Q14、人間プロジェクトリード直接提示、Suu_mot3中継確認済み〉反映、Suu_mot3指示): **P3-2-Q13-2**エントリを新設し、「通常運用(NORMAL_OPERATION)で非到達」の正式定義(基準構成・第1条件・第2条件の症状型3分)+Q14精密化(予算条件を電池物理型別に分離——LiPoは`maxEnergyUsedRatio≤0.85`維持、nonLipoは自然完走`finished`のみ。一般原則「受け入れ閾値は、その閾値が防ぐ危険が構造的に存在する対象にのみ適用する」を今後の作文規則として記録)を収録した。契機はゲート5是正版でのQ13-2全電池×実在全5コース拡張実測で判明した`energy-run`×alkaline/NiMHの旧`0.85`一律条件超過(`docs/phase3-p3-2-gate5-normal-operation-review-request.md`Q14として提出)。人間再承認は不要(Q13-2本体・Q14精密化のいずれも数値・閾値・production値・素材写像を変更せず、docs反映+Suu_mot3照合で足りると裁定済み)。詳細な裁定理由は`docs/phase3-p3-2-plan.md`14.3節・14.8節に自己完結記載し、本台帳エントリでは重複記載していない。
+- 改訂7(2026-08-09、P3-2ゲート9〈計画v17 §11.9〉、Suu_mot3指示): **実装状態追補**へ「Gate9追記」節を新設し、既存エントリ(P3-2-Q13-1・P3-2-Q13-2)を書き換えずに、Gate1〜8完了後の実装状態(実ファイル名・実テスト名)を追記のみで記録した。内容: (1) P3-2-Q13-1(overheated保留規則)がGate5で実装完了・Suu_mot3照合通過済みであること(`normalizeOverheatedStatusForD04Hold`、`src/engine/destructionOrchestration.ts`)。(2) P3-2-Q13-2/Q14がGate5で実装完了・15/15全適合であること。(3) Gate6(`RunSnapshot`拡張+`stepTestRunWithDestruction`)完了。(4) Gate7(`deriveFireExposureProfileFromLoadout`+D04/D07 3文脈fixture統合)完了、Suu_mot3ゲート7レビュー(要修正4点→fixture単一出典3点→rest構文化1点の計3ラウンド)を経て正式通過した経緯を含む。(5) Gate8(`src/materials/regressionDiff.ts`)完了、Suu_mot3が承認した精密化「baselineプールは同一recipeKeyかつ同一metricKind」を明記(Gate9着手承認メッセージでの明示指示どおり)。契約・production値・受け入れ条件の変更は一切ない(実装完了の事実記録のみ)。
