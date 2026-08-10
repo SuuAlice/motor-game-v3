@@ -4,8 +4,15 @@
 // 一切変更しない、独立した読み取り専用スクリプト。
 //
 // sweep対象は実際に写像が存在する4ファミリー(導線・磁石・ギヤ・電池)の全組合せ
-// (4×4×4×3=192)のみ。coating・brush・substrate・roller・bodyの5ファミリーは
+// (4×4×4×3=192)のみ。coating・substrate・roller・bodyの4ファミリーは
 // materialMapping.tsが未接続のため対象外・coverage gap(docs/phase2-step9-plan.md §1)。
+// brushはP3-3 Gate2でcomposeConfigFromMaterialsへ接続されたが(MaterialSelection.brushId
+// 必須化)、本sweepの掃引対象には含めない(Gate2の対象外——物理式配線はGate4、
+// sweep較正はGate5)。192組合せhealth scanおよびV2回帰anchor(V2_REGRESSION_ANCHOR_SELECTION)
+// はbrushIdをbrush-carbon(anchor、比率1.0)に固定し、P3-3以前の挙動と等価にすることで
+// このsweepの既存結果を不変に保つ。MINIMUM_TIER_SELECTION/TOP_TIER_SELECTIONはtier境界の
+// 立証目的でbrush-copper-plate/brush-precious-metal(他4ファミリーと同じ最低/最高tier)を
+// 使う(P3-3-Q15 P50是正、旧文言「全selectionでbrush-carbon固定」は実装と不一致だった)。
 //
 // v7再較正: 当初REPRESENTATIVE_*(materialMapping.test.tsの数値伝播テスト用fixture)を
 // トラック走行の土台にしたところ、多くの素材構成でfailureToStart/overheatedになり
@@ -55,6 +62,10 @@ const V2_REGRESSION_ANCHOR_SELECTION: MaterialSelection = {
   magnetId: 'magnet-ferrite',
   gearId: 'gear-pom',
   batteryId: 'battery-alkaline',
+  // P3-3 Gate2で追加(必須化)。brush-carbonは4ファミリー同様の「anchor」相当
+  // (materialMapping.tsのBRUSH_MOTOR_CONFIG_RATIO_CANDIDATE/D05_BRUSH_WEAR_CANDIDATEで
+  // 全比率1.0・ペナルティなし)であり、旧構成(P3-3以前、ratio未反映)と等価になる。
+  brushId: 'brush-carbon',
 };
 
 const MINIMUM_TIER_SELECTION: MaterialSelection = {
@@ -62,6 +73,7 @@ const MINIMUM_TIER_SELECTION: MaterialSelection = {
   magnetId: 'magnet-ferrite',
   gearId: 'gear-pom',
   batteryId: 'battery-alkaline',
+  brushId: 'brush-copper-plate', // tierIndex 0(他4ファミリーと同じ最低ティア)
 };
 
 const TOP_TIER_SELECTION: MaterialSelection = {
@@ -69,6 +81,7 @@ const TOP_TIER_SELECTION: MaterialSelection = {
   magnetId: 'magnet-neodymium',
   gearId: 'gear-peek',
   batteryId: 'battery-lithium-polymer',
+  brushId: 'brush-precious-metal', // tierIndex 3(wire/magnetと同じ最高ティア)
 };
 
 // materialMapping.test.tsのbaseMotorConfig/baseCarConfig/CANONICAL_BASELINEと同じ値を
@@ -247,7 +260,7 @@ function runHealthScan(): HealthScanResult[] {
     for (const magnet of MAGNET_MATERIALS) {
       for (const gear of GEAR_MATERIALS) {
         for (const battery of BATTERY_MATERIALS) {
-          const selection: MaterialSelection = { wireId: wire.id, magnetId: magnet.id, gearId: gear.id, batteryId: battery.id };
+          const selection: MaterialSelection = { wireId: wire.id, magnetId: magnet.id, gearId: gear.id, batteryId: battery.id, brushId: 'brush-carbon' };
           const composed = composeConfigFromMaterials(RUNNABLE_MOTOR_CONFIG_TEMPLATE, RUNNABLE_CAR_CONFIG_TEMPLATE, RUNNABLE_BASELINE, selection);
           const seed = SEED + comboIndex;
           if (!composed.ok) {

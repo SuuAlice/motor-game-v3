@@ -8,13 +8,17 @@ import {
   computeMagnetStrengthCalibration,
   computeWireDensityRatio,
   computeWireResistivityRatio,
+  assembleD05Config,
   mapBatteryDestructionProfile,
   mapBodyScorchDeltaFraction,
+  mapBrushRatios,
   mapD03DestructionConfig,
   mapD04BatteryDestructionConfig,
+  mapD05BrushWearConfig,
   mapD07DestructionConfig,
   mapMagnetScorchDeltaFraction,
   type BodyMaterialId,
+  type BrushMaterialId,
   type MaterialCompositionBaseline,
   type MaterialSelection,
   type WireMaterialId,
@@ -39,9 +43,10 @@ import {
   type RunOutcome,
 } from '../../engine/destructionOrchestration';
 import { advanceDestructionState, createInitialDestructionState, DURATION_COMPARISON_EPSILON_S } from '../../engine/destructionModes';
+import { CHATTER_BURST_FRAMES } from '../../engine/constants';
 import type { PhysicsSnapshotAtT } from '../../engine/destructionModes';
-import { BATTERY_MATERIALS, BODY_MATERIALS, GEAR_MATERIALS, MAGNET_MATERIALS, WIRE_MATERIALS, type BatteryMaterial, type WireMaterial } from '../materials';
-import { step, type MotorConfig, type SimState } from '../../engine/motorPhysics';
+import { BATTERY_MATERIALS, BODY_MATERIALS, BRUSH_MATERIALS, GEAR_MATERIALS, MAGNET_MATERIALS, WIRE_MATERIALS, type BatteryMaterial, type WireMaterial } from '../materials';
+import { computeElectricalState, step, type MotorConfig, type SimState } from '../../engine/motorPhysics';
 import { BATTERY_HEAT_LIMIT } from '../../engine/constants';
 import { createInitialVehicleState, type CarConfig, type VehicleSimState } from '../../engine/vehiclePhysics';
 import { createValidatedTrack, stepTrackRun, type TrackDefinition, type TrackSegment } from '../../engine/trackPhysics';
@@ -400,6 +405,7 @@ describe('materialMapping.ts Step7a(composeConfigFromMaterials: 合成純関数)
     magnetId: 'magnet-ferrite',
     gearId: 'gear-pom',
     batteryId: 'battery-alkaline',
+    brushId: 'brush-carbon',
   };
 
   function restState(): SimState {
@@ -456,6 +462,7 @@ describe('materialMapping.ts Step7a(composeConfigFromMaterials: 合成純関数)
       magnetId: 'magnet-neodymium',
       gearId: 'gear-titanium',
       batteryId: 'battery-lithium-polymer',
+      brushId: 'brush-carbon', // P3-3-Q15是正(補足): このテストの主題は電池、ブラシ差は不要のためanchorへ統一
     };
     const first = composeConfigFromMaterials(baseMotorConfig(), baseCarConfig(), CANONICAL_BASELINE, nonAnchorSelection);
     expect(first.ok).toBe(true);
@@ -485,6 +492,7 @@ describe('materialMapping.ts Step7a(composeConfigFromMaterials: 合成純関数)
       magnetId: 'magnet-neodymium',
       gearId: 'gear-titanium',
       batteryId: 'battery-alkaline',
+      brushId: 'brush-carbon',
     };
     const result = composeConfigFromMaterials(baseMotorConfig(), baseCarConfig(), CANONICAL_BASELINE, selection);
     const magnetCalib = computeMagnetStrengthCalibration(magnet);
@@ -504,6 +512,7 @@ describe('materialMapping.ts Step7a(composeConfigFromMaterials: 合成純関数)
       magnetId: 'magnet-ferrite',
       gearId: 'gear-pom',
       batteryId: 'battery-alkaline',
+      brushId: 'brush-carbon',
     };
     const result = composeConfigFromMaterials(baseMotorConfig(), baseCarConfig(), CANONICAL_BASELINE, badSelection);
     expect(result.ok).toBe(false);
@@ -514,7 +523,7 @@ describe('materialMapping.ts Step7a(composeConfigFromMaterials: 合成純関数)
       for (const magnet of MAGNET_MATERIALS) {
         for (const gear of GEAR_MATERIALS) {
           for (const battery of BATTERY_MATERIALS) {
-            const selection: MaterialSelection = { wireId: wire.id, magnetId: magnet.id, gearId: gear.id, batteryId: battery.id };
+            const selection: MaterialSelection = { wireId: wire.id, magnetId: magnet.id, gearId: gear.id, batteryId: battery.id, brushId: 'brush-carbon' };
             const result = composeConfigFromMaterials(baseMotorConfig(), baseCarConfig(), CANONICAL_BASELINE, selection);
             expect(result.ok, `${wire.id}×${magnet.id}×${gear.id}×${battery.id}: ${!result.ok ? result.reason : ''}`).toBe(true);
             if (!result.ok) continue;
@@ -544,6 +553,7 @@ describe('materialMapping.ts Step7a(composeConfigFromMaterials: 合成純関数)
       magnetId: 'magnet-neodymium',
       gearId: 'gear-titanium',
       batteryId: 'battery-lithium-polymer',
+      brushId: 'brush-precious-metal',
     };
     const result = composeConfigFromMaterials(baseMotorConfig(), baseCarConfig(), CANONICAL_BASELINE, selection);
     expect(result.ok).toBe(true);
@@ -565,6 +575,7 @@ describe('materialMapping.ts Step7a(composeConfigFromMaterials: 合成純関数)
       magnetId: 'magnet-neodymium',
       gearId: 'gear-titanium',
       batteryId: 'battery-lithium-polymer',
+      brushId: 'brush-precious-metal',
     };
     const result = composeConfigFromMaterials(baseMotorConfig(), baseCarConfig(), CANONICAL_BASELINE, selection);
     expect(result.ok).toBe(true);
@@ -622,6 +633,7 @@ describe('materialMapping.ts Step7a(composeConfigFromMaterials: 合成純関数)
         magnetId: 'magnet-ferrite',
         gearId: 'gear-peek',
         batteryId: 'battery-alkaline',
+        brushId: 'brush-carbon',
       };
       const result = composeConfigFromMaterials(baseMotorConfig(), baseCarConfig(), invalidBaseline, selection);
       expect(result.ok).toBe(false);
@@ -959,9 +971,18 @@ describe('P3-2ゲート2: D04/D07較正値の写像(物理到達sweepを含ま�
     for (const magnetId of ALL_MAGNET_IDS) {
       const draft: DestructionConfigDraft = {
         battery: mapD04BatteryDestructionConfig('battery-lithium-polymer'),
-        d02: { smokeGaugeThreshold: 0.6, coilOverheatGaugeLimit: 1 },
+        d01: { decayExposureScaleRad: 1000, minEffectiveTurnsRatio: 0.5 },
+        d02: { smokeGaugeThreshold: 0.6, coilOverheatGaugeLimit: 1, conductionScale: 0.04, dissipationCoefficient: 0.5, smokeResistanceMultiplier: 1.2 },
         d04: { bodyScorchDeltaFraction: mapBodyScorchDeltaFraction('body-ps-cowl'), magnetScorchDeltaFraction: mapMagnetScorchDeltaFraction(magnetId) },
-        d05: { brushSparkDurationLimitS: 0.5, brushSparkCurrentThresholdA: 3 },
+        d05: {
+          brushSparkDurationLimitS: 0.15,
+          brushSparkCurrentThresholdA: 3,
+          brushWearRateRatio: 1,
+          highCurrentPenalty: { kind: 'thresholdPenalty', highCurrentPenaltyThresholdA: 8, highCurrentPenaltyMultiplier: 1.5 },
+          wearPerAmpSecond: 0.001,
+          recoveryFrames: 6,
+          recoveryContactResistanceMultiplier: 1.2,
+        },
         d06: { breakage: { kind: 'nonBreakable' } },
         d07: mapD07DestructionConfig(magnetId),
         d09: { bearingSeizureGaugeLimit: 1 },
@@ -1044,9 +1065,18 @@ describe('P3-2ゲート5(是正版): M4到達可能性・D07 Q11・Q2独立sweep
   function g5LipoDestructionConfig(): DestructionConfig {
     return {
       battery: mapD04BatteryDestructionConfig('battery-lithium-polymer'),
-      d02: { smokeGaugeThreshold: 0.6, coilOverheatGaugeLimit: 1 },
+      d01: { decayExposureScaleRad: 1000, minEffectiveTurnsRatio: 0.5 },
+      d02: { smokeGaugeThreshold: 0.6, coilOverheatGaugeLimit: 1, conductionScale: 0.04, dissipationCoefficient: 0.5, smokeResistanceMultiplier: 1.2 },
       d04: { bodyScorchDeltaFraction: mapBodyScorchDeltaFraction('body-ps-cowl'), magnetScorchDeltaFraction: mapMagnetScorchDeltaFraction('magnet-neodymium') },
-      d05: { brushSparkDurationLimitS: 0.5, brushSparkCurrentThresholdA: 3 },
+      d05: {
+        brushSparkDurationLimitS: 0.15,
+        brushSparkCurrentThresholdA: 3,
+        brushWearRateRatio: 1,
+        highCurrentPenalty: { kind: 'thresholdPenalty', highCurrentPenaltyThresholdA: 8, highCurrentPenaltyMultiplier: 1.5 },
+        wearPerAmpSecond: 0.001,
+        recoveryFrames: 6,
+        recoveryContactResistanceMultiplier: 1.2,
+      },
       d06: { breakage: { kind: 'nonBreakable' } },
       d07: mapD07DestructionConfig('magnet-neodymium'),
       d09: { bearingSeizureGaugeLimit: 1 },
@@ -1056,9 +1086,18 @@ describe('P3-2ゲート5(是正版): M4到達可能性・D07 Q11・Q2独立sweep
   function g5NonLipoDestructionConfig(magnetId: 'magnet-neodymium' | 'magnet-ferrite' = 'magnet-neodymium'): DestructionConfig {
     return {
       battery: { profile: 'nonLipo', shortCircuitDurationLimitS: 999 }, // D07 sweepはD03/D04と無関係、短絡経路は評価させない
-      d02: { smokeGaugeThreshold: 0.6, coilOverheatGaugeLimit: 1 },
+      d01: { decayExposureScaleRad: 1000, minEffectiveTurnsRatio: 0.5 },
+      d02: { smokeGaugeThreshold: 0.6, coilOverheatGaugeLimit: 1, conductionScale: 0.04, dissipationCoefficient: 0.5, smokeResistanceMultiplier: 1.2 },
       d04: { bodyScorchDeltaFraction: mapBodyScorchDeltaFraction('body-ps-cowl'), magnetScorchDeltaFraction: mapMagnetScorchDeltaFraction(magnetId) },
-      d05: { brushSparkDurationLimitS: 0.5, brushSparkCurrentThresholdA: 3 },
+      d05: {
+        brushSparkDurationLimitS: 0.15,
+        brushSparkCurrentThresholdA: 3,
+        brushWearRateRatio: 1,
+        highCurrentPenalty: { kind: 'thresholdPenalty', highCurrentPenaltyThresholdA: 8, highCurrentPenaltyMultiplier: 1.5 },
+        wearPerAmpSecond: 0.001,
+        recoveryFrames: 6,
+        recoveryContactResistanceMultiplier: 1.2,
+      },
       d06: { breakage: { kind: 'nonBreakable' } },
       d07: mapD07DestructionConfig(magnetId),
       d09: { bearingSeizureGaugeLimit: 1 },
@@ -1259,6 +1298,54 @@ describe('P3-2ゲート5(是正版): M4到達可能性・D07 Q11・Q2独立sweep
     throw new Error('テスト前提が崩れています: maxSteps以内に終端しませんでした');
   }
 
+  // D02専用M4型sweep受け入れ条件(計画v10 3.4節、正式Fable P3-3-Q1裁定に伴う付帯要件、
+  // checkpoint5較正sweep)。D02専用熱ゲージが電池系終端(overheated/D03/D04)より先に発火
+  // できるproduction-valid構成が最低1つ存在することを示す(死にモード防止)。motor-only文脈
+  // (固定loadTorqueによる高電流維持、Q2独立sweepと同型のharness)。
+  // production-valid選択: wire-silver(低抵抗)・magnet-ferrite(nonDemagnetizing、D07を
+  // 構造的に排除しD02を単独観測する)・gear-titanium・battery-alkaline(D04非該当)+
+  // player-adjustable調整(coilTurns:40・magnetDistanceMm:3で高電流、loadTorque=0.02で
+  // 近失速状態を維持し電流を持続的に高く保つ)。
+  //
+  // 実測値(2026-08-10計測、checkpoint5、DT=1/120s、rng固定0.5、d02較正値
+  // conductionScale=0.04・dissipationCoefficient=0.5・smokeGaugeThreshold=0.6・
+  // coilOverheatGaugeLimit=1、theta初期値=π/4で整流子不感帯を回避):
+  //   D02 event発火step=1205(10.04秒)、他モード(D03等)のeventは一切先行しない、
+  //   coilHeatGaugeRatio=1(発火時点)、current≈3.9A(sustained)。
+  it('D02専用M4型sweep受け入れ条件(3.4節): 高電流構成(motor-only、固定loadTorque)ではD02が電池系終端(D03)より先に発火する(死にモード防止)', () => {
+    const { motorConfig } = pvMotorCar(
+      { wireId: 'wire-silver', magnetId: 'magnet-ferrite', gearId: 'gear-titanium', batteryId: 'battery-alkaline', brushId: 'brush-carbon' },
+      { coilTurns: 40, magnetDistanceMm: 3 },
+    );
+    const destructionConfig = g5NonLipoDestructionConfig('magnet-ferrite');
+    const snapshot = captureRunSnapshot({
+      motorConfig, carConfig: null, destructionConfig,
+      runContext: { context: 'motor', fireExposureProfile: { bodyEquipped: false, adjacentRolesEquipped: [] }, gearTotalToothCount: null },
+      initialMotorState: { theta: Math.PI / 4, omega: 0, current: 0, backEmf: 0, shorted: false, running: true, rpm: 0, chatterFramesLeft: 0, batteryHeat: 0, coilCollapsed: false, highSpeedFrameCount: 0 },
+      initialVehicleState: null, track: null, courseLengthM: null, slopeRad: null, seed: 1,
+      initialDestructionState: createInitialDestructionState('nonLipo'),
+    });
+    let accumulator: RunAccumulator = createRunAccumulator(snapshot);
+    let motorState: SimState = snapshot.initialMotorState;
+    let i = 0;
+    const maxSteps = 2000;
+    for (; i < maxSteps && accumulator.events.length === 0 && !accumulator.terminalModeCandidates.length; i++) {
+      const result = stepMotorWithDestruction(motorState, accumulator, DT_G5, () => 0.5, 0.02); // 高い固定loadTorqueで近失速状態を維持し、電流(ひいてはcoilLossW)を持続的に高く保つ
+      motorState = result.physicsState;
+      accumulator = result.accumulator;
+    }
+
+    // 空虚な一致を禁止する: 上限打ち切りではなく実際にD02が発火したことを先に確認する。
+    expect(accumulator.events.map((e) => e.mode), `finalStep=${i}`).toEqual(['D02']);
+    expect(accumulator.destructionState.modes.D02.coilHeatGaugeRatio).toBe(1);
+    // D03(battery-alkaline、電池系終端)が一切先行・混在していないことを直接確認する。
+    expect(accumulator.destructionState.battery.profile === 'nonLipo' && accumulator.destructionState.battery.d03.triggered).toBe(false);
+    // 設計較正時点(2026-08-10、checkpoint5)の実測値を数値回帰として固定する。
+    expect(i, 'D02発火step(回帰)').toBe(1206);
+    expect(i * DT_G5, 'D02発火秒数(回帰)').toBeCloseTo(10.05, 3);
+    expect(motorState.current, '発火時点の実電流A(回帰)').toBeGreaterThan(3.8);
+  });
+
   describe('M4到達可能性3条件(D04、計画§3.3、production-valid fixture、2026-08-09再計測)', () => {
     // P3是正: 恣意的な100km/30秒トラックではなく、実在コース(src/data/tracks.tsの
     // 'energy-run'、15m・hasEnergyBudget:true)を自然完走させる。この15mコースは
@@ -1283,7 +1370,7 @@ describe('P3-2ゲート5(是正版): M4到達可能性・D07 Q11・Q2独立sweep
     it('条件1: 通常負荷構成(実在コース"energy-run"を自然完走)ではburningへ到達しない', () => {
       const track = TRACK_BY_ID.get('energy-run');
       if (!track) throw new Error('テスト前提が崩れています: energy-runがTRACK_BY_IDに存在しません');
-      const { motorConfig, carConfig } = pvMotorCar({ wireId: 'wire-copper-standard', magnetId: 'magnet-neodymium', gearId: 'gear-pom', batteryId: 'battery-lithium-polymer' });
+      const { motorConfig, carConfig } = pvMotorCar({ wireId: 'wire-copper-standard', magnetId: 'magnet-neodymium', gearId: 'gear-pom', batteryId: 'battery-lithium-polymer', brushId: 'brush-carbon' });
       const destructionConfig = g5LipoDestructionConfig();
 
       let vehicleState = createInitialVehicleState(motorConfig, carConfig);
@@ -1346,7 +1433,7 @@ describe('P3-2ゲート5(是正版): M4到達可能性・D07 Q11・Q2独立sweep
     //   runawayAtStepはこの構成では短絡自体が発生しないためnullのまま。
     it('条件2: 高負荷LiPo構成(production-valid素材+player-adjustable調整)ではunsafeDischargeStartRatio到達後、energy-budget切れより先にburningへ到達できる(開始原因はoverDischargeであり短絡由来ではない)', () => {
       const { motorConfig, carConfig } = pvMotorCar(
-        { wireId: 'wire-silver', magnetId: 'magnet-neodymium', gearId: 'gear-titanium', batteryId: 'battery-lithium-polymer' },
+        { wireId: 'wire-silver', magnetId: 'magnet-neodymium', gearId: 'gear-titanium', batteryId: 'battery-lithium-polymer', brushId: 'brush-carbon' },
         { coilTurns: 20, magnetDistanceMm: 5, brushPressure: 0.5 },
         { gearRatio: 8, tireGrip: 0.9 },
       );
@@ -1418,7 +1505,7 @@ describe('P3-2ゲート5(是正版): M4到達可能性・D07 Q11・Q2独立sweep
     //   swelling継続中にoverheatedへ到達しうる状況を保留規則が正しく吸収したことの証跡)。
     it('条件3(正例、再定式化): 短絡構成(production-valid、held-short)ではswelling→smoking→burningがstageDurationsどおり進行しdestructionTerminalで終端する(overheatedは独立した終端理由として発火しない)', () => {
       const { motorConfig, carConfig } = pvMotorCar(
-        { wireId: 'wire-copper-standard', magnetId: 'magnet-neodymium', gearId: 'gear-pom', batteryId: 'battery-lithium-polymer' },
+        { wireId: 'wire-copper-standard', magnetId: 'magnet-neodymium', gearId: 'gear-pom', batteryId: 'battery-lithium-polymer', brushId: 'brush-carbon' },
         { slitWidthMm: 0 },
       );
       const track = g5LongTrack(false);
@@ -1463,7 +1550,7 @@ describe('P3-2ゲート5(是正版): M4到達可能性・D07 Q11・Q2独立sweep
     // 別harnessで、同一入力から同一の段階到達stepが得られることも交差確認する)。
     it('条件3(正例、terminal分類証跡): burning eventはclassifyTerminalModesで実際にD04をterminal candidateへ分類し、finalizeDestructionRunがendReason=destructionTerminalのRunOutcomeを返す', () => {
       const { motorConfig, carConfig } = pvMotorCar(
-        { wireId: 'wire-copper-standard', magnetId: 'magnet-neodymium', gearId: 'gear-pom', batteryId: 'battery-lithium-polymer' },
+        { wireId: 'wire-copper-standard', magnetId: 'magnet-neodymium', gearId: 'gear-pom', batteryId: 'battery-lithium-polymer', brushId: 'brush-carbon' },
         { slitWidthMm: 0 },
       );
       const track = g5LongTrack(false);
@@ -1491,7 +1578,7 @@ describe('P3-2ゲート5(是正版): M4到達可能性・D07 Q11・Q2独立sweep
     // D03の既存同一frame優先規則が不変であることを確認する(同一step境界ケース(c))。
     it('条件3(負例、再定式化): 非リポ(D03経路)のheld-shortでは保留規則が発動せず、既存の終端挙動(overheated到達)が不変である', () => {
       const { motorConfig, carConfig } = pvMotorCar(
-        { wireId: 'wire-copper-standard', magnetId: 'magnet-neodymium', gearId: 'gear-pom', batteryId: 'battery-alkaline' },
+        { wireId: 'wire-copper-standard', magnetId: 'magnet-neodymium', gearId: 'gear-pom', batteryId: 'battery-alkaline', brushId: 'brush-carbon' },
         { slitWidthMm: 0 },
       );
       const track = g5LongTrack(false);
@@ -1539,7 +1626,7 @@ describe('P3-2ゲート5(是正版): M4到達可能性・D07 Q11・Q2独立sweep
     // schema-valid test-only値である(production値は無変更)。
     it('境界fixture(P4是正、schema-valid test-only): 同一step内でraw vehicle status=overheatedとD03 eventが競合する場合、classifyTerminalModesがD03を返しdestructionTerminalが優先される', () => {
       const { motorConfig, carConfig } = pvMotorCar(
-        { wireId: 'wire-copper-standard', magnetId: 'magnet-neodymium', gearId: 'gear-pom', batteryId: 'battery-alkaline' },
+        { wireId: 'wire-copper-standard', magnetId: 'magnet-neodymium', gearId: 'gear-pom', batteryId: 'battery-alkaline', brushId: 'brush-carbon' },
         { slitWidthMm: 0 },
       );
       const track = g5LongTrack(false);
@@ -1565,7 +1652,7 @@ describe('P3-2ゲート5(是正版): M4到達可能性・D07 Q11・Q2独立sweep
     // 定数関数のため既存契約上は自明に決定論的だが、将来の変更に対する回帰の網として固定する。
     it('保留込み決定論: 条件3(正例)の構成を独立に2回sweepしても診断値全体が完全一致する', () => {
       const { motorConfig, carConfig } = pvMotorCar(
-        { wireId: 'wire-copper-standard', magnetId: 'magnet-neodymium', gearId: 'gear-pom', batteryId: 'battery-lithium-polymer' },
+        { wireId: 'wire-copper-standard', magnetId: 'magnet-neodymium', gearId: 'gear-pom', batteryId: 'battery-lithium-polymer', brushId: 'brush-carbon' },
         { slitWidthMm: 0 },
       );
       const track = g5LongTrack(false);
@@ -1598,9 +1685,18 @@ describe('P3-2ゲート5(是正版): M4到達可能性・D07 Q11・Q2独立sweep
         : mapD03DestructionConfig(batteryId);
       return {
         battery,
-        d02: { smokeGaugeThreshold: 0.6, coilOverheatGaugeLimit: 1 },
+        d01: { decayExposureScaleRad: 1000, minEffectiveTurnsRatio: 0.5 },
+        d02: { smokeGaugeThreshold: 0.6, coilOverheatGaugeLimit: 1, conductionScale: 0.04, dissipationCoefficient: 0.5, smokeResistanceMultiplier: 1.2 },
         d04: { bodyScorchDeltaFraction: mapBodyScorchDeltaFraction('body-ps-cowl'), magnetScorchDeltaFraction: mapMagnetScorchDeltaFraction('magnet-neodymium') },
-        d05: { brushSparkDurationLimitS: 0.5, brushSparkCurrentThresholdA: 3 },
+        d05: {
+          brushSparkDurationLimitS: 0.15,
+          brushSparkCurrentThresholdA: 3,
+          brushWearRateRatio: 1,
+          highCurrentPenalty: { kind: 'thresholdPenalty', highCurrentPenaltyThresholdA: 8, highCurrentPenaltyMultiplier: 1.5 },
+          wearPerAmpSecond: 0.001,
+          recoveryFrames: 6,
+          recoveryContactResistanceMultiplier: 1.2,
+        },
         d06: { breakage: { kind: 'nonBreakable' } },
         d07: mapD07DestructionConfig('magnet-neodymium'),
         d09: { bearingSeizureGaugeLimit: 1 },
@@ -1614,7 +1710,7 @@ describe('P3-2ゲート5(是正版): M4到達可能性・D07 Q11・Q2独立sweep
       const track = TRACK_BY_ID.get(trackId);
       if (!track) throw new Error(`テスト前提が崩れています: ${trackId}がTRACK_BY_IDに存在しません`);
       const profile = mapBatteryDestructionProfile(batteryId);
-      const { motorConfig, carConfig } = pvMotorCar({ wireId: 'wire-copper-standard', magnetId: 'magnet-neodymium', gearId: 'gear-pom', batteryId });
+      const { motorConfig, carConfig } = pvMotorCar({ wireId: 'wire-copper-standard', magnetId: 'magnet-neodymium', gearId: 'gear-pom', batteryId, brushId: 'brush-carbon' });
       const destructionConfig = g5DestructionConfigForBattery(batteryId);
 
       let vehicleState = createInitialVehicleState(motorConfig, carConfig);
@@ -1645,6 +1741,12 @@ describe('P3-2ゲート5(是正版): M4到達可能性・D07 Q11・Q2独立sweep
       }
       expect(destructionState.modes.D07.reversibleDroopActive, `D07 droop非発火、trackId=${trackId}, batteryId=${batteryId}`).toBe(false);
       expect(destructionState.modes.D07.irreversibleTriggered, `D07 irreversible非発火、trackId=${trackId}, batteryId=${batteryId}`).toBe(false);
+      // 付帯条件1(正式Fable指示、計画v12 §13.1.2較正sweep回収条件): D01/D02/D05もNORMAL_OPERATION
+      // で一切進行しないことを直接確認する(P3-3新モード込みの再実測、checkpoint5)。
+      expect(destructionState.modes.D01.triggered, `D01非発火、trackId=${trackId}, batteryId=${batteryId}`).toBe(false);
+      expect(destructionState.modes.D02.smokingStarted, `D02発煙未到達、trackId=${trackId}, batteryId=${batteryId}, maxRatio=${destructionState.modes.D02.coilHeatGaugeRatio}`).toBe(false);
+      expect(destructionState.modes.D05.episodeCount, `D05 episode不成立、trackId=${trackId}, batteryId=${batteryId}`).toBe(0);
+      expect(destructionState.modes.D05.cumulativeWearDeltaFraction, `D05摩耗蓄積ゼロ(通常整流除外の実証)、trackId=${trackId}, batteryId=${batteryId}`).toBe(0);
       // Q14裁定(正式Fable補足裁定、2026-08-09T07:51、人間再承認不要、docs/phase3-p3-2-plan.md
       // 14.3節・14.8節)により確定: 「受け入れ閾値は、その閾値が防ぐ危険が構造的に存在する
       // 対象にのみ適用する」という一般原則に基づき、予算条件を電池物理型別に分離する。
@@ -1764,7 +1866,7 @@ describe('P3-2ゲート5(是正版): M4到達可能性・D07 Q11・Q2独立sweep
     //   止まっている(平衡に達している)ことを示す。平衡値(窓平均0.3155)はdroopThreshold
     //   (0.5)を十分下回っている。
     it('受け入れ条件1: 通常運用(production-valid、標準構成)ではダレ閾値(reversibleDroopThreshold)に到達しない(30秒間、走行継続)', () => {
-      const { motorConfig, carConfig } = pvMotorCar({ wireId: 'wire-copper-standard', magnetId: 'magnet-neodymium', gearId: 'gear-pom', batteryId: 'battery-alkaline' });
+      const { motorConfig, carConfig } = pvMotorCar({ wireId: 'wire-copper-standard', magnetId: 'magnet-neodymium', gearId: 'gear-pom', batteryId: 'battery-alkaline', brushId: 'brush-carbon' });
       const track = g5LongTrack(false);
       const result = sweepD07(motorConfig, carConfig, track, g5NonLipoDestructionConfig(), 120 * 30, 240);
 
@@ -1816,7 +1918,7 @@ describe('P3-2ゲート5(是正版): M4到達可能性・D07 Q11・Q2独立sweep
     //   finalGauge=1(overheated終端時点でゲージは上限1に到達済み)。
     it('受け入れ条件2: 高負荷持続(production-valid素材+player-adjustable調整)ではレース内にダレ(reversibleDroopActive)へ到達可能', () => {
       const { motorConfig, carConfig } = pvMotorCar(
-        { wireId: 'wire-silver', magnetId: 'magnet-neodymium', gearId: 'gear-titanium', batteryId: 'battery-alkaline' },
+        { wireId: 'wire-silver', magnetId: 'magnet-neodymium', gearId: 'gear-titanium', batteryId: 'battery-alkaline', brushId: 'brush-carbon' },
         { coilTurns: 20, magnetDistanceMm: 5, brushPressure: 0.5 },
         { gearRatio: 8, tireGrip: 0.9 },
       );
@@ -1848,7 +1950,7 @@ describe('P3-2ゲート5(是正版): M4到達可能性・D07 Q11・Q2独立sweep
     // 不可逆到達(28)がoverheated終端(72)より先に成立する。
     it('受け入れ条件3: 意図的な持続過負荷構成(production-valid素材+player-adjustable調整+坂道)で不可逆到達(irreversibleTriggered)がoverheated終端より先に可能である(D04のM4条件と同型の到達可能性条件)', () => {
       const { motorConfig, carConfig } = pvMotorCar(
-        { wireId: 'wire-silver', magnetId: 'magnet-neodymium', gearId: 'gear-titanium', batteryId: 'battery-alkaline' },
+        { wireId: 'wire-silver', magnetId: 'magnet-neodymium', gearId: 'gear-titanium', batteryId: 'battery-alkaline', brushId: 'brush-carbon' },
         { coilTurns: 15, magnetDistanceMm: 3, brushPressure: 0.5 },
         { gearRatio: 10, tireGrip: 1.0 },
       );
@@ -1884,7 +1986,7 @@ describe('P3-2ゲート5(是正版): M4到達可能性・D07 Q11・Q2独立sweep
     it('ferrite(nonDemagnetizing)極端入力回帰: production-valid較正値でも0〜1 clamp・両トリガfalseが成立する(全入力の構造的網羅性はdestructionModes.test.ts Gate3で別途保証済み)', () => {
       const neodymiumConfig = mapD07DestructionConfig('magnet-neodymium');
       const ferriteConfig = mapD07DestructionConfig('magnet-ferrite'); // nonDemagnetizing
-      const { motorConfig } = pvMotorCar({ wireId: 'wire-copper-standard', magnetId: 'magnet-ferrite', gearId: 'gear-pom', batteryId: 'battery-alkaline' });
+      const { motorConfig } = pvMotorCar({ wireId: 'wire-copper-standard', magnetId: 'magnet-ferrite', gearId: 'gear-pom', batteryId: 'battery-alkaline', brushId: 'brush-carbon' });
       const snapshot = captureRunSnapshot({
         motorConfig,
         carConfig: null,
@@ -1944,7 +2046,7 @@ describe('P3-2ゲート5(是正版): M4到達可能性・D07 Q11・Q2独立sweep
     // loadTorque=0.007Nm付近が明確な低下を示す領域と判明、これより大きい負荷では失速
     // 〈rpm=0〉に近づき比較が不安定になる)。
     function g5PvBaseMotorConfig(): MotorConfig {
-      const { motorConfig } = pvMotorCar({ wireId: 'wire-copper-standard', magnetId: 'magnet-neodymium', gearId: 'gear-pom', batteryId: 'battery-lithium-polymer' });
+      const { motorConfig } = pvMotorCar({ wireId: 'wire-copper-standard', magnetId: 'magnet-neodymium', gearId: 'gear-pom', batteryId: 'battery-lithium-polymer', brushId: 'brush-carbon' });
       return motorConfig;
     }
 
@@ -2045,5 +2147,652 @@ describe('P3-2ゲート5(是正版): M4到達可能性・D07 Q11・Q2独立sweep
       expect(withoutDroop.lastFrameValue, 'droop無効時の末尾1フレーム瞬間値(参考回帰)').toBeCloseTo(394.079, 2);
       expect(withDroop.lastFrameValue, 'droop有効時の末尾1フレーム瞬間値(参考回帰)').toBeCloseTo(358.933, 2);
     });
+  });
+
+  describe('Q15-2独立sweep受け入れ条件(ブラシ接触抵抗比の観測可能性、正式Fable P3-3-Q15裁定、checkpoint5較正sweep)', () => {
+    // 正式Fable P3-3-Q15-2裁定: ブラシ素材による接触抵抗比(brushContactResistanceRatio、
+    // materialMapping.ts)の違いが定常状態の測定で観測可能であることを示す。両極
+    // (brush-copper-plate: 1.3〈悪化〉とbrush-precious-metal: 0.5〈改善〉)の比較を、
+    // 上記Q2droopsweepと同型の手法(production-valid motorConfig、motor-only文脈、窓平均に
+    // よる定常性確認)で行う。負荷はQ2と同じloadTorque=0.007Nm(トルク制限領域、
+    // 2026-08-10 sweepで両ブラシとも失速せず明確な差を示す領域と確認、0.01Nm以上では
+    // 両条件とも失速〈rpm≈0〉して比較が退化することを確認済み)。ここは接触抵抗比という
+    // 静的なMotorConfigフィールドの効果だけを見るため、destructionStateのseedは不要
+    // (Q2のisolatedConfigのような遮断は不要)で、`step`を直接使う。
+    function motorConfigForBrush(brushId: 'brush-copper-plate' | 'brush-precious-metal'): MotorConfig {
+      return pvMotorCar({ wireId: 'wire-copper-standard', magnetId: 'magnet-neodymium', gearId: 'gear-pom', batteryId: 'battery-lithium-polymer', brushId }).motorConfig;
+    }
+
+    function measureWindowedSteadyRpm(motorConfig: MotorConfig, loadTorque: number, totalFrames = 1200, windowFrames = 240) {
+      let state: SimState = { theta: Math.PI / 4, omega: 0, current: 0, backEmf: 0, shorted: false, running: true, rpm: 0, chatterFramesLeft: 0, batteryHeat: 0, coilCollapsed: false, highSpeedFrameCount: 0 };
+      const rpmHistory: number[] = [];
+      for (let i = 0; i < totalFrames; i++) {
+        state = step(motorConfig, state, DT_G5, NO_NOISE_RNG_G5, loadTorque);
+        if (i >= totalFrames - windowFrames) rpmHistory.push(state.rpm);
+      }
+      const mean = (arr: number[]) => arr.reduce((a, b) => a + b, 0) / arr.length;
+      const firstHalf = rpmHistory.slice(0, windowFrames / 2);
+      const secondHalf = rpmHistory.slice(windowFrames / 2);
+      return { meanAll: mean(rpmHistory), meanFirst: mean(firstHalf), meanSecond: mean(secondHalf) };
+    }
+
+    it('ブラシ接触抵抗比の違い(copper-plate:1.3 vs precious-metal:0.5)が定常RPMとして観測可能であることを実測する(窓平均が主張)', () => {
+      const loadTorque = 0.007;
+      const copper = measureWindowedSteadyRpm(motorConfigForBrush('brush-copper-plate'), loadTorque);
+      const precious = measureWindowedSteadyRpm(motorConfigForBrush('brush-precious-metal'), loadTorque);
+
+      // 定常性の確認(Q2と同じ3%閾値)
+      expect(Math.abs(copper.meanFirst - copper.meanSecond) / copper.meanAll).toBeLessThan(0.03);
+      expect(Math.abs(precious.meanFirst - precious.meanSecond) / precious.meanAll).toBeLessThan(0.03);
+
+      // 空虚な一致を禁止する: 両条件とも失速(rpm=0)していないことを先に確認する
+      expect(copper.meanAll).toBeGreaterThan(0);
+      expect(precious.meanAll).toBeGreaterThan(0);
+
+      // 主張: 接触抵抗比が低い(改善)precious-metalのほうが定常RPMが高いこと
+      expect(precious.meanAll, `precious-metalの窓平均RPM(${precious.meanAll})はcopper-plate(${copper.meanAll})より高いこと`).toBeGreaterThan(copper.meanAll);
+      const diffRatio = (precious.meanAll - copper.meanAll) / copper.meanAll;
+      expect(diffRatio, '定常RPM差(窓平均から算出)が観測可能な水準(5%以上)であること').toBeGreaterThan(0.05);
+
+      // 実測値(2026-08-10計測、checkpoint5、DT=1/120s、rng固定0.5、末尾240フレーム窓)を
+      // 数値回帰として固定する。
+      expect(copper.meanAll, 'copper-plateの窓平均RPM(回帰)').toBeCloseTo(354.836, 2);
+      expect(copper.meanFirst, 'copper-plateの窓前半平均RPM(回帰)').toBeCloseTo(355.107, 2);
+      expect(copper.meanSecond, 'copper-plateの窓後半平均RPM(回帰)').toBeCloseTo(354.565, 2);
+      expect(precious.meanAll, 'precious-metalの窓平均RPM(回帰)').toBeCloseTo(490.930, 2);
+      expect(precious.meanFirst, 'precious-metalの窓前半平均RPM(回帰)').toBeCloseTo(490.795, 2);
+      expect(precious.meanSecond, 'precious-metalの窓後半平均RPM(回帰)').toBeCloseTo(491.064, 2);
+      expect(diffRatio, '定常RPM差(窓平均、回帰)').toBeCloseTo(0.3835, 3);
+    });
+  });
+
+  describe('Q15-3独立sweep受け入れ条件(precious-metalの高電流域摩耗ペナルティによる順位逆転、正式Fable P3-3-Q15-3裁定、checkpoint5較正sweep)', () => {
+    // 正式Fable P3-3-Q15-3裁定: brush-precious-metalは低電流域の基礎摩耗率
+    // (brushWearRateRatio=0.7)がbrush-carbon(1.0)・brush-copper-plate(1.5)より良いが、
+    // 高電流(理論電流>highCurrentPenaltyThresholdA=3A)ではhighCurrentPenaltyMultiplier=2.5倍
+    // が乗り、実効摩耗率0.7×2.5=1.75がcarbon(1.0、ペナルティなし)・copper-plate(1.5、
+    // ペナルティなし)の両方を上回る——「低電流で抜群、大電流で急速に荒れる」という
+    // materialMapping.tsのコメント(618行)どおりの順位逆転が、実際のD05状態機械
+    // (advanceD05)経由で観測できることを示す。
+    //
+    // NORMAL_OPERATION(brushPressure=0.3、production-valid既定値)条件でのD05非進行
+    // (episodeCount=0・cumulativeWearDeltaFraction=0、precious-metalを含む全ブラシで
+    // 構造的に成立)は、上記Q13-2通常運用確認テストの付帯条件1で既に直接確認済み
+    // (D05はbrushPressure<CHATTER_PRESSURE_THRESHOLD=0.2でなければ発火せず、
+    // production-valid既定のbrushPressure=0.3はこれを構造的に排除するため、
+    // ブラシ種別非依存で成立する)。本テストはそこからさらに踏み込み、
+    // 「高電流下でのペナルティが実際に順位を逆転させる」ことをmotor-only sweepで直接示す。
+    //
+    // 構成: motor-only文脈(D02 M4型sweepと同型のharness)、brushPressure=0.1
+    // (<CHATTER_PRESSURE_THRESHOLD=0.2で瞬断確率を発生させる)+固定loadTorque=0.02Nm
+    // (近失速、理論電流を持続的にbrushSparkCurrentThresholdA=3A超に保つ)+
+    // wire-silver・magnet-neodymium・gear-titanium・coilTurns:40・magnetDistanceMm:3
+    // (D02 M4型sweepと同じ高電流構成)。rngは5回に1回0を返す周期パターン(バーストの
+    // 再武装を周期的に許しつつ単調な常時瞬断にはしない探索と同型の手法)。
+    function d05ConfigForBrush(brushId: 'brush-carbon' | 'brush-copper-plate' | 'brush-precious-metal') {
+      return assembleD05Config(mapD05BrushWearConfig(brushId), {
+        brushSparkDurationLimitS: 0.15,
+        brushSparkCurrentThresholdA: 3,
+        wearPerAmpSecond: 0.001,
+        recoveryFrames: 6,
+        recoveryContactResistanceMultiplier: 1.2,
+      });
+    }
+    function highLoadWearResult(brushId: 'brush-carbon' | 'brush-copper-plate' | 'brush-precious-metal', totalSteps = 600) {
+      const { motorConfig } = pvMotorCar(
+        { wireId: 'wire-silver', magnetId: 'magnet-neodymium', gearId: 'gear-titanium', batteryId: 'battery-lithium-polymer', brushId },
+        { coilTurns: 40, magnetDistanceMm: 3, brushPressure: 0.1 },
+      );
+      const destructionConfig: DestructionConfig = { ...g5LipoDestructionConfig(), d05: d05ConfigForBrush(brushId) };
+      const snapshot = captureRunSnapshot({
+        motorConfig, carConfig: null, destructionConfig,
+        runContext: { context: 'motor', fireExposureProfile: { bodyEquipped: false, adjacentRolesEquipped: [] }, gearTotalToothCount: null },
+        initialMotorState: { theta: Math.PI / 4, omega: 0, current: 0, backEmf: 0, shorted: false, running: true, rpm: 0, chatterFramesLeft: 0, batteryHeat: 0, coilCollapsed: false, highSpeedFrameCount: 0 },
+        initialVehicleState: null, track: null, courseLengthM: null, slopeRad: null, seed: 1,
+        initialDestructionState: createInitialDestructionState('lipo'),
+      });
+      let accumulator: RunAccumulator = createRunAccumulator(snapshot);
+      let motorState: SimState = snapshot.initialMotorState;
+      let rngCallCount = 0;
+      const rng = () => (rngCallCount++ % 5 === 0 ? 0 : 1);
+      for (let i = 0; i < totalSteps; i++) {
+        const result = stepMotorWithDestruction(motorState, accumulator, DT_G5, rng, 0.02);
+        motorState = result.physicsState;
+        accumulator = result.accumulator;
+      }
+      // 正式Fable P56-4要求: theoreticalCurrentA>3A(highCurrentPenaltyThresholdA)が実際に
+      // 成立したことを、コメント上の主張ではなくD05 event自身のcauseLogから直接返す。
+      const d05TheoreticalCurrentAs = accumulator.events.filter((e): e is Extract<typeof e, { mode: 'D05' }> => e.mode === 'D05').map((e) => e.causeLog.theoreticalCurrentA);
+      return {
+        cumulativeWearDeltaFraction: accumulator.destructionState.modes.D05.cumulativeWearDeltaFraction,
+        episodeCount: accumulator.destructionState.modes.D05.episodeCount,
+        d05TheoreticalCurrentAs,
+        maxTheoreticalCurrentA: d05TheoreticalCurrentAs.length > 0 ? Math.max(...d05TheoreticalCurrentAs) : null,
+      };
+    }
+
+    it('高電流構成(motor-only、brushPressure=0.1)では、precious-metalの累積摩耗がcarbon・copper-plateの両方を上回る(基礎摩耗率の順位0.7<1.0<1.5から、実効摩耗率1.75>1.5>1.0へ逆転する)', () => {
+      const carbon = highLoadWearResult('brush-carbon');
+      const copperPlate = highLoadWearResult('brush-copper-plate');
+      const precious = highLoadWearResult('brush-precious-metal');
+
+      // 空虚な一致を禁止する: 3種とも実際にepisodeが成立し摩耗が発生していることを先に確認する
+      expect(carbon.episodeCount, 'carbon: episode成立').toBeGreaterThan(0);
+      expect(copperPlate.episodeCount, 'copper-plate: episode成立').toBeGreaterThan(0);
+      expect(precious.episodeCount, 'precious-metal: episode成立').toBeGreaterThan(0);
+      expect(carbon.cumulativeWearDeltaFraction, 'carbon: 摩耗>0').toBeGreaterThan(0);
+      expect(copperPlate.cumulativeWearDeltaFraction, 'copper-plate: 摩耗>0').toBeGreaterThan(0);
+      expect(precious.cumulativeWearDeltaFraction, 'precious-metal: 摩耗>0').toBeGreaterThan(0);
+
+      // 主張(順位逆転): 高電流ペナルティにより、precious-metalの累積摩耗が
+      // copper-plate・carbonの両方を上回る(低電流域の基礎摩耗率の順位とは逆順になる)。
+      expect(precious.cumulativeWearDeltaFraction, `precious-metal(${precious.cumulativeWearDeltaFraction})はcopper-plate(${copperPlate.cumulativeWearDeltaFraction})より摩耗が大きいこと`).toBeGreaterThan(copperPlate.cumulativeWearDeltaFraction);
+      expect(copperPlate.cumulativeWearDeltaFraction, `copper-plate(${copperPlate.cumulativeWearDeltaFraction})はcarbon(${carbon.cumulativeWearDeltaFraction})より摩耗が大きいこと`).toBeGreaterThan(carbon.cumulativeWearDeltaFraction);
+
+      // 実測値(2026-08-10計測、checkpoint5、DT=1/120s、600step、周期rng)を数値回帰として固定する。
+      expect(carbon.cumulativeWearDeltaFraction, 'carbon: 累積摩耗(回帰)').toBeCloseTo(0.056354, 5);
+      expect(carbon.episodeCount, 'carbon: episode数(回帰)').toBe(6);
+      expect(copperPlate.cumulativeWearDeltaFraction, 'copper-plate: 累積摩耗(回帰)').toBeCloseTo(0.076636, 5);
+      expect(copperPlate.episodeCount, 'copper-plate: episode数(回帰)').toBe(5);
+      expect(precious.cumulativeWearDeltaFraction, 'precious-metal: 累積摩耗(回帰)').toBeCloseTo(0.117902, 5);
+      expect(precious.episodeCount, 'precious-metal: episode数(回帰)').toBe(6);
+
+      // 正式Fable P56-4要求: precious-metalのD05 event/causeLogから、
+      // theoreticalCurrentA>3A(highCurrentPenaltyThresholdA)が実際に成立したことを
+      // コメント上の主張ではなく直接assertする。
+      expect(precious.d05TheoreticalCurrentAs, 'precious-metal: D05 event数(回帰)').toHaveLength(6);
+      for (const theoreticalCurrentA of precious.d05TheoreticalCurrentAs) {
+        expect(theoreticalCurrentA, `precious-metalの各D05 eventでtheoreticalCurrentA(${theoreticalCurrentA})が3Aを超えること`).toBeGreaterThan(3);
+      }
+      expect(precious.maxTheoreticalCurrentA, 'precious-metal: 最大theoreticalCurrentA(回帰)').toBeCloseTo(40.666317, 4);
+    });
+
+    // Gate5受け入れ条件1点目(正式Fable P3-3-Q15-3裁定「NORMAL_OPERATION非到達」)。
+    // 上記Q13-2通常運用確認テストはbrushId固定でbrush-carbonのみを走らせているため、
+    // brush-precious-metal自身についても直接確認する。ただしD05の発火条件
+    // (isChatteringThisFrame、これはbrushPressure<CHATTER_PRESSURE_THRESHOLD=0.2の場合のみ
+    // 成立しうる、motorPhysics.ts nextChatterState)はブラシ素材の比率(brushChatterProbabilityRatio)
+    // より前段の構造的ゲートであり、production-valid既定のbrushPressure=0.3ではいかなる
+    // ブラシでもチャタリング自体が発生しない。よってここでの非到達は「precious-metalの
+    // highCurrentPenaltyが未発火」という結果そのものであり、Q13-2で確認済みの構造的事実の
+    // ブラシ非依存性をprecious-metal自身についても直接裏付ける。
+    it('NORMAL_OPERATION基準構成(production-valid、brushPressure=0.3)では、brush-precious-metalでもD05は一切進行しない(高電流ペナルティ未発火)', () => {
+      const track = TRACK_BY_ID.get('energy-run');
+      if (!track) throw new Error('テスト前提が崩れています: energy-runがTRACK_BY_IDに存在しません');
+      const batteryId = 'battery-lithium-polymer';
+      const { motorConfig, carConfig } = pvMotorCar({ wireId: 'wire-copper-standard', magnetId: 'magnet-neodymium', gearId: 'gear-pom', batteryId, brushId: 'brush-precious-metal' });
+      const destructionConfig: DestructionConfig = { ...g5LipoDestructionConfig(), d05: d05ConfigForBrush('brush-precious-metal') };
+
+      let vehicleState = createInitialVehicleState(motorConfig, carConfig);
+      let destructionState = createInitialDestructionState('lipo');
+      const runContext = g5VehicleRunContext();
+      let i = 0;
+      const maxSteps = 120 * 120;
+      for (; i < maxSteps && (vehicleState.status === 'running' || vehicleState.status === 'ready'); i++) {
+        const prevVehicleState = normalizeOverheatedStatusForD04Hold(vehicleState, destructionState);
+        const effectiveConfig = composeEffectiveMotorConfig(motorConfig, destructionState, destructionConfig);
+        const rawNextVehicleState = stepTrackRun(effectiveConfig, carConfig, track, prevVehicleState, DT_G5, NO_NOISE_RNG_G5);
+        const frame = buildVehicleFrameInput(effectiveConfig, prevVehicleState, rawNextVehicleState);
+        const result = advanceDestructionState(destructionState, frame, destructionConfig, runContext, DT_G5);
+        destructionState = result.state;
+        vehicleState = normalizeOverheatedStatusForD04Hold(rawNextVehicleState, destructionState);
+      }
+
+      // 空虚な一致を禁止する: 実際に完走したことを先に確認する。
+      expect(vehicleState.status, `finalStep=${i}`).toBe('finished');
+      expect(destructionState.modes.D05.episodeCount).toBe(0);
+      expect(destructionState.modes.D05.cumulativeWearDeltaFraction).toBe(0);
+    });
+  });
+
+  describe('P56-3: smokeResistanceMultiplier副作用の方向(正式Fable Q1/P44要求、checkpoint5較正sweep追補)', () => {
+    // 正式Fable Q1/P44は、発煙後のR増(smokeResistanceMultiplier)が熱蓄積を加速・鈍化・
+    // ほぼ不変のどれにするかをsweep実測で報告するよう要求している。D02専用M4型sweepと同一の
+    // 高負荷構成(wire-silver・magnet-ferrite・gear-titanium・battery-alkaline・
+    // coilTurns:40・magnetDistanceMm:3・固定loadTorque=0.02、motor-only、rng固定0.5)で
+    // smokingStarted成立直後(実測forkStep=508)の同一motorState/destructionStateから、
+    // multiplier=1.0(no-op相当)と1.2(採用値)へ分岐させ、以後の推移を比較する。
+    function buildSnapshot(smokeResistanceMultiplier: number) {
+      const { motorConfig } = pvMotorCar(
+        { wireId: 'wire-silver', magnetId: 'magnet-ferrite', gearId: 'gear-titanium', batteryId: 'battery-alkaline', brushId: 'brush-carbon' },
+        { coilTurns: 40, magnetDistanceMm: 3 },
+      );
+      const destructionConfig = { ...g5NonLipoDestructionConfig('magnet-ferrite'), d02: { ...g5NonLipoDestructionConfig('magnet-ferrite').d02, smokeResistanceMultiplier } };
+      return captureRunSnapshot({
+        motorConfig, carConfig: null, destructionConfig,
+        runContext: { context: 'motor', fireExposureProfile: { bodyEquipped: false, adjacentRolesEquipped: [] }, gearTotalToothCount: null },
+        initialMotorState: { theta: Math.PI / 4, omega: 0, current: 0, backEmf: 0, shorted: false, running: true, rpm: 0, chatterFramesLeft: 0, batteryHeat: 0, coilCollapsed: false, highSpeedFrameCount: 0 },
+        initialVehicleState: null, track: null, courseLengthM: null, slopeRad: null, seed: 1,
+        initialDestructionState: createInitialDestructionState('nonLipo'),
+      });
+    }
+
+    function reachSmokeOnset() {
+      const snapshotRef = buildSnapshot(1.2);
+      let accumulator: RunAccumulator = createRunAccumulator(snapshotRef);
+      let motorState: SimState = snapshotRef.initialMotorState;
+      let forkStep = -1;
+      for (let i = 0; i < 3000 && forkStep < 0; i++) {
+        const result = stepMotorWithDestruction(motorState, accumulator, DT_G5, () => 0.5, 0.02);
+        motorState = result.physicsState;
+        accumulator = result.accumulator;
+        if (accumulator.destructionState.modes.D02.smokingStarted) forkStep = i;
+      }
+      return { forkStep, motorState, destructionState: accumulator.destructionState };
+    }
+
+    function forkWith(multiplier: number, refMotorState: SimState, refDestructionState: RunAccumulator['destructionState'], maxSteps: number) {
+      const snap = buildSnapshot(multiplier);
+      let acc: RunAccumulator = { events: [], destructionState: refDestructionState, replaySnapshot: snap, terminalModeCandidates: [] };
+      let motorState = refMotorState;
+      const ratioHistory: number[] = [];
+      let burnoutStep = -1;
+      for (let i = 0; i < maxSteps; i++) {
+        const result = stepMotorWithDestruction(motorState, acc, DT_G5, () => 0.5, 0.02);
+        motorState = result.physicsState;
+        acc = result.accumulator;
+        ratioHistory.push(acc.destructionState.modes.D02.coilHeatGaugeRatio);
+        if (burnoutStep < 0 && acc.destructionState.modes.D02.coilHeatGaugeRatio >= 1) burnoutStep = i;
+      }
+      return { ratioHistory, burnoutStep, burnoutSeconds: burnoutStep < 0 ? null : burnoutStep * DT_G5 };
+    }
+
+    it('smokeResistanceMultiplier=1.2(採用値)はmultiplier=1.0(no-op)と比較して、発煙後の熱蓄積を加速しburnout到達を早める(観測結果、断定的な物理的説明は付与しない)', () => {
+      const { forkStep, motorState: refMotorState, destructionState: refDestructionState } = reachSmokeOnset();
+      const maxSteps = 1000; // 採用値側の実測burnoutStep(696)を十分超える予算
+      const withMultiplier1_0 = forkWith(1.0, refMotorState, refDestructionState, maxSteps);
+      const withMultiplier1_2 = forkWith(1.2, refMotorState, refDestructionState, maxSteps);
+
+      // 空虚な一致を禁止する: フォーク元でsmokingStartedが実際に成立していたことを先に確認する。
+      expect(forkStep, 'フォーク元でsmokingStarted成立(回帰)').toBe(508);
+      expect(refDestructionState.modes.D02.smokingStarted).toBe(true);
+
+      // 主張(観測された方向): multiplier=1.2はmultiplier=1.0よりburnout(coilOverheatGaugeLimit=1)へ
+      // 速く到達する。multiplier=1.0は同じ予算内ではburnoutへ到達しない。
+      expect(withMultiplier1_2.burnoutStep, 'multiplier=1.2はburnoutへ到達すること').toBeGreaterThan(0);
+      expect(withMultiplier1_0.burnoutStep, 'multiplier=1.0は同じ予算内ではburnoutへ到達しないこと').toBe(-1);
+      // 同一step数時点(multiplier=1.2のburnoutStep)で比較しても、multiplier=1.0はまだ1.0未満である。
+      expect(withMultiplier1_0.ratioHistory[withMultiplier1_2.burnoutStep]).toBeLessThan(1);
+
+      // 実測値(2026-08-10計測、checkpoint5 P56-3追補)を数値回帰として固定する。
+      expect(withMultiplier1_2.burnoutStep, 'multiplier=1.2のburnoutStep(回帰)').toBe(696);
+      expect(withMultiplier1_2.burnoutSeconds, 'multiplier=1.2のburnout秒数(回帰)').toBeCloseTo(5.8, 3);
+      expect(withMultiplier1_0.ratioHistory[696], 'multiplier=1.0の同時点ratio(回帰)').toBeCloseTo(0.884946, 5);
+      expect(withMultiplier1_0.ratioHistory[999], 'multiplier=1.0の1000step後ratio(回帰)').toBeCloseTo(0.920752, 5);
+    });
+  });
+
+  describe('P56-4: D05共通較正値(duration/recovery)の証跡固定(checkpoint5較正sweep追補)', () => {
+    // 正式Fable指示(P56-4)により、D05共通5値のうちduration/recoveryの2軸を、実チャタリング
+    // バースト(nextChatterState経由、CHATTER_BURST_FRAMES=24フレーム=0.2秒)を使った物理
+    // harnessで直接固定する。理論電流(theoreticalCurrentA)を単一burst内で安定して
+    // brushSparkCurrentThresholdA(3A)超に保つため、`effectiveInertia`を極端に大きく
+    // (=1、通常のJ_motorオーダー〈1e-5〉より5桁大きい)test-only固定し、バースト中のomega
+    // 変動をほぼゼロへ凍結する——これによりtheta変化もほぼ止まり、コギング由来の電流振動・
+    // 整流子不感帯の周期的通過(通常の高負荷構成で観測された、通常運用では起こりうる現象だが
+    // duration境界を単独で見るには測定を汚染する)を排除できる。**この凍結harnessは
+    // Q2 sweepのisolatedConfigと同種のtest-only isolation fixtureであり、production-valid
+    // ではない**——motorConfig(wire-silver・coilTurns:10・magnetDistanceMm:3・
+    // brushPressure:0.1)自体はproduction-valid選択の範囲内だが、effectiveInertiaの人為的な
+    // 拡大は測定専用の分離手法である。
+    function d05Config(brushSparkDurationLimitS: number) {
+      return assembleD05Config(mapD05BrushWearConfig('brush-carbon'), {
+        brushSparkDurationLimitS,
+        brushSparkCurrentThresholdA: 3,
+        wearPerAmpSecond: 0.001,
+        recoveryFrames: 6,
+        recoveryContactResistanceMultiplier: 1.2,
+      });
+    }
+    function runSingleFrozenBurst(brushSparkDurationLimitS: number, totalFrames = 30) {
+      const { motorConfig } = pvMotorCar(
+        { wireId: 'wire-silver', magnetId: 'magnet-neodymium', gearId: 'gear-titanium', batteryId: 'battery-lithium-polymer', brushId: 'brush-carbon' },
+        { coilTurns: 10, magnetDistanceMm: 3, brushPressure: 0.1 },
+      );
+      const destructionConfig: DestructionConfig = { ...g5LipoDestructionConfig(), d05: d05Config(brushSparkDurationLimitS) };
+      const snapshot = captureRunSnapshot({
+        motorConfig, carConfig: null, destructionConfig,
+        runContext: { context: 'motor', fireExposureProfile: { bodyEquipped: false, adjacentRolesEquipped: [] }, gearTotalToothCount: null },
+        initialMotorState: { theta: Math.PI / 4, omega: 0, current: 0, backEmf: 0, shorted: false, running: true, rpm: 0, chatterFramesLeft: 0, batteryHeat: 0, coilCollapsed: false, highSpeedFrameCount: 0 },
+        initialVehicleState: null, track: null, courseLengthM: null, slopeRad: null, seed: 1,
+        initialDestructionState: createInitialDestructionState('lipo'),
+      });
+      let accumulator: RunAccumulator = createRunAccumulator(snapshot);
+      let motorState: SimState = snapshot.initialMotorState;
+      let rngCallCount = 0;
+      const rng = () => (rngCallCount++ === 0 ? 0 : 1); // 単一の連続24フレームバーストのみを作る
+      const episodeTriggeredAtFrame: number[] = [];
+      let prevEpisodeCount = 0;
+      for (let i = 0; i < totalFrames; i++) {
+        const result = stepMotorWithDestruction(motorState, accumulator, DT_G5, rng, 0, 1); // effectiveInertia=1(凍結)、loadTorque=0
+        motorState = result.physicsState;
+        accumulator = result.accumulator;
+        if (accumulator.destructionState.modes.D05.episodeCount > prevEpisodeCount) {
+          episodeTriggeredAtFrame.push(i);
+          prevEpisodeCount = accumulator.destructionState.modes.D05.episodeCount;
+        }
+      }
+      return { episodeTriggeredAtFrame, finalEpisodeCount: accumulator.destructionState.modes.D05.episodeCount, finalSparkDurationS: accumulator.destructionState.modes.D05.sparkDurationS };
+    }
+
+    it('duration=0.15秒(採用値)は単一の実チャタリングバースト(24フレーム)内でepisodeへ到達可能である(frame17=18フレーム目、バースト終了frame23より前)', () => {
+      const r = runSingleFrozenBurst(0.15);
+      expect(r.episodeTriggeredAtFrame, '実測: frame17(0-indexed、18フレーム目=0.15秒)でepisode成立(回帰)').toEqual([17]);
+      expect(r.finalEpisodeCount).toBe(1);
+      expect(r.episodeTriggeredAtFrame[0]).toBeLessThan(23); // バースト終了(frame23)より前に到達
+    });
+
+    it('duration=0.2秒(=CHATTER_BURST_FRAMES/120、validatorが許す上限)は単一バーストの最終フレーム(frame23)でちょうど境界到達する', () => {
+      const r = runSingleFrozenBurst(CHATTER_BURST_FRAMES / 120);
+      expect(r.episodeTriggeredAtFrame, '実測: frame23(0-indexed、バーストの最終=24フレーム目)でepisode成立(回帰)').toEqual([23]);
+      expect(r.finalEpisodeCount).toBe(1);
+    });
+
+    it('duration>0.2秒は単一バースト内では構造的に非到達である(validatorが既にこの値域を拒否することは既存テスト「72. validateDestructionConfig: d05の新規値域」で固定済み、ここではランタイム側の非到達性を直接確認する)', () => {
+      const r = runSingleFrozenBurst(CHATTER_BURST_FRAMES / 120 + 1 / 120); // validatorを迂回しあえて0.2s超を設定(非到達性の確認専用)
+      expect(r.episodeTriggeredAtFrame).toEqual([]);
+      expect(r.finalEpisodeCount).toBe(0);
+      expect(r.finalSparkDurationS).toBe(0); // バースト終了で再武装され、蓄積は持ち越されない
+    });
+
+    it('recoveryFrames=6・recoveryContactResistanceMultiplier=1.2はno-opではない(composeEffectiveMotorConfig後のbrushContactResistanceRatio増加、および実物理〈computeElectricalState〉での電流低下まで確認する)', () => {
+      const { motorConfig } = pvMotorCar({ wireId: 'wire-copper-standard', magnetId: 'magnet-neodymium', gearId: 'gear-pom', batteryId: 'battery-lithium-polymer', brushId: 'brush-carbon' });
+      const destructionConfig = g5LipoDestructionConfig();
+      const baseDestructionState = createInitialDestructionState('lipo');
+      const inactiveState = { ...baseDestructionState, modes: { ...baseDestructionState.modes, D05: { ...baseDestructionState.modes.D05, recoveryFramesLeft: 0 } } };
+      const activeState = { ...baseDestructionState, modes: { ...baseDestructionState.modes, D05: { ...baseDestructionState.modes.D05, recoveryFramesLeft: 6 } } };
+
+      const inactiveConfig = composeEffectiveMotorConfig(motorConfig, inactiveState, destructionConfig);
+      const activeConfig = composeEffectiveMotorConfig(motorConfig, activeState, destructionConfig);
+
+      // 空虚な一致を禁止する: base値(brush-carbon、比率1.0)からの変化を確認する。
+      expect(inactiveConfig.brushContactResistanceRatio).toBe(1);
+      expect(activeConfig.brushContactResistanceRatio, 'recovery活性時はbase×1.2(回帰)').toBeCloseTo(1.2, 10);
+      expect(activeConfig.brushContactResistanceRatio!).toBeGreaterThan(inactiveConfig.brushContactResistanceRatio!);
+
+      // 実物理での確認: 同一theta/omegaで、recovery活性時のほうが電流が低いこと。
+      const theta = Math.PI / 4;
+      const omega = 0;
+      const inactiveCurrent = computeElectricalState(inactiveConfig, theta, omega).current;
+      const activeCurrent = computeElectricalState(activeConfig, theta, omega).current;
+      expect(activeCurrent, `recovery活性時の電流(${activeCurrent})はrecovery非活性時(${inactiveCurrent})より低いこと`).toBeLessThan(inactiveCurrent);
+      expect(inactiveCurrent, 'recovery非活性時の電流(回帰)').toBeCloseTo(1.637896, 5);
+      expect(activeCurrent, 'recovery活性時の電流(回帰)').toBeCloseTo(1.605186, 5);
+    });
+  });
+
+  describe('付帯条件3(正式Fable checkpoint5較正レビュー、2026-08-10): precious-metalのbrushChatterProbabilityRatio=0.7が実際にバースト頻度を下げることの単離実証', () => {
+    // 正式Fable指摘: Q15-3ではepisode数がcarbon(比率1.0)と同数(6)だったため、
+    // brushChatterProbabilityRatio=0.7という値の「効果の存在」自体が一度も単離実証されて
+    // いなかった(値の妥当性ではなく、効果があるかどうかの確認)。同一rng列・同一構成で
+    // ratio=0.7と1.0のnextChatterState経由バースト発生数を比較する決定論harnessを新設する。
+    //
+    // 短い周期のrng配列を使うと、`step()`内の軸ずれ振動ノイズ(`vibrationNoise`、
+    // axisOffsetMm=0でも数値的な効果はゼロだがrng()呼び出し自体は毎フレーム消費される、
+    // 「rng消費②」コメント参照)とチャタリング判定のrng呼び出し(「rng消費①」)が
+    // 干渉し、周期が一致すると特定の値に固定されてしまう(実際に周期4配列で実験した際、
+    // ratio=0.7側が偶然すべて失敗する値に固定される「共振」を観測した)。この汚染を
+    // 避けるため、周期を持たない決定論的PRNG(mulberry32相当、固定seed)を用いる。
+    function makeDeterministicRng(seed: number) {
+      let s = seed >>> 0;
+      return () => {
+        s = (s + 0x6d2b79f5) | 0;
+        let t = Math.imul(s ^ (s >>> 15), 1 | s);
+        t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+      };
+    }
+    function countBursts(brushChatterProbabilityRatio: number, totalFrames: number) {
+      const { motorConfig: base } = pvMotorCar(
+        { wireId: 'wire-copper-standard', magnetId: 'magnet-neodymium', gearId: 'gear-pom', batteryId: 'battery-lithium-polymer', brushId: 'brush-carbon' },
+        { brushPressure: 0.1 },
+      );
+      // brushChatterProbabilityRatioのみを差し替え、brushContactResistanceRatio等の他フィールドは
+      // baseのまま(anchor、brush-carbon由来の1.0)に固定する——比較対象をこの1フィールドへ単離する。
+      const motorConfig: MotorConfig = { ...base, brushChatterProbabilityRatio };
+      let state: SimState = { theta: Math.PI / 4, omega: 0, current: 0, backEmf: 0, shorted: false, running: true, rpm: 0, chatterFramesLeft: 0, batteryHeat: 0, coilCollapsed: false, highSpeedFrameCount: 0 };
+      const rng = makeDeterministicRng(42); // 両ratioで同一seed(=同一rng列)を使う
+      let burstStarts = 0;
+      let totalChatterFrames = 0;
+      for (let i = 0; i < totalFrames; i++) {
+        const prevFramesLeft = state.chatterFramesLeft;
+        state = step(motorConfig, state, DT_G5, rng, 0);
+        if (prevFramesLeft === 0 && state.chatterFramesLeft === CHATTER_BURST_FRAMES - 1) burstStarts++;
+        if (prevFramesLeft > 0 || state.chatterFramesLeft > 0) totalChatterFrames++;
+      }
+      return { burstStarts, totalChatterFrames };
+    }
+
+    it('同一rng列(固定seed)・同一構成(brushPressure=0.1)で、brushChatterProbabilityRatio=0.7はratio=1.0よりバースト発生数・総チャタリングフレーム数の両方が少ない', () => {
+      const totalFrames = 12000; // 100秒相当、大数の法則で単発の揺らぎを均す
+      const ratio1_0 = countBursts(1.0, totalFrames);
+      const ratio0_7 = countBursts(0.7, totalFrames);
+
+      // 空虚な一致を禁止する: 両ratioとも実際にバーストが発生していることを先に確認する。
+      expect(ratio1_0.burstStarts, 'ratio=1.0: バースト発生数>0').toBeGreaterThan(0);
+      expect(ratio0_7.burstStarts, 'ratio=0.7: バースト発生数>0').toBeGreaterThan(0);
+
+      // 主張(効果の存在): ratio=0.7はratio=1.0よりバースト発生数・総チャタリングフレーム数の
+      // 両方が少ない(確率が下がっている以上、頻度も下がるはず、という効果の存在証明)。
+      expect(ratio0_7.burstStarts, `ratio=0.7のバースト発生数(${ratio0_7.burstStarts})はratio=1.0(${ratio1_0.burstStarts})より少ないこと`).toBeLessThan(ratio1_0.burstStarts);
+      expect(ratio0_7.totalChatterFrames, `ratio=0.7の総チャタリングフレーム数(${ratio0_7.totalChatterFrames})はratio=1.0(${ratio1_0.totalChatterFrames})より少ないこと`).toBeLessThan(ratio1_0.totalChatterFrames);
+
+      // 実測値(2026-08-10計測、checkpoint5較正レビュー付帯条件3)を数値回帰として固定する。
+      expect(ratio1_0.burstStarts, 'ratio=1.0: バースト発生数(回帰)').toBe(403);
+      expect(ratio1_0.totalChatterFrames, 'ratio=1.0: 総チャタリングフレーム数(回帰)').toBe(9672);
+      expect(ratio0_7.burstStarts, 'ratio=0.7: バースト発生数(回帰)').toBe(375);
+      expect(ratio0_7.totalChatterFrames, 'ratio=0.7: 総チャタリングフレーム数(回帰)').toBe(8977);
+    });
+  });
+
+  describe('D01自己制限プラトー(正式Fable補足裁定、2026-08-11、受け入れ条件3→3′・条件1′確定)', () => {
+    // 正式Fable補足裁定: D01追加sweepで発見された負のフィードバック(劣化→トルク定数低下→
+    // 回転低下→COIL_DEFORM_OMEGA割れ→減衰停止)は、物理的に正しい創発挙動として受容された
+    // (Phase 2の銅線+フェライト過熱レジームに続く本プロジェクト2件目の創発的実測知見、
+    // docs/phase3-plan-v12-amendments.md参照)。旧条件3(floor到達可能性)は誤った受け入れ
+    // 条件と判定され、次の3点へ改訂された:
+    // - 条件3′(プラトーの実測固定): 代表的虐待構成の自己制限プラトー(実測: 最良構成で
+    //   ratio 0.7074)が観測可能な劣化を与えること(条件2で別途確認済み、3%基準を大幅超過)。
+    // - 条件1′(漸減性の直接形): 崩壊トリガ後1秒時点でratio>=0.8(段差禁止の実測可能形)。
+    // - decayExposureRadがプラトー後は増加しないこと(減衰停止の直接assert)。
+    // 最良構成(coilTurns=15・magnetDistanceMm=8、D01補足レビュー依頼書の実測構成と同一)を
+    // 用い、この3点を単一の実走行経路で固定する。
+    it('最良構成(coilTurns=15・magnetDistanceMm=8)のD01自己制限プラトーが、条件1′(トリガ+1秒でratio>=0.8)・条件3′(プラトーratio固定)・減衰停止(プラトー後decayExposureRad不増加)を満たす', () => {
+      const { motorConfig: baseMotor } = pvMotorCar(
+        { wireId: 'wire-copper-standard', magnetId: 'magnet-neodymium', gearId: 'gear-pom', batteryId: 'battery-lithium-polymer', brushId: 'brush-carbon' },
+        { coilTurns: 15, magnetDistanceMm: 8 },
+      );
+      const motorConfig: MotorConfig = { ...baseMotor, varnished: false };
+      const destructionConfig = g5LipoDestructionConfig(); // d01: decayExposureScaleRad=1000, minEffectiveTurnsRatio=0.5(確定値、変更なし)
+      const snapshot = captureRunSnapshot({
+        motorConfig, carConfig: null, destructionConfig,
+        runContext: { context: 'motor', fireExposureProfile: { bodyEquipped: false, adjacentRolesEquipped: [] }, gearTotalToothCount: null },
+        initialMotorState: { theta: Math.PI / 4, omega: 0, current: 0, backEmf: 0, shorted: false, running: true, rpm: 0, chatterFramesLeft: 0, batteryHeat: 0, coilCollapsed: false, highSpeedFrameCount: 0 },
+        initialVehicleState: null, track: null, courseLengthM: null, slopeRad: null, seed: 1,
+        initialDestructionState: createInitialDestructionState('lipo'),
+      });
+      let accumulator: RunAccumulator = createRunAccumulator(snapshot);
+      let motorState: SimState = snapshot.initialMotorState;
+      let triggeredAtStep = -1;
+      let ratioAt1sPostTrigger: number | null = null;
+      const totalFrames = 3600; // 30秒(プラトーに達するまで十分な余裕)
+      const oneSecondFrames = Math.round(1 / DT_G5);
+      const decayExposureRadHistory: number[] = [];
+      let finalRatio = 1;
+      for (let i = 0; i < totalFrames; i++) {
+        const result = stepMotorWithDestruction(motorState, accumulator, DT_G5, () => 0.5, 0);
+        motorState = result.physicsState;
+        accumulator = result.accumulator;
+        const d01 = accumulator.destructionState.modes.D01;
+        if (triggeredAtStep < 0 && d01.triggered) triggeredAtStep = i;
+        if (triggeredAtStep >= 0) {
+          decayExposureRadHistory.push(d01.decayExposureRad);
+          // 正式Fable指摘(P59-1): 実効ratioはproductionのcomposeEffectiveMotorConfigから
+          // 取得する(1000/0.5を直書き再計算するとproduction式との二重出典になる)。
+          const effectiveRatio = composeEffectiveMotorConfig(motorConfig, accumulator.destructionState, destructionConfig).effectiveTurnsRatio ?? 1;
+          finalRatio = effectiveRatio;
+          if (ratioAt1sPostTrigger === null && i - triggeredAtStep >= oneSecondFrames) {
+            ratioAt1sPostTrigger = effectiveRatio;
+          }
+        }
+      }
+      const finalDecayExposureRad = decayExposureRadHistory[decayExposureRadHistory.length - 1];
+
+      // 空虚な一致を禁止する: 実際に崩壊がトリガし、トリガ後の履歴が取得できていることを確認する。
+      expect(triggeredAtStep, '崩壊トリガが実際に発生すること').toBeGreaterThan(0);
+      expect(ratioAt1sPostTrigger, 'トリガ+1秒時点のratioが取得できていること').not.toBeNull();
+
+      // 主張(条件1′、漸減性の直接形): 崩壊トリガ後1秒時点でratio>=0.8(段差ではないこと)。
+      expect(ratioAt1sPostTrigger!, `トリガ+1秒時点のratio(${ratioAt1sPostTrigger})は0.8以上であること`).toBeGreaterThanOrEqual(0.8);
+
+      // 主張(減衰停止): プラトー到達後(末尾側)、decayExposureRadは増加しない
+      // (末尾240フレーム=2秒分が全て同一値であることで、減衰が実際に停止したことを直接確認する)。
+      const tailWindow = decayExposureRadHistory.slice(-240);
+      expect(tailWindow.every((v) => v === tailWindow[0]), `末尾240フレームのdecayExposureRadが一定であること(減衰停止): ${JSON.stringify([...new Set(tailWindow)])}`).toBe(true);
+
+      // 実測値(2026-08-11計測、正式Fable補足裁定、条件1′・条件3′)を数値回帰として固定する。
+      expect(triggeredAtStep, '崩壊トリガstep(回帰)').toBe(563);
+      expect(ratioAt1sPostTrigger!, 'トリガ+1秒時点ratio(回帰)').toBeCloseTo(0.8914, 3);
+      expect(finalRatio, 'プラトーratio(回帰、条件3′)').toBeCloseTo(0.7074, 3);
+      expect(finalDecayExposureRad, 'プラトーdecayExposureRad(回帰)').toBeCloseTo(292.634, 2);
+    });
+  });
+});
+
+describe('P3-3ゲート2: ブラシ素材の写像(mapBrushRatios/mapD05BrushWearConfig/assembleD05Config)', () => {
+  const BRUSH_D05_COMMON_PART = {
+    brushSparkDurationLimitS: 0.15,
+    brushSparkCurrentThresholdA: 3,
+    wearPerAmpSecond: 0.001,
+    recoveryFrames: 6,
+    recoveryContactResistanceMultiplier: 1.2,
+  };
+
+  it('1. BRUSH_MATERIALSの全4tierに対応するmapBrushRatios/mapD05BrushWearConfigの結果が存在する(Record型網羅+実行時確認)', () => {
+    for (const brush of BRUSH_MATERIALS) {
+      const ratios = mapBrushRatios(brush.id);
+      expect(Number.isFinite(ratios.brushContactResistanceRatio), `${brush.id}のbrushContactResistanceRatio`).toBe(true);
+      expect(Number.isFinite(ratios.brushChatterProbabilityRatio), `${brush.id}のbrushChatterProbabilityRatio`).toBe(true);
+      const wear = mapD05BrushWearConfig(brush.id);
+      expect(Number.isFinite(wear.brushWearRateRatio), `${brush.id}のbrushWearRateRatio`).toBe(true);
+      expect(['noPenalty', 'thresholdPenalty']).toContain(wear.highCurrentPenalty.kind);
+      if (wear.highCurrentPenalty.kind === 'thresholdPenalty') {
+        expect(Number.isFinite(wear.highCurrentPenalty.highCurrentPenaltyThresholdA), `${brush.id}のhighCurrentPenaltyThresholdA`).toBe(true);
+        expect(Number.isFinite(wear.highCurrentPenalty.highCurrentPenaltyMultiplier), `${brush.id}のhighCurrentPenaltyMultiplier`).toBe(true);
+      }
+    }
+  });
+
+  it('2. anchor(brush-carbon)はMotorConfig層の両ratio・D05層のwearRateRatioがすべて厳密1.0、高電流ペナルティなし(kind:noPenalty)になる(正式Fable P3-3-Q15-4裁定の判別union反映)', () => {
+    const ratios = mapBrushRatios('brush-carbon');
+    expect(ratios).toEqual({ brushContactResistanceRatio: 1, brushChatterProbabilityRatio: 1 });
+    const wear = mapD05BrushWearConfig('brush-carbon');
+    expect(wear.brushWearRateRatio).toBe(1);
+    expect(wear.highCurrentPenalty).toEqual({ kind: 'noPenalty' });
+  });
+
+  it('3. tierIndex順(copper-plate<carbon<silver-graphite<precious-metal)でbrushContactResistanceRatioが単調減少する(値が小さいほど低接触抵抗=良、6.3節の低電流域期待表と一致)', () => {
+    const byTier = [...BRUSH_MATERIALS].sort((a, b) => a.tierIndex - b.tierIndex);
+    const ratios = byTier.map((brush) => mapBrushRatios(brush.id).brushContactResistanceRatio);
+    expect(ratios.every((v, i) => i === 0 || v < ratios[i - 1]), `tierIndex順の実測値: ${JSON.stringify(ratios)}`).toBe(true);
+    // 正式Fable checkpoint5較正レビュー付帯条件2: 単調減少だけでなく、Q15-2裁定済みの
+    // 具体値そのもの(copper-plate 1.3 > carbon 1.0 > silver-graphite 0.7 > precious-metal 0.5)
+    // をtierIndex順の配列として数値回帰固定する。
+    expect(ratios, `tierIndex順のbrushContactResistanceRatio配列(回帰)`).toEqual([1.3, 1, 0.7, 0.5]);
+  });
+
+  it('4. brushChatterProbabilityRatioはbrush-precious-metalのみanchorより改善し、他はanchor(1.0)から変更しない(6.2節: 記述に根拠のない比率変更をしない方針)', () => {
+    expect(mapBrushRatios('brush-copper-plate').brushChatterProbabilityRatio).toBe(1);
+    expect(mapBrushRatios('brush-silver-graphite').brushChatterProbabilityRatio).toBe(1);
+    expect(mapBrushRatios('brush-precious-metal').brushChatterProbabilityRatio).toBeLessThan(1);
+  });
+
+  it('5. D05層のbrushWearRateRatioは、brush-copper-plateのみanchorより悪化し、brush-silver-graphiteはanchorから変更せず(低接触抵抗の利点はMotorConfig層のみで表現)、brush-precious-metalのみ低電流域で改善する', () => {
+    expect(mapD05BrushWearConfig('brush-copper-plate').brushWearRateRatio).toBeGreaterThan(1);
+    expect(mapD05BrushWearConfig('brush-silver-graphite').brushWearRateRatio).toBe(1);
+    expect(mapD05BrushWearConfig('brush-precious-metal').brushWearRateRatio).toBeLessThan(1);
+  });
+
+  it('6. brush-precious-metalのみ高電流ペナルティ(kind:thresholdPenalty・multiplierが1超)を持ち、他3素材はkind:noPenalty(倍率1.0のため無効、という古い番兵値表現ではなく、正式Fable P3-3-Q15-4裁定の判別unionでペナルティ関連フィールド自体を持たない)である(6.3節の非線形性は唯一この素材のみが表現する)', () => {
+    for (const brushId of ['brush-carbon', 'brush-copper-plate', 'brush-silver-graphite'] as const) {
+      const wear = mapD05BrushWearConfig(brushId);
+      expect(wear.highCurrentPenalty, brushId).toEqual({ kind: 'noPenalty' });
+    }
+    const preciousMetal = mapD05BrushWearConfig('brush-precious-metal');
+    expect(preciousMetal.highCurrentPenalty.kind).toBe('thresholdPenalty');
+    if (preciousMetal.highCurrentPenalty.kind === 'thresholdPenalty') {
+      expect(Number.isFinite(preciousMetal.highCurrentPenalty.highCurrentPenaltyThresholdA)).toBe(true);
+      expect(preciousMetal.highCurrentPenalty.highCurrentPenaltyMultiplier).toBeGreaterThan(1);
+    }
+  });
+
+  it('7. assembleD05ConfigはmapD05BrushWearConfigの素材依存部とd05共通部を過不足なく合成し、DestructionConfig[\'d05\']の全7フィールド(highCurrentPenaltyは判別unionとして1フィールド、正式Fable P3-3-Q15-4裁定)を埋める(共通部欠落はTypeScriptの戻り値型注釈がコンパイル時に検出する契約——本テストはそのkey完全性を実行時にも交差確認する)', () => {
+    for (const brush of BRUSH_MATERIALS) {
+      const assembled = assembleD05Config(mapD05BrushWearConfig(brush.id), BRUSH_D05_COMMON_PART);
+      expect(Object.keys(assembled).sort()).toEqual(
+        ['brushSparkDurationLimitS', 'brushSparkCurrentThresholdA', 'brushWearRateRatio', 'highCurrentPenalty', 'wearPerAmpSecond', 'recoveryFrames', 'recoveryContactResistanceMultiplier'].sort(),
+      );
+      expect(assembled).toEqual({ ...BRUSH_D05_COMMON_PART, ...mapD05BrushWearConfig(brush.id) });
+    }
+  });
+
+  it('8. 同一引数のassembleD05Config呼び出しは互いに独立したオブジェクトを返す(戻り値を呼び出し元が変更しても他の呼び出し結果を汚染しない、mapD07DestructionConfigと同じ純粋性契約)', () => {
+    const a = assembleD05Config(mapD05BrushWearConfig('brush-carbon'), BRUSH_D05_COMMON_PART);
+    const b = assembleD05Config(mapD05BrushWearConfig('brush-carbon'), BRUSH_D05_COMMON_PART);
+    expect(a).toEqual(b);
+    expect(a).not.toBe(b);
+    (a as { recoveryFrames: number }).recoveryFrames = 999;
+    expect(b.recoveryFrames).toBe(6);
+  });
+
+  it('9. composeConfigFromMaterialsでbrushId=brush-carbonを選ぶと、motorConfigのbrushContactResistanceRatio/brushChatterProbabilityRatioがともに厳密1.0になる(旧構成〈P3-3以前、比率概念自体が存在しない状態〉と数値的に等価)', () => {
+    const baseline: MaterialCompositionBaseline = { chassisBaselineG: 150, baseGearEfficiency: 0.8 };
+    const selection: MaterialSelection = {
+      wireId: 'wire-copper-standard',
+      magnetId: 'magnet-ferrite',
+      gearId: 'gear-pom',
+      batteryId: 'battery-alkaline',
+      brushId: 'brush-carbon',
+    };
+    const baseMotor: MotorConfig = { coilTurns: 80, slitWidthMm: 1.5, sandingQuality: 0.9, brushPressure: 0.3, magnetStrength: 0.5, magnetDistanceMm: 10, batteryVoltage: 3, axisOffsetMm: 0, wireGaugeMm: 0.4, parallelStrands: 1, varnished: true };
+    const baseCar: CarConfig = { massG: 150, gearEfficiency: 0.8, gearRatio: 4, wheelDiameterMm: 30, tireGrip: 0.7, axleFriction: 0, wheelAlignmentMm: 0, centerOfMassHeightMm: 20, motorMountOffsetMm: 0 };
+    const result = composeConfigFromMaterials(baseMotor, baseCar, baseline, selection);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.motorConfig.brushContactResistanceRatio).toBe(1);
+    expect(result.motorConfig.brushChatterProbabilityRatio).toBe(1);
+  });
+
+  it('11. assembleD05Configの出力を含む完成DestructionConfigは、全4ブラシ素材でvalidateDestructionConfigをok:trueで通過する(このテストが無ければ、highCurrentPenaltyThresholdAへNumber.POSITIVE_INFINITYを使う設計—— isPositiveFinite制約に反しvalidateDestructionConfigがok:falseを返す——という実装バグを検出できなかった。同種のvalidator境界とのミスマッチをGate2側でも直接固定する)', () => {
+    for (const brush of BRUSH_MATERIALS) {
+      const config: DestructionConfig = {
+        battery: mapD04BatteryDestructionConfig('battery-lithium-polymer'),
+        d01: { decayExposureScaleRad: 1000, minEffectiveTurnsRatio: 0.5 },
+        d02: { smokeGaugeThreshold: 0.6, coilOverheatGaugeLimit: 1, conductionScale: 0.04, dissipationCoefficient: 0.5, smokeResistanceMultiplier: 1.2 },
+        d04: { bodyScorchDeltaFraction: mapBodyScorchDeltaFraction('body-ps-cowl'), magnetScorchDeltaFraction: mapMagnetScorchDeltaFraction('magnet-neodymium') },
+        d05: assembleD05Config(mapD05BrushWearConfig(brush.id), BRUSH_D05_COMMON_PART),
+        d06: { breakage: { kind: 'nonBreakable' } },
+        d07: mapD07DestructionConfig('magnet-neodymium'),
+        d09: { bearingSeizureGaugeLimit: 1 },
+      };
+      const result = validateDestructionConfig(config);
+      expect(result.ok, `${brush.id}: ${result.ok ? '' : JSON.stringify(result.invalidFields)}`).toBe(true);
+    }
+  });
+
+  it('10. selection中のbrushIdが未登録の場合、部分更新されたconfigを返さず全体がok:falseになる(既存の他ファミリーと同じ規律)', () => {
+    const baseline: MaterialCompositionBaseline = { chassisBaselineG: 150, baseGearEfficiency: 0.8 };
+    const badSelection: MaterialSelection = {
+      wireId: 'wire-copper-standard',
+      magnetId: 'magnet-ferrite',
+      gearId: 'gear-pom',
+      batteryId: 'battery-alkaline',
+      brushId: 'brush-unknown-fixture' as BrushMaterialId,
+    };
+    const baseMotor: MotorConfig = { coilTurns: 80, slitWidthMm: 1.5, sandingQuality: 0.9, brushPressure: 0.3, magnetStrength: 0.5, magnetDistanceMm: 10, batteryVoltage: 3, axisOffsetMm: 0, wireGaugeMm: 0.4, parallelStrands: 1, varnished: true };
+    const baseCar: CarConfig = { massG: 150, gearEfficiency: 0.8, gearRatio: 4, wheelDiameterMm: 30, tireGrip: 0.7, axleFriction: 0, wheelAlignmentMm: 0, centerOfMassHeightMm: 20, motorMountOffsetMm: 0 };
+    const result = composeConfigFromMaterials(baseMotor, baseCar, baseline, badSelection);
+    expect(result.ok).toBe(false);
+    expect((result as { motorConfig?: unknown }).motorConfig).toBeUndefined();
   });
 });

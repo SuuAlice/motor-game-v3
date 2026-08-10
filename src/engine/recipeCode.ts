@@ -30,6 +30,13 @@ const MAX_WIRE_DENSITY_RATIO = 1.5; // 実測[0.301(アルミ), 1.171(銀)]を�
 // Fable再レビュー対象とする(上記クランプ変更ポリシーと同じ扱い)。
 const MIN_BATTERY_RATIO = 0.01;
 const MAX_BATTERY_RATIO = 10;
+// 正式Fable P3-3-Q10裁定(確定): ブラシ写像2フィールド(brushContactResistanceRatio・
+// brushChatterProbabilityRatio)は、電池ratioと同じ理由(較正値がゲート5で確定するまで
+// 物性値としての意味のある上下限を確定しない)でNaN/Infinity/負値等の壊れた入力を排除する
+// ためだけの広い保守的範囲とする。較正値確定後にこの範囲外になった場合は上記クランプ
+// 変更ポリシーと同じ扱いとする。
+const MIN_BRUSH_RATIO = 0.01;
+const MAX_BRUSH_RATIO = 10;
 
 // v2/v3共通のキー対応表(短縮キー、フィールド追加時はここに追記する)。
 // m(MotorConfig): ct=coilTurns, sw=slitWidthMm, sq=sandingQuality, bp=brushPressure,
@@ -37,6 +44,9 @@ const MAX_BATTERY_RATIO = 10;
 //   wg=wireGaugeMm, ps=parallelStrands, vn=varnished
 //   (v3で追加) wr=wireResistivityRatio, wz=wireDensityRatio,
 //   br=batteryInternalResistanceRatio, bc=batteryCapacityRatio
+//   (P3-3で追加、正式Fable P3-3-Q10裁定確定) bcr=brushContactResistanceRatio,
+//   bpr=brushChatterProbabilityRatio(effectiveTurnsRatioは実行時合成値でありrecipeへ
+//   追従しない、P3-3-Q12裁定で確定済みの区別)
 // c(CarConfig): mg=massG, gr=gearRatio, ge=gearEfficiency, wd=wheelDiameterMm,
 //   tg=tireGrip, af=axleFriction, wa=wheelAlignmentMm, ch=centerOfMassHeightMm,
 //   mo=motorMountOffsetMm
@@ -55,7 +65,7 @@ const MAX_BATTERY_RATIO = 10;
 // 対応するToFields/normalizeFields関数の両方を更新すること(recipeCode.test.tsの
 // ドリフト検査が更新漏れを検出する)。
 export const RECIPE_M_FIELD_KEYS = [
-  'ct', 'sw', 'sq', 'bp', 'ms', 'md', 'bv', 'ao', 'wg', 'ps', 'vn', 'wr', 'wz', 'br', 'bc',
+  'ct', 'sw', 'sq', 'bp', 'ms', 'md', 'bv', 'ao', 'wg', 'ps', 'vn', 'wr', 'wz', 'br', 'bc', 'bcr', 'bpr',
 ] as const;
 export const RECIPE_C_FIELD_KEYS = ['mg', 'gr', 'ge', 'wd', 'tg', 'af', 'wa', 'ch', 'mo'] as const;
 export const RECIPE_A_FIELD_KEYS = ['bc', 'ac'] as const;
@@ -70,7 +80,7 @@ interface RecipePayloadV2 {
 
 interface RecipePayloadV3 {
   v: 3;
-  m: RecipePayloadV2['m'] & { wr: number; wz: number; br: number; bc: number };
+  m: RecipePayloadV2['m'] & { wr: number; wz: number; br: number; bc: number; bcr: number; bpr: number };
   c: RecipePayloadV2['c'];
   a: RecipePayloadV2['a'];
   sd: number;
@@ -209,6 +219,11 @@ function normalizeMotorFields(m: Record<string, unknown>): MotorConfig {
     wireDensityRatio: clamp(numAt(m, 'wz', 1), MIN_WIRE_DENSITY_RATIO, MAX_WIRE_DENSITY_RATIO),
     batteryInternalResistanceRatio: clamp(numAt(m, 'br', 1), MIN_BATTERY_RATIO, MAX_BATTERY_RATIO),
     batteryCapacityRatio: clamp(numAt(m, 'bc', 1), MIN_BATTERY_RATIO, MAX_BATTERY_RATIO),
+    // P3-3(正式Fable P3-3-Q10裁定確定)。旧レシピ(bcr/bprキーを持たない)をデコードした
+    // 場合はfallback=1(=カーボンanchor=Phase 2物理の暗黙ブラシ)で意味論的にも正しく復元
+    // される(MC3版上げ不要の根拠)。
+    brushContactResistanceRatio: clamp(numAt(m, 'bcr', 1), MIN_BRUSH_RATIO, MAX_BRUSH_RATIO),
+    brushChatterProbabilityRatio: clamp(numAt(m, 'bpr', 1), MIN_BRUSH_RATIO, MAX_BRUSH_RATIO),
   };
 }
 
@@ -251,6 +266,8 @@ function motorConfigToFields(motor: MotorConfig): Record<string, unknown> {
     wz: motor.wireDensityRatio ?? 1,
     br: motor.batteryInternalResistanceRatio ?? 1,
     bc: motor.batteryCapacityRatio ?? 1,
+    bcr: motor.brushContactResistanceRatio ?? 1,
+    bpr: motor.brushChatterProbabilityRatio ?? 1,
   };
 }
 
@@ -289,6 +306,17 @@ function resolveDefaultAppearance(defaultAppearance?: CarAppearance): CarAppeara
 // MC2-を出力する経路は残さない(decodeRecipeはMC2-/M15-の読み込みのみ後方互換で
 // 維持する。生成は常に最新版数)。
 export function encodeRecipe(recipe: CarRecipe): string {
+  // 正式Fable P3-3-Q14裁定(確定、候補c): effectiveTurnsRatioはrecipeへ意図的に追従しない
+  // (base値は素材によらず常に1.0のため符号化する情報がない、6.4節)。誤って
+  // composeEffectiveMotorConfigの出力(実行時のeffective config)を渡すと、この情報が
+  // エラーなく静かに脱落してしまう(round-tripの結果が入力と異なるにもかかわらず、
+  // 呼び出し側には一切通知されない)。戻り値`string`のシグネチャは維持したまま、
+  // 誤用時のみfail-fastでthrowする(候補b「base専用型Omit<MotorConfig,'effectiveTurnsRatio'>
+  // への分離」はTypeScriptの過剰プロパティ検査がオブジェクトリテラルにのみ適用されるため
+  // 実際には型レベルの防御にならない「偽の安全」であり却下された)。
+  if (recipe.motorConfig.effectiveTurnsRatio !== undefined && recipe.motorConfig.effectiveTurnsRatio !== 1) {
+    throw new RecipeCodeError('P3-3-Q14: effectiveTurnsRatioが1以外のMotorConfigはレシピへ変換できません(実行時の破壊状態合成値であり、無傷のbase configのみをencodeRecipeへ渡してください)。');
+  }
   const motorConfig = normalizeMotorFields(motorConfigToFields(recipe.motorConfig));
   const carConfig = normalizeCarFields(carConfigToFields(recipe.carConfig));
   const appearance = normalizeAppearanceFields(appearanceToFields(recipe.appearance));
@@ -310,6 +338,8 @@ export function encodeRecipe(recipe: CarRecipe): string {
       wz: motorConfig.wireDensityRatio as number,
       br: motorConfig.batteryInternalResistanceRatio as number,
       bc: motorConfig.batteryCapacityRatio as number,
+      bcr: motorConfig.brushContactResistanceRatio as number,
+      bpr: motorConfig.brushChatterProbabilityRatio as number,
     },
     c: {
       mg: carConfig.massG,

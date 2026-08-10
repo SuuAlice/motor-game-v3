@@ -321,6 +321,91 @@
 
 ---
 
+## P3-3-Q1〜Q14: D02(コイル焼損)+D05(異常ブラシ火花)+D01漸減(P3-1-Q1返済)+ブラシ素材写像 実装計画の確定裁定
+
+- **日付**: 2026-08-09(正式Fable技術レビュー、人間プロジェクトリード直接提示、Suu_mot3中継確認済み)。
+- **対象文書**: `docs/phase3-p3-3-plan.md`(v6、v1〜v5の往復レビュー〈Suu_mot3必須修正5ラウンド計47点〉を経て正式Fable提出、条件付き承認。v7で全裁定・付帯条件を反映)。
+- **総合判定**: 条件付き承認(実装開始を妨げる必須修正なし。Q1〜Q14の裁定反映+付帯条件7点+人間再承認バンドルの承認をもって実装解禁)。
+- **人間再承認**: **要(13項目)**。詳細は`docs/phase3-p3-3-human-reapproval-bundle.md`を参照。
+- **実装ステップ**: ゲート0〜7(**人間再承認バンドル承認待ち、未着手**)。
+- **出典**: `docs/phase3-p3-3-plan.md`(v7)15.1節「確定裁定項目」に全文引用。
+
+各裁定の要旨(詳細・実装コードは出典を参照):
+
+| 番号 | 要旨 | 人間再承認 |
+|---|---|---|
+| P3-3-Q1 | D02コイル熱ゲージを`computeRCoil`ベースの`coilLossW=I²R`(実効config・実電流の毎step独立再計算)で駆動する。P44是正(正帰還断定の撤回)を含めて承認 | 要(§15.2#3・#5) |
+| P3-3-Q2 | D02発煙抵抗倍率は単一固定値(段階内比例則は較正根拠のない発明、P3-2-Q1と同規律) | 要(§15.2#3) |
+| P3-3-Q3 | D05摩耗換算は`advanceD05`が素材係数・`wearPerAmpSecond`まで畳み込み`cumulativeWearDeltaFraction`(無次元)をfinal stateから読む(候補a)。`deriveDegradationDiffs`公開シグネチャ不変 | 要(§15.2#4・#6) |
+| P3-3-Q4 | D01進行量は`max(0,\|ω\|−COIL_DEFORM_OMEGA)×dt`積分(候補b)、`angularVelocityRadS`新設 | 要(§15.2#1・#5) |
+| P3-3-Q5 | `effectiveTurnsRatio`(実効巻数+占積の単一磁気結合率、磁気2式のみへ適用)を承認。backEmf/tMagへ同一係数=エネルギー整合(K_E=K_T相反性)の要請、実装コメントに1行明記が条件。振動増は既存`coilCollapsePenaltyMm`で充足済み(P3-1-Q1返済条件の認定) | 要(§15.2#1・#2・#7・#8、#8は最重量) |
+| P3-3-Q6 | ブラシ写像2層分離(接触抵抗・チャタリング→MotorConfig層、摩耗率→DestructionConfig.d05層)を承認 | 要(§15.2#4・#7・#8) |
+| P3-3-Q7 | D05一時接触抵抗悪化は回復区間モデル(候補a、`recoveryFramesLeft`)。spec解釈確定: スパーク中の悪化は既存完全瞬断が包含済み、観測可能な悪化はアーク後接触面荒れによる直後回復区間として実装(実在物理、字義拡張ではない) | 要(§15.2#4・#6・#8・#12) |
+| P3-3-Q8 | D02発煙は不可逆latch(候補b、`smokingStarted`/`smokingStartedAtT`)。エナメル絶縁の熱劣化は不可逆、D01/D04と同規律。非永続派生関数`isD02SmokingActive`(config横断交差不変条件の発生自体を回避)の設計を特に評価 | 要(§15.2#9) |
+| P3-3-Q9 | `D05CauseLog`へ`theoreticalCurrentA`追加(候補b)。`currentA=0`の事実を正直に残し強度を別記、P3-2-Q4(iii)と同原則 | 要(§15.2#10) |
+| P3-3-Q10 | recipeCode.ts `bcr`/`bpr`キー追加・MC3版上げ不要・`MaterialSelection.brushId`必須化の3点を承認 | 要(§15.2#11) |
+| P3-3-Q11 | `brush.wearFraction`の次run反映はP3-4据え置き(gameStore実配線境界、D02/D04/D05/D07横断の共通経路として第一級節扱い) | 不要(方針のみ、実装はP3-4) |
+| P3-3-Q12 | `effectiveTurnsRatio`は汎用`MotorConfig`optionalフィールド、`restoreRunSnapshot`側にbase専用制約(`undefined\|\|1`)を重ねる層分離を承認 | 要(§15.2#12) |
+| P3-3-Q13 | `mapD05BrushWearConfig`出力+共通部分を`assembleD05Config`(戻り値型注釈による自動ドリフト検出)で単一構築(候補b)。Q7裁定によりcommonPart完全型確定 | 不要(`materialMapping.ts`内の新設純関数、公開型の変更を伴わない) |
+| P3-3-Q14 | `encodeRecipe`は戻り値`string`維持+非1の`effectiveTurnsRatio`でthrow(候補c)。候補b(Omit型によるbase専用型分離)は過剰プロパティ検査がリテラル代入にしか働かないため偽の安全と判定し却下 | 要(§15.2#13、シグネチャ不変のため影響限定的) |
+
+**付帯条件7点(すべて確定、v7で実装DoDへ反映済み)**: (1)ゲート5でP3-2-Q13-2の`NORMAL_OPERATION`15組合せ表をD01/D02/D05新モード込みで再実測(全15組合せでD01 triggered=false・D02 smokingStarted=false・D05 episodeCount=0かつcumulativeWearDeltaFraction=0)。(2)D02/D05イベントのtemperature規約明記(D02=`uncalibratedGauge`、D05=`unavailable`、P3-1のD01/D03と同規律)。(3)4.1節疑似コードへ`justCrossed`成立時の`episodeTriggered=true`設定を明示補記。(4)P3-4申し送りへ`RotorAssemblyState.collapsed===true`個体の装備拒否(spec §7.1.1「サルベージのみ可」の執行点)を追加。(5)Q5のエネルギー整合コメント(K_E=K_T相反性)を実装コメントへ1行残す。(6)Q7の解釈段落(アーク後接触面荒れ)を7節へ記録。(7)Q14のthrow文言に本裁定への参照を1行含める。
+
+**再提出要否**: 上記裁定反映が本裁定の範囲内であるためFable再提出は不要。Suu_mot3差分照合→人間再承認バンドル承認→ゲート0から実装着手へ進む。完了報告の証跡要件はP3-2と同型(全テスト出力・sweep全文・bundle差分・`rg`再実測・`cmp`・`git diff --check`/`--stat`)。
+
+---
+
+## P3-3-Q15: Gate2較正値の未承認混入審査(補足裁定)
+
+- **日付**: 2026-08-10(正式Fable補足裁定、人間プロジェクトリード直接提示、Suu_mot3中継確認済み)。
+- **契機**: P3-3ゲート2(materialMapping.tsのブラシ写像)完了報告に対するSuu_mot3照合で、既承認契約(11.1節「較正値は本書で確定しない」・人間再承認バンドル前文「数値較正値はいずれも未確定」)に反する未審査具体値の混入(P48)・§6.3の銀黒鉛摩耗契約の計画内矛盾(P49)・P3-2 D07数値回帰fixtureへの非anchorブラシ混入(P50)の3点が指摘された。
+- **対象文書**: `docs/phase3-p3-3-plan.md`(v9 15.5節でdocs-only追補・独立Fable補足レビュー依頼書`docs/phase3-p3-3-fable-supplementary-review-request-q15.md`を提出、v10で裁定を反映)。
+- **総合判定**: P48・P49に補足裁定、P50は機械的是正(Fable裁定不要)。
+- **手続きの評価(Fable原文)**: 未承認値の混入(P48)は契約違反だが、ゲート照合が物理配線(ゲート4)前にこれを止め、alice_mot3が追加修正を凍結してdocs-onlyでエスカレーションしたことは、二段階承認の破れを効果が生じる前に多層レビューが検出した事例であり、プロセスは設計どおり機能した。
+- **人間再承認**: **要(1項目、Q15-4のみ)**。詳細は`docs/phase3-p3-3-human-reapproval-bundle.md`の追補#4を参照。
+- **実装ステップ**: ゲート2是正(実装済み、8ファイル)。人間再承認完了後にゲート3(状態機械)へ進む。
+- **出典**: `docs/phase3-p3-3-plan.md`(v10)15.5節に全文引用。
+
+各裁定の要旨:
+
+| 番号 | 要旨 | 人間再承認 |
+|---|---|---|
+| P3-3-Q15-1 | P48の扱い: 案(a)〈暫定候補値を明示しFableへ個別裁定〉を確定。案(b)〈test-onlyダミー値〉・案(c)〈命名規約のみ〉は却下。**恒久再発防止規則を新設**: 「較正数値をproductionへ置く前に初期候補値としてFable裁定を経ること、確定はsweep+最終報告+人間commit承認」(P3-2方式への統一) | 不要(手続き裁定、台帳記録で足りる) |
+| P3-3-Q15-2 | ratio類6個(接触抵抗ratio: 銅板1.3・銀黒鉛0.7・貴金属0.5、チャタリング確率ratio: 貴金属0.7、摩耗率ratio: 銅板1.5・貴金属0.7)を暫定候補値として全数承認。銅板の物理所見(酸化被膜による接触抵抗悪化)付き。Gate5受け入れ条件(接触抵抗ratio差の定常計測観測可能性)を追加 | 不要(暫定候補値、確定はsweep+人間commit承認) |
+| P3-3-Q15-3 | 貴金属の高電流ペナルティ具体値2個(threshold=3A・multiplier=2.5)を暫定候補値として承認。スケール所見(3Aは通常域上端〜虐待域入口)付き。Gate5受け入れ条件3点(NORMAL_OPERATION非到達・高負荷での順位逆転実測・銅板超えの副次的帰結の明示報告)を確定 | 不要(暫定候補値、確定はsweep+人間commit承認) |
+| P3-3-Q15-4 | `highCurrentPenaltyThresholdA`/`highCurrentPenaltyMultiplier`のフラット2フィールドを、`{ kind: 'noPenalty' } \| { kind: 'thresholdPenalty'; highCurrentPenaltyThresholdA: number; highCurrentPenaltyMultiplier: number }`の判別unionへ変更(候補ii確定)。番兵値999がP3-2-Q11の同型番兵却下と矛盾すること、D07の判別union前例との整合を理由とする。付帯: `thresholdPenalty`枝は`multiplier > 1`厳密 | **要**(ゲート1確定済み`DestructionConfig.d05`の破壊的変更、バンドル#4追補) |
+| P3-3-Q15-5 | P49の扱い: 案(i)〈6.3節の表を「銀黒鉛の高電流域は摩耗率でカーボンと同値、優位は低接触抵抗のみ」へ精密化〉を確定。案(ii)〈摩耗率<1を写像〉はspec/materials.ts原文に根拠がなく物性の発明として不採用 | 不要(docs修正のみ、実装変更なし) |
+| P3-3-Q15-6 | 人間再承認要否の個別判定: Q15-1・Q15-2・Q15-3・Q15-5・P50はいずれも不要、Q15-4のみ必要 | (本行はQ15-1〜Q15-5の再承認要否の集約) |
+| P3-3-Q15-7 | Q6(ブラシ2層分離)・Q13(`assembleD05Config`戻り値型注釈)への設計変更は不要。union化は`materialPart`型の精密化のみで骨格は不変 | 不要 |
+
+**値の確定経路(恒久規則、11.1節へ反映済み)**: Fable候補裁定(本エントリ、Q15-2・Q15-3)→ゲート5sweep(受け入れ条件充足の実測)→確定申請(最終報告表への記載)→人間commit承認、の4段階。人間再承認バンドル前文「数値較正値はいずれも未確定」は、この経路のいずれの段階が完了しても(Fable候補裁定段階まで進んでも)真であり続ける——「未確定」は「Fable裁定さえ経ていない」ではなく「commit承認を経ていない」を意味すると精密化する。
+
+**P50(記録、Fable裁定対象外)**: `materialMapping.test.ts`のP3-2 D07数値回帰fixture(受け入れ条件2/3)を`brush-carbon`(anchor)へ是正し、`scripts/materialSweep.ts`冒頭コメントの文言不一致を実装と一致する記述へ訂正した。P3-2較正値の意味を変えないための機械的是正であり、Fable裁定不要・Suu_mot3照合で足りると裁定された。
+
+**再提出要否**: 上記裁定反映が本裁定の範囲内であるためFable再提出は不要。Q15-4の人間再承認完了後、ゲート3(状態機械)へ進む。
+
+---
+
+## P3-3-D01較正確定: floor到達可能性の受け入れ条件改訂+自己制限プラトーの創発知見(補足裁定)
+
+- **日付**: 2026-08-11(正式Fable補足裁定、人間プロジェクトリード直接提示、Suu_mot3中継確認済み)。
+- **契機**: checkpoint5較正レビュー(正式Fable較正レビュー、2026-08-10)がD01(`decayExposureScaleRad`/`minEffectiveTurnsRatio`)へ追加指示した4条件sweep(漸減性・観測可能性・floor到達可能性・NORMAL_OPERATION非トリガ)の結果、現行値(`decayExposureScaleRad=1000`・`minEffectiveTurnsRatio=0.5`)が旧条件3(floor到達可能性)を満たさないことが実測で判明した。Suu_mot3の明示指示(「満たさない場合は値を変更せず停止し、実測全文と提案値をエスカレーションしてください」)に従い、値を変更せず`docs/phase3-p3-3-d01-supplementary-review-request.md`(実測全文・harness再現情報)で補足レビューを依頼した。
+- **対象文書**: `docs/phase3-p3-3-d01-supplementary-review-request.md`(依頼書)、`docs/phase3-p3-3-d01-fable-response.md`(裁定全文)、`docs/phase3-p3-3-d01-fable-submission-message.md`(Suu_mot3作成の短文submission)。
+- **総合判定**: **現行値(`decayExposureScaleRad=1000`・`minEffectiveTurnsRatio=0.5`)を維持したまま確定する**。誤っていたのは値ではなく、Fable自身が課した受け入れ条件3(floor到達可能性)だった。scale 200への変更・追加の値探索・モデルの見直しはいずれも行わない。
+- **創発知見(本プロジェクト2件目)**: 実測が発見した負のフィードバック(劣化→トルク定数低下〈K_E=K_T相反性、P3-3-Q5〉→回転低下→`COIL_DEFORM_OMEGA`割れ→減衰停止)は、物理的に正しい創発挙動として受容された。実物の巻線崩壊は過回転の遠心応力が駆動し、損傷が進めばモーターは自らの過回転を維持できなくなり、損傷の駆動源そのものが消える——「損傷が自分の原因を食い潰して止まる」のは実在系の性質であり、モデルの欠陥ではなくモデルが正直である証拠と評価された。構成coilTurns=20/magnetDistanceMm=10がω=188.8 rad/s(閾値209.4 rad/sのわずか下)で定常化した実測は、系が「減衰が再開しない限界比率」へ自己組織化することを示す臨界収束と解釈された。**Phase 2の銅線+フェライト過熱レジーム(`docs/phase2-material-sweep-report.md` §5(i))に続く、本プロジェクト2件目の創発的実測知見**として記録する。P3-3-Q4(角速度超過分の積分による駆動)の再考は不要と確定した。
+- **受け入れ条件の改訂**: 旧条件3(floor到達可能性)は、減衰が外部駆動されるという暗黙の仮定の上に書かれた条件であり、実測はその仮定が自己駆動系(motor-only無負荷)では成立しないことを示した。次の2条件へ改訂する。
+  - **条件3′(プラトーの実測固定)**: 代表的虐待構成における自己制限プラトー(実測: 最良構成coilTurns=15/magnetDistanceMm=8でratio 0.7074、29%の結合喪失)が、観測可能な劣化(3%基準を大幅超過——条件2実測でratio=0.75時に定常RPM 30.4〜100%低下)を与えること。**充足済み**。
+  - **条件1′(漸減性の直接形)**: floor到達時間はもはや漸減性の尺度にならないため、「崩壊トリガ後1秒時点でratio≥0.8」を段差禁止の実測可能形とする。**充足済み**(実測トリガ+1秒時点ratio=0.8914、回帰テストで固定)。
+  - 条件2(観測可能性)・条件4(NORMAL_OPERATION非トリガ)は元のまま充足済み(変更なし)。
+- **`minEffectiveTurnsRatio=0.5`の再定性**: floorの役割を「ゲームプレイ上の到達目標」から「数値安全域のclamp」へ改める——復元データの破損・将来のモデル変更・外部駆動に対して比率が正気の域を出ないことの保証である。値0.5の根拠(崩れた巻線の残存結合という物理的意味)は変わらない(役割が変わっただけで前裁定との矛盾はない)。floorが初めてゲームプレイに現れうる唯一の経路は外部機械駆動(急な下り坂での逆駆動による過回転の外部維持)であり、現行の実在5コースには存在しないため、vehicle/track文脈の追加sweepは不要と裁定された(負荷下ではωはさらに低く、崩壊後の持続過回転はむしろ起きにくいため)。**Phase 5コース設計への申し送り**: 「急降坂コースはD01減衰をfloorまで進めうる潜在挙動を持つ」ことを1行記録し、floorを死んだ定数ではなく文書化された潜在挙動として扱うこと(`docs/phase3-p3-3-plan.md` §16「P3-4 UI申し送り」に準じ、Phase 5着手時に参照する申し送り事項として本エントリに記録する)。
+- **Gate 6解禁条件(3点、全充足)**: (1) 自己制限プラトーの数値回帰テスト1本を恒久追加(最良構成coilTurns=15/magnetDistanceMm=8で、プラトーratio≈0.7074のtoBeCloseTo固定・プラトー後`decayExposureRad`不増加の直接assert・条件1′〈トリガ+1秒でratio≥0.8〉を単一の実走行経路で固定、`src/materials/__tests__/materialMapping.test.ts`「D01自己制限プラトー」)。**実装済み**。(2) docs反映(`docs/phase3-p3-3-plan.md` 13.1.3節のD01行更新+本エントリ新設+`docs/phase3-p3-3-checkpoint5-implementation-report.md`確定申請表でD01の2値を「確定」へ昇格)。**完了**。(3) Suu_mot3照合。**2026-08-11通過(P59是正4点の独立再検証を経て確認済み)。Gate6(store fixture統合)は解禁された。**
+- **人間再承認**: **不要**。値の変更自体が発生せず(1000/0.5維持)、型契約の変更もなく、値の確定はQ15-6の経路(確定申請→人間commit承認)に包含される。受け入れ条件の改訂はFable自身の裁定の改訂であり、台帳記録で足りる。
+- **Fable再提出**: 上記の反映が本裁定の範囲内であれば不要。
+- **手続きの評価(Fable原文)**: 値をいじって緑にせず、Suu_mot3の停止指示どおり実測全文と共にエスカレーションした判断、revert済みharnessを第三者が再構築できる水準まで文書化した再現情報、根因分析がQ5裁定(K_E=K_T相反性)を正しく引いて閉じている点——いずれも較正規律の模範と評価された。この一連の流れ(条件を先に固定→実測→条件側の誤りの発見→条件の改訂)は、「仕様は仮説であり、実装と実測だけが検証する」という本プロジェクトの原則が、Fableの裁定自身にも適用されることを示した最初の完全な事例として記録する。
+- **出典**: `docs/phase3-p3-3-d01-fable-response.md`に全文引用。
+
+---
+
 ## 改訂履歴
 
 - 初版(2026-08-04、v9作成と同時): P3-1裁定7件(Q2・Q4・Q5・Q6・Q7・Q8・Q9、当時は名前空間なし表記)を収録。Q1・Q3は監査のうえ対象外と判断し、その理由を記録。
@@ -331,3 +416,8 @@
 - 改訂5(2026-08-09、正式Fable補足裁定〈ゲート5較正裁定、人間プロジェクトリード直接提示、Suu_mot3中継確認済み〉反映、Suu_mot3指示): **P3-2-Q13-1**エントリを新設し、overheated保留規則(電池がlipoでD04 stageが`{swelling, smoking}`の間`overheated`終端を保留する)+Phase3-Q2適用範囲注記(Phase3-Q2が禁じるのは「物理終了後の継続step」であり、本裁定は物理終了の定義から重複表現を除く措置であって終了後の継続stepではないこと、`energyExhausted`/`stalled`/`derailed`/`manualAbort`は保留対象に含まれないこと)を記録した。本エントリの見出し「Q13-1」・注記対象「Phase3-Q2」・別文書内の「P3-2-Q2」(D07 RPM低下)を版・対象で明確に区別する命名の注意書きを付した(過去のP3-2ゲート5是正過程で発見された命名衝突の教訓を踏まえる)。人間再承認は**保留中**(本裁定の中核対象、確定裁定の適用範囲を狭める精密化のため再承認手続きを要する)。詳細な裁定理由・却下案・実装制約は`docs/phase3-p3-2-plan.md`14節に自己完結記載し、本台帳エントリでは重複記載していない。
 - 改訂6(2026-08-09、正式Fable補足裁定〈P3-2ゲート5Q14、人間プロジェクトリード直接提示、Suu_mot3中継確認済み〉反映、Suu_mot3指示): **P3-2-Q13-2**エントリを新設し、「通常運用(NORMAL_OPERATION)で非到達」の正式定義(基準構成・第1条件・第2条件の症状型3分)+Q14精密化(予算条件を電池物理型別に分離——LiPoは`maxEnergyUsedRatio≤0.85`維持、nonLipoは自然完走`finished`のみ。一般原則「受け入れ閾値は、その閾値が防ぐ危険が構造的に存在する対象にのみ適用する」を今後の作文規則として記録)を収録した。契機はゲート5是正版でのQ13-2全電池×実在全5コース拡張実測で判明した`energy-run`×alkaline/NiMHの旧`0.85`一律条件超過(`docs/phase3-p3-2-gate5-normal-operation-review-request.md`Q14として提出)。人間再承認は不要(Q13-2本体・Q14精密化のいずれも数値・閾値・production値・素材写像を変更せず、docs反映+Suu_mot3照合で足りると裁定済み)。詳細な裁定理由は`docs/phase3-p3-2-plan.md`14.3節・14.8節に自己完結記載し、本台帳エントリでは重複記載していない。
 - 改訂7(2026-08-09、P3-2ゲート9〈計画v17 §11.9〉、Suu_mot3指示): **実装状態追補**へ「Gate9追記」節を新設し、既存エントリ(P3-2-Q13-1・P3-2-Q13-2)を書き換えずに、Gate1〜8完了後の実装状態(実ファイル名・実テスト名)を追記のみで記録した。内容: (1) P3-2-Q13-1(overheated保留規則)がGate5で実装完了・Suu_mot3照合通過済みであること(`normalizeOverheatedStatusForD04Hold`、`src/engine/destructionOrchestration.ts`)。(2) P3-2-Q13-2/Q14がGate5で実装完了・15/15全適合であること。(3) Gate6(`RunSnapshot`拡張+`stepTestRunWithDestruction`)完了。(4) Gate7(`deriveFireExposureProfileFromLoadout`+D04/D07 3文脈fixture統合)完了、Suu_mot3ゲート7レビュー(要修正4点→fixture単一出典3点→rest構文化1点の計3ラウンド)を経て正式通過した経緯を含む。(5) Gate8(`src/materials/regressionDiff.ts`)完了、Suu_mot3が承認した精密化「baselineプールは同一recipeKeyかつ同一metricKind」を明記(Gate9着手承認メッセージでの明示指示どおり)。契約・production値・受け入れ条件の変更は一切ない(実装完了の事実記録のみ)。
+- 改訂8(2026-08-09、正式Fable技術レビュー〈P3-3計画v6、人間プロジェクトリード直接提示、Suu_mot3中継確認済み〉反映、Suu_mot3指示): **P3-3-Q1〜Q14**エントリを新設し、`docs/phase3-p3-3-plan.md`(v6→v7)の確定裁定14件+付帯条件7点の要旨を記録した。総合判定は条件付き承認(実装開始を妨げる必須修正なし)。人間再承認が必要な項目(Q1・Q2・Q3・Q4・Q5・Q6・Q7・Q8・Q9・Q10・Q12・Q14の12件、詳細は`docs/phase3-p3-3-human-reapproval-bundle.md`の13項目〈型・契約変更13件〉を参照)と不要な項目(Q11・Q13)を明示した。特記事項: Q5(`effectiveTurnsRatio`)はbackEmf/tMagへの同一係数適用がエネルギー整合(K_E=K_T相反性)の要請であるという物理的根拠が付され、実装コメントへの明記が条件。Q7はspec §7.1.1の「スパーク中の接触抵抗一時悪化」の解釈をFableが確定した(スパーク中の悪化=既存完全瞬断が包含済み、観測可能な悪化=アーク後接触面荒れによる直後回復区間)。Q14は候補(b)〈base専用型分離〉がTypeScriptの過剰プロパティ検査(オブジェクトリテラルのみに適用)により実際には防御にならない「偽の安全」であるという指摘を受け、候補(c)〈戻り値string維持+throw〉へ確定した。
+- 改訂9(2026-08-10、正式Fable補足裁定〈P3-3-Q15、人間プロジェクトリード直接提示、Suu_mot3中継確認済み〉反映、Suu_mot3指示): **P3-3-Q15**エントリを新設し、P3-3ゲート2完了報告に対するSuu_mot3照合で発見された未承認較正値混入(P48)・銀黒鉛摩耗契約の計画内矛盾(P49)・P3-2数値回帰fixture混入(P50)の3点への正式Fable補足裁定を記録した。P48は案(a)〈暫定候補値明示+Fable個別裁定〉を確定し、「較正数値をproductionへ置く前に初期候補値としてFable裁定を経ること」という恒久再発防止規則を新設(11.1節へ反映)。P48由来の副次論点(不活性ペナルティのthreshold表現)はQ15-4として判別union化(候補ii)を確定し、`DestructionConfig.d05`の破壊的変更として人間再承認バンドル#4追補の対象とした(バンドル前文の値未確定性は「Fable裁定さえ経ていない」ではなく「commit承認を経ていない」を意味すると精密化)。P49は案(i)〈6.3節表の精密化〉を確定。P50は機械的是正としてFable裁定不要と判定。人間再承認が必要な項目はQ15-4の1件のみ(詳細は`docs/phase3-p3-3-human-reapproval-bundle.md`の追補#4を参照)。
+- 改訂10(2026-08-11、正式Fable補足裁定〈P3-3 D01較正、人間プロジェクトリード直接提示、Suu_mot3中継確認済み〉反映、Suu_mot3指示): **P3-3-D01較正確定**エントリを新設し、checkpoint5較正レビューが追加指示したD01(`decayExposureScaleRad`/`minEffectiveTurnsRatio`)の4条件sweepで判明した「現行値1000/0.5は旧条件3〈floor到達可能性〉を満たさない」という実測結果への正式Fable補足裁定を記録した。裁定は値ではなく受け入れ条件3自体を誤りと認定し、現行値1000/0.5を維持したまま確定した。実測で発見された自己制限フィードバック(劣化→トルク定数低下→回転低下→減衰停止)を、Phase 2の銅線+フェライト過熱レジームに続く本プロジェクト2件目の創発的実測知見として受容し、条件3→3′(プラトーの実測固定)・条件1→1′(トリガ+1秒でratio≥0.8)へ改訂した。`minEffectiveTurnsRatio=0.5`の役割を「ゲームプレイ上の到達目標」から「数値安全域のclamp」へ再定性し、Phase 5コース設計への申し送り(急降坂コースの潜在挙動)を記録した。人間再承認は不要(値の変更なし、型契約の変更なし)。Gate 6解禁条件3点は本改訂と同一差分で(1)(2)完了、(3)Suu_mot3照合は2026-08-11通過(P59是正4点の独立再検証込み)——**Gate6(store fixture統合)は正式に解禁された**。
+- 改訂11(2026-08-11、Suu_mot3独立照合〈P59〉指摘4点の是正+Gate6解禁確定、Suu_mot3指示): 改訂10提出後のSuu_mot3独立照合(P59)で発見された精度不足4点をdocs-only(一部testの実装精度)で是正した。(1) D01自己制限プラトー回帰テスト(`materialMapping.test.ts`)がproduction`composeEffectiveMotorConfig`の式を`Math.max(0.5, 1-decayExposureRad/1000)`として再実装しており二重出典だった——`composeEffectiveMotorConfig(...).effectiveTurnsRatio`から取得する形へ修正(`decayExposureRad`の停止assertは現状維持、実測値は変更前と完全一致)。(2) 確定申請表の項目数「全21値」が算術誤りだった——実際には20項目(較正値19項目+較正対象外契約値`coilOverheatGaugeLimit`1項目)であり、`docs/phase3-p3-3-plan.md`・本台帳の該当表現を訂正した。(3) 改訂10・`docs/phase3-p3-3-checkpoint5-implementation-report.md`のGate6解禁条件記述が、Suu_mot3照合(3点目)未完了の時点で「3点すべて充足」「いずれも充足済み」と先取りしていた——(1)(2)完了・(3)Suu照合待ちへ訂正した。(4) D01正式補足裁定はJST 2026-08-11に人間から直接提示されていたが、新規D01裁定・回帰テスト・v16改訂履歴の一部に2026-08-10という誤った日付が残っていた——該当箇所を2026-08-11へ訂正し、前段checkpoint5較正レビュー自体・Q15補足裁定の2026-08-10表記(いずれも正しい)は維持した。P59是正4点の独立再検証(targeted D01テスト・69ファイル1406テスト・build・lint・material-sweep tsc・cmp・diff --check)がすべて成功し、**Suu_mot3がGate6(store fixture統合)を正式に解禁した**。contract値・実測値の変更はなし(docs-onlyの精度是正+テストの出典一本化のみ)。
+- 改訂12(2026-08-11、Gate6〈store fixture統合〉実装完了+Suu_mot3独立レビュー5ラウンド〈P60〜P64〉是正+正式通過、Suu_mot3指示): Gate6解禁(改訂10・11)後、`src/store/__tests__/runOutcomeApplication.test.ts`へD01/D02/D05の3文脈(motor-only/test-run/track-run)fixture統合+原子性負例2件(#71〜#80)を実装した。初回提出後、Suu_mot3独立レビューで5ラウンドの是正を経て2026-08-11に最終照合通過した。**値(D01/D02/D05/D07較正値)は一度も変更していない——是正はすべてtest fixture構築側に閉じている。** (P60)較正値の実質差し替え違反(D01/D02/D05トリガのdestructionConfig個別上書き)+`vehicleSnapshotInput`ヘルパーの出典分裂(overrides.motorConfig/carConfigを渡してもinitialVehicleStateが既定値のまま)+適用前event直接assert欠落の3点を是正。(P61)D02 test-run/track-runの到達不能判断が`batteryInternalResistanceRatio`(既定1.0=アルカリ)を固定した理論分析に基づいており、実在するNiMH(ratio=0.3)という電池素材軸を見落としていたと指摘され、反映すると理論上界V²/(4·R_battery)が7.5W→25Wへ改善した。(P62)「NiMH ratioだけを既定fixtureへ足す」構成はfixture全体のproduction-valid性としては不十分と指摘され、`composeConfigFromMaterials`(正式素材写像パイプライン)を一度通した結果を出発点にする構成へ差し替え、D02 test-run/track-runが成立した(NiMH+magnet-neodymium+wire-silver+brush-precious-metal+gear-titanium+player-adjustable値〈magnetDistanceMm=2等〉)。(P63)「値」だけでなく「値の対応関係」もproduction-valid性の対象であるとの指摘——D01/D05の基底motorConfigがmagnetStrength=1.0(実在磁石写像の最大値neodymium=0.9を超過)であったこと、D01の磁石強度とd07.nonDemagnetizing・D05のbrush素材とd05摩耗設定がそれぞれ同一の素材事実を2つの別経路(手入力)から入力できる構造的な穴を残していたことが指摘され、`pvMotorCarGate6`(`MaterialSelection`明示入力の汎用production-valid fixture builder)へ全#71〜78を統一し、d07は`mapD07DestructionConfig(magnetId)`、d05は`mapD05BrushWearConfig(brushId)`+`assembleD05Config`から同一素材IDより自動導出する構造へ是正した。(P64)P63の全面書き直しで#76〜78から既存の`expect(result.termination).toBeNull()`(D05非終端の直接固定)が脱落していたことが指摘され復元した。2026-08-11、Suu_mot3独立レビューがP64是正を最終確認し、**Gate6(store fixture統合)は正式に通過した(Fable追加裁定は不要と判断)**。Gate7(最終docs/全体DoD確認)が解禁された。人間再承認は不要(値の変更なし、型契約の変更なし、test-onlyの差分)。詳細な是正史・最終構成(素材選択の対応表)は`docs/phase3-p3-3-plan.md` 13.2.1節を参照。

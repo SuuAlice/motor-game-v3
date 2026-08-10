@@ -4,7 +4,7 @@
 import { describe, expect, it } from 'vitest';
 import type { CarConfig, VehicleSimState } from '../vehiclePhysics';
 import { createInitialVehicleState, stepTestRun } from '../vehiclePhysics';
-import { COIL_DEFORM_FRAMES, COIL_DEFORM_OMEGA } from '../constants';
+import { CHATTER_BURST_FRAMES, COIL_DEFORM_FRAMES, COIL_DEFORM_OMEGA } from '../constants';
 import type { MotorConfig, SimState } from '../motorPhysics';
 import type { DestructionEvent, DestructionConfig, DestructionConfigDraft, DestructionRunContext, CaptureRunSnapshotInput, RunAccumulator } from '../destructionOrchestration';
 import {
@@ -72,9 +72,18 @@ function goodDestructionConfig(
       : { profile: 'nonLipo', shortCircuitDurationLimitS: 2, ...nonLipoOverrides };
   return {
     battery,
-    d02: { smokeGaugeThreshold: 0.6, coilOverheatGaugeLimit: 1 },
+    d01: { decayExposureScaleRad: 1000, minEffectiveTurnsRatio: 0.5 },
+    d02: { smokeGaugeThreshold: 0.6, coilOverheatGaugeLimit: 1, conductionScale: 0.1, dissipationCoefficient: 0.1, smokeResistanceMultiplier: 1.2 },
     d04: { bodyScorchDeltaFraction: 0.2, magnetScorchDeltaFraction: 0.15 },
-    d05: { brushSparkDurationLimitS: 0.5, brushSparkCurrentThresholdA: 3 },
+    d05: {
+      brushSparkDurationLimitS: 0.15,
+      brushSparkCurrentThresholdA: 3,
+      brushWearRateRatio: 1,
+      highCurrentPenalty: { kind: 'thresholdPenalty', highCurrentPenaltyThresholdA: 8, highCurrentPenaltyMultiplier: 1.5 },
+      wearPerAmpSecond: 0.001,
+      recoveryFrames: 6,
+      recoveryContactResistanceMultiplier: 1.2,
+    },
     d06: { breakage: { kind: 'breakable', gearStrengthThresholdNm: 0.5 } },
     d07: {
       thermal: { conductionCoefficient: 0.1, dissipationCoefficient: 0.05 },
@@ -284,6 +293,41 @@ describe('destructionOrchestration.ts: deriveDegradationDiffs(P3-0限定範囲)'
       { role: 'magnet', kind: 'scorch', deltaFraction: 0.15 },
       { role: 'magnet', kind: 'demagnetization', deltaFraction: 0.1 },
       { role: 'battery', kind: 'consumed' },
+    ]);
+  });
+
+  // P3-3ゲート3: D05(ブラシ摩耗)のdeltaFraction換算(正式Fable P3-3-Q3裁定、確定候補a)。
+  // D04/D07とは異なりevent配列からではなくfinalDestructionStateから読む(P37是正、8節)。
+  function stateWithD05Wear(cumulativeWearDeltaFraction: number): DestructionState {
+    const base = createInitialDestructionState('nonLipo');
+    return { ...base, modes: { ...base.modes, D05: { ...base.modes.D05, cumulativeWearDeltaFraction } } };
+  }
+
+  it('68. cumulativeWearDeltaFraction>0のfinalDestructionStateからは、events配列が空でもbrush wearのdiffが導出される(P37是正、event0件でも正のdiffが出る必須DoD)', () => {
+    const diffs = deriveDegradationDiffs([], stateWithD05Wear(0.03));
+    expect(diffs).toEqual([{ role: 'brush', kind: 'wear', deltaFraction: 0.03 }]);
+  });
+
+  it('69. cumulativeWearDeltaFraction===0のfinalDestructionStateからはbrush wearのdiffを導出しない(D05Progress初期値、負例)', () => {
+    const diffs = deriveDegradationDiffs([], stateWithD05Wear(0));
+    expect(diffs).toEqual([]);
+  });
+
+  it('70. ホワイトリスト構造テスト(必須DoD、8節): D05由来のevent個数(0件・1件・複数件)を変えても、diff算出結果はfinalDestructionStateのcumulativeWearDeltaFractionのみに一貫して依存する(eventsの中身は一切参照しない)', () => {
+    const state = stateWithD05Wear(0.05);
+    const diffsWithNoEvents = deriveDegradationDiffs([], state);
+    const diffsWithOneEvent = deriveDegradationDiffs([d05Event()], state);
+    const diffsWithManyEvents = deriveDegradationDiffs([d05Event(), d05Event(), d05Event()], state);
+    expect(diffsWithNoEvents).toEqual([{ role: 'brush', kind: 'wear', deltaFraction: 0.05 }]);
+    expect(diffsWithOneEvent).toEqual(diffsWithNoEvents);
+    expect(diffsWithManyEvents).toEqual(diffsWithNoEvents);
+  });
+
+  it('71. D05のbrush wear diffは他モードのdiffと同一run内で共存する(D01+D05混在)', () => {
+    const diffs = deriveDegradationDiffs([motorEvent('D01')], stateWithD05Wear(0.02));
+    expect(diffs).toEqual([
+      { role: 'rotor', kind: 'collapse' },
+      { role: 'brush', kind: 'wear', deltaFraction: 0.02 },
     ]);
   });
 });
@@ -826,6 +870,356 @@ describe('destructionOrchestration.ts: D04Progress.initiatingCauseLog / D04Cause
   });
 });
 
+describe('destructionOrchestration.ts: P3-3ゲート1 Suuレビュー是正(2026-08-10、validator/cross-validator直接負例)', () => {
+  it('60. restoreRunSnapshot: base MotorConfig.effectiveTurnsRatioがundefinedは受理される', () => {
+    const snapshot = captureRunSnapshot(motorSnapshotInput());
+    const raw = JSON.parse(JSON.stringify(snapshot));
+    expect(raw.motorConfig.effectiveTurnsRatio).toBeUndefined();
+    expect(restoreRunSnapshot(raw).ok).toBe(true);
+  });
+
+  it('61. restoreRunSnapshot: base MotorConfig.effectiveTurnsRatio===1は受理される', () => {
+    const snapshot = captureRunSnapshot(motorSnapshotInput({ motorConfig: goodMotorConfig({ effectiveTurnsRatio: 1 }) }));
+    const raw = JSON.parse(JSON.stringify(snapshot));
+    expect(restoreRunSnapshot(raw).ok).toBe(true);
+  });
+
+  it.each([0.7, 1.3])('62. restoreRunSnapshot: base MotorConfig.effectiveTurnsRatio===%s(1以外)はinvalidSchemaを返す(P3-3-Q12)', (value) => {
+    const snapshot = captureRunSnapshot(motorSnapshotInput({ motorConfig: goodMotorConfig({ effectiveTurnsRatio: value }) }));
+    const raw = JSON.parse(JSON.stringify(snapshot));
+    const result = restoreRunSnapshot(raw);
+    expect(result.ok).toBe(false);
+    expect(result.ok === false && result.reason).toBe('invalidSchema');
+  });
+
+  it('63. restoreRunSnapshot: initialDestructionState.modes.D05.recoveryFramesLeftがconfig.d05.recoveryFramesと同値は受理される', () => {
+    const snapshot = captureRunSnapshot(motorSnapshotInput());
+    const raw = JSON.parse(JSON.stringify(snapshot));
+    raw.initialDestructionState.modes.D05.recoveryFramesLeft = raw.destructionConfig.d05.recoveryFrames;
+    expect(restoreRunSnapshot(raw).ok).toBe(true);
+  });
+
+  it('64. restoreRunSnapshot: initialDestructionState.modes.D05.recoveryFramesLeftがconfig.d05.recoveryFramesを超える場合invalidSchemaを返す(P3-3-Q7 cross-validator)', () => {
+    const snapshot = captureRunSnapshot(motorSnapshotInput());
+    const raw = JSON.parse(JSON.stringify(snapshot));
+    raw.initialDestructionState.modes.D05.recoveryFramesLeft = raw.destructionConfig.d05.recoveryFrames + 1;
+    const result = restoreRunSnapshot(raw);
+    expect(result.ok).toBe(false);
+    expect(result.ok === false && result.reason).toBe('invalidSchema');
+  });
+
+  it('65. D02Progress: triggered/triggeredAtT/causeLogの3値整合+smokingStarted/At整合+triggered⟹smokingStartedを網羅的に拒否する', () => {
+    const snapshot = captureRunSnapshot(motorSnapshotInput());
+    const baseRaw = JSON.parse(JSON.stringify(snapshot));
+    expect(restoreRunSnapshot(JSON.parse(JSON.stringify(baseRaw))).ok).toBe(true);
+
+    const d02CauseLog = { currentA: 1, rpm: 100, atT: 1, temperature: { kind: 'uncalibratedGauge', ratio: 0.5 }, coilHeatGaugeRatio: 0.5 };
+    const corruptions: Array<(raw: typeof baseRaw) => void> = [
+      // triggered===false ⟺ triggeredAtT===null ⟺ causeLog===null の3値同値
+      (raw) => { raw.initialDestructionState.modes.D02.triggeredAtT = 1; }, // triggered=false, triggeredAtT!=null
+      (raw) => { raw.initialDestructionState.modes.D02.causeLog = d02CauseLog; }, // triggered=false, causeLog!=null
+      (raw) => {
+        raw.initialDestructionState.modes.D02.triggered = true;
+        raw.initialDestructionState.modes.D02.smokingStarted = true;
+        raw.initialDestructionState.modes.D02.smokingStartedAtT = 1;
+        // triggeredAtT/causeLogは意図的にnullのまま(triggered=trueなのに非null必須違反)
+      },
+      // smokingStarted===false ⟺ smokingStartedAtT===null
+      (raw) => { raw.initialDestructionState.modes.D02.smokingStartedAtT = 1; }, // smokingStarted=false, At!=null
+      (raw) => {
+        raw.initialDestructionState.modes.D02.smokingStarted = true;
+        // smokingStartedAtTは意図的にnullのまま
+      },
+      // triggered===true ⟹ smokingStarted===true
+      (raw) => {
+        raw.initialDestructionState.modes.D02.triggered = true;
+        raw.initialDestructionState.modes.D02.triggeredAtT = 1;
+        raw.initialDestructionState.modes.D02.causeLog = d02CauseLog;
+        // smokingStartedは意図的にfalseのまま(triggered=trueなのにsmokingStarted=false)
+      },
+    ];
+
+    for (const corrupt of corruptions) {
+      const raw = JSON.parse(JSON.stringify(baseRaw));
+      corrupt(raw);
+      const result = restoreRunSnapshot(raw);
+      expect(result.ok, JSON.stringify(raw.initialDestructionState.modes.D02)).toBe(false);
+    }
+  });
+
+  it('66. D02Progress: coilHeatGaugeRatioが[0,1]の範囲外(負値・1超)の場合invalidSchemaを返す', () => {
+    const snapshot = captureRunSnapshot(motorSnapshotInput());
+    const baseRaw = JSON.parse(JSON.stringify(snapshot));
+    for (const value of [-0.1, 1.1]) {
+      const raw = JSON.parse(JSON.stringify(baseRaw));
+      raw.initialDestructionState.modes.D02.coilHeatGaugeRatio = value;
+      const result = restoreRunSnapshot(raw);
+      expect(result.ok, `coilHeatGaugeRatio=${value}`).toBe(false);
+    }
+  });
+
+  it('67. D05Progress: episodeCount/firstEpisodeAtT/causeLogの3値整合+episodeTriggered⟹episodeCount>0+非負整数recovery+非負wearを網羅的に拒否する', () => {
+    const snapshot = captureRunSnapshot(motorSnapshotInput());
+    const baseRaw = JSON.parse(JSON.stringify(snapshot));
+    expect(restoreRunSnapshot(JSON.parse(JSON.stringify(baseRaw))).ok).toBe(true);
+
+    const d05CauseLog = { currentA: 0, rpm: 100, atT: 1, temperature: { kind: 'unavailable' }, sparkDurationS: 0.2, theoreticalCurrentA: 10 };
+    const corruptions: Array<(raw: typeof baseRaw) => void> = [
+      // episodeCount===0 ⟺ firstEpisodeAtT===null ⟺ causeLog===null
+      (raw) => { raw.initialDestructionState.modes.D05.firstEpisodeAtT = 1; },
+      (raw) => { raw.initialDestructionState.modes.D05.causeLog = d05CauseLog; },
+      (raw) => {
+        raw.initialDestructionState.modes.D05.episodeCount = 1;
+        // firstEpisodeAtT/causeLogは意図的にnullのまま(episodeCount>=1なのに3値がnull)
+      },
+      // episodeTriggered===true ⟹ episodeCount>=1
+      (raw) => { raw.initialDestructionState.modes.D05.episodeTriggered = true; }, // episodeCount=0のまま
+      // episodeCountは非負整数
+      (raw) => { raw.initialDestructionState.modes.D05.episodeCount = -1; },
+      (raw) => { raw.initialDestructionState.modes.D05.episodeCount = 1.5; },
+      // recoveryFramesLeftは非負整数
+      (raw) => { raw.initialDestructionState.modes.D05.recoveryFramesLeft = -1; },
+      (raw) => { raw.initialDestructionState.modes.D05.recoveryFramesLeft = 1.5; },
+      // cumulativeWearDeltaFraction/cumulativeSparkExposure/sparkDurationSは非負
+      (raw) => { raw.initialDestructionState.modes.D05.cumulativeWearDeltaFraction = -0.1; },
+      (raw) => { raw.initialDestructionState.modes.D05.cumulativeSparkExposure = -0.1; },
+      (raw) => { raw.initialDestructionState.modes.D05.sparkDurationS = -0.1; },
+    ];
+
+    for (const corrupt of corruptions) {
+      const raw = JSON.parse(JSON.stringify(baseRaw));
+      corrupt(raw);
+      const result = restoreRunSnapshot(raw);
+      expect(result.ok, JSON.stringify(raw.initialDestructionState.modes.D05)).toBe(false);
+    }
+  });
+
+  it('68. D01Progress: triggered=falseの場合decayExposureRadは0以外だとinvalidSchemaを返す', () => {
+    const snapshot = captureRunSnapshot(motorSnapshotInput());
+    const raw = JSON.parse(JSON.stringify(snapshot));
+    expect(raw.initialDestructionState.modes.D01.triggered).toBe(false);
+    raw.initialDestructionState.modes.D01.decayExposureRad = 1;
+    const result = restoreRunSnapshot(raw);
+    expect(result.ok).toBe(false);
+  });
+
+  it('69. D01Progress: decayExposureRadが負値の場合invalidSchemaを返す', () => {
+    const snapshot = captureRunSnapshot(motorSnapshotInput());
+    const raw = JSON.parse(JSON.stringify(snapshot));
+    raw.initialDestructionState.modes.D01.decayExposureRad = -0.1;
+    const result = restoreRunSnapshot(raw);
+    expect(result.ok).toBe(false);
+  });
+
+  it('70. validateDestructionConfig: d01の新規値域(decayExposureScaleRad正値・minEffectiveTurnsRatio(0,1])を拒否する', () => {
+    const baseDraft: DestructionConfigDraft = goodDestructionConfig();
+    expect(validateDestructionConfig(baseDraft).ok).toBe(true);
+
+    for (const bad of [0, -1, NaN, Infinity]) {
+      const draft: DestructionConfigDraft = { ...baseDraft, d01: { ...baseDraft.d01!, decayExposureScaleRad: bad } };
+      expect(validateDestructionConfig(draft).ok, `decayExposureScaleRad=${bad}`).toBe(false);
+    }
+    for (const bad of [0, -0.1, 1.1, NaN]) {
+      const draft: DestructionConfigDraft = { ...baseDraft, d01: { ...baseDraft.d01!, minEffectiveTurnsRatio: bad } };
+      expect(validateDestructionConfig(draft).ok, `minEffectiveTurnsRatio=${bad}`).toBe(false);
+    }
+    // 境界正例(Suu再照合是正): 上限1.0(中立境界)はgood値0.5とは別に単独で受理されることを固定する。
+    expect(validateDestructionConfig({ ...baseDraft, d01: { ...baseDraft.d01!, minEffectiveTurnsRatio: 1 } }).ok).toBe(true);
+  });
+
+  it('71. validateDestructionConfig: d02の新規値域(0 < smokeGaugeThreshold < coilOverheatGaugeLimit <= 1、conductionScale/dissipationCoefficient正値、smokeResistanceMultiplier>=1)を拒否する', () => {
+    const baseDraft: DestructionConfigDraft = goodDestructionConfig();
+    expect(validateDestructionConfig(baseDraft).ok).toBe(true);
+
+    // coilOverheatGaugeLimit > 1(是正前は誤って許容していた穴)
+    expect(validateDestructionConfig({ ...baseDraft, d02: { ...baseDraft.d02!, coilOverheatGaugeLimit: 1.5 } }).ok).toBe(false);
+    // smokeGaugeThreshold >= coilOverheatGaugeLimit(順序不変条件違反)
+    expect(validateDestructionConfig({ ...baseDraft, d02: { ...baseDraft.d02!, smokeGaugeThreshold: 1, coilOverheatGaugeLimit: 1 } }).ok).toBe(false);
+    for (const bad of [0, -1, NaN]) {
+      expect(validateDestructionConfig({ ...baseDraft, d02: { ...baseDraft.d02!, conductionScale: bad } }).ok, `conductionScale=${bad}`).toBe(false);
+      expect(validateDestructionConfig({ ...baseDraft, d02: { ...baseDraft.d02!, dissipationCoefficient: bad } }).ok, `dissipationCoefficient=${bad}`).toBe(false);
+    }
+    expect(validateDestructionConfig({ ...baseDraft, d02: { ...baseDraft.d02!, smokeResistanceMultiplier: 0.9 } }).ok).toBe(false);
+    // 境界値(中立)は許容される
+    expect(validateDestructionConfig({ ...baseDraft, d02: { ...baseDraft.d02!, smokeResistanceMultiplier: 1 } }).ok).toBe(true);
+    expect(validateDestructionConfig({ ...baseDraft, d02: { ...baseDraft.d02!, coilOverheatGaugeLimit: 1 } }).ok).toBe(true);
+  });
+
+  it('72. validateDestructionConfig: d05の新規値域(duration上限CHATTER_BURST_FRAMES/120、非負/正値・整数・recoveryContactResistanceMultiplier>=1)を拒否する', () => {
+    const baseDraft: DestructionConfigDraft = goodDestructionConfig();
+    expect(validateDestructionConfig(baseDraft).ok).toBe(true);
+
+    // brushSparkDurationLimitS > CHATTER_BURST_FRAMES/120(到達可能性制約違反)
+    expect(validateDestructionConfig({ ...baseDraft, d05: { ...baseDraft.d05!, brushSparkDurationLimitS: 0.21 } }).ok).toBe(false);
+    // 境界値(ちょうどCHATTER_BURST_FRAMES/120)は許容される(単一出典: リテラル24を複製せずCHATTER_BURST_FRAMESをimportする)
+    expect(validateDestructionConfig({ ...baseDraft, d05: { ...baseDraft.d05!, brushSparkDurationLimitS: CHATTER_BURST_FRAMES / 120 } }).ok).toBe(true);
+    for (const bad of [0, -1, NaN]) {
+      expect(validateDestructionConfig({ ...baseDraft, d05: { ...baseDraft.d05!, brushWearRateRatio: bad } }).ok, `brushWearRateRatio=${bad}`).toBe(false);
+      expect(validateDestructionConfig({ ...baseDraft, d05: { ...baseDraft.d05!, wearPerAmpSecond: bad } }).ok, `wearPerAmpSecond=${bad}`).toBe(false);
+    }
+    expect(validateDestructionConfig({ ...baseDraft, d05: { ...baseDraft.d05!, recoveryContactResistanceMultiplier: 0.9 } }).ok).toBe(false);
+    for (const bad of [-1, 1.5, NaN]) {
+      expect(validateDestructionConfig({ ...baseDraft, d05: { ...baseDraft.d05!, recoveryFrames: bad } }).ok, `recoveryFrames=${bad}`).toBe(false);
+    }
+    // 境界値(中立)は許容される
+    expect(validateDestructionConfig({ ...baseDraft, d05: { ...baseDraft.d05!, recoveryFrames: 0 } }).ok).toBe(true);
+    // 境界正例(Suu再照合是正): recoveryContactResistanceMultiplier===1(中立境界)はgood値1.2とは
+    // 別に単独で受理されることを固定する。
+    expect(validateDestructionConfig({ ...baseDraft, d05: { ...baseDraft.d05!, recoveryContactResistanceMultiplier: 1 } }).ok).toBe(true);
+  });
+
+  it('76. 正式Fable P3-3-Q15-4裁定: highCurrentPenaltyの判別union(noPenalty/thresholdPenalty)をvalidateDestructionConfigが正しく検証する', () => {
+    const baseDraft: DestructionConfigDraft = goodDestructionConfig();
+    // baseDraftのd05.highCurrentPenaltyはkind:'thresholdPenalty'(thresholdA=8, multiplier=1.5)。
+    expect(baseDraft.d05!.highCurrentPenalty.kind).toBe('thresholdPenalty');
+    expect(validateDestructionConfig(baseDraft).ok).toBe(true);
+
+    // thresholdPenalty枝: thresholdAの値域負例
+    for (const bad of [0, -1, NaN]) {
+      expect(
+        validateDestructionConfig({
+          ...baseDraft,
+          d05: { ...baseDraft.d05!, highCurrentPenalty: { kind: 'thresholdPenalty', highCurrentPenaltyThresholdA: bad, highCurrentPenaltyMultiplier: 1.5 } },
+        }).ok,
+        `highCurrentPenaltyThresholdA=${bad}`,
+      ).toBe(false);
+    }
+
+    // thresholdPenalty枝: multiplierは1超が厳密に必須(P3-3-Q15-4裁定、>=1ではない)。
+    // multiplier===1のthresholdPenaltyはnoPenaltyの重複表現になるため拒否する。
+    for (const bad of [0.9, 1, -1, NaN]) {
+      expect(
+        validateDestructionConfig({
+          ...baseDraft,
+          d05: { ...baseDraft.d05!, highCurrentPenalty: { kind: 'thresholdPenalty', highCurrentPenaltyThresholdA: 8, highCurrentPenaltyMultiplier: bad } },
+        }).ok,
+        `highCurrentPenaltyMultiplier=${bad}`,
+      ).toBe(false);
+    }
+    // 境界超過(1超)は受理される。
+    expect(
+      validateDestructionConfig({
+        ...baseDraft,
+        d05: { ...baseDraft.d05!, highCurrentPenalty: { kind: 'thresholdPenalty', highCurrentPenaltyThresholdA: 8, highCurrentPenaltyMultiplier: 1.0001 } },
+      }).ok,
+    ).toBe(true);
+
+    // noPenalty枝: 数値フィールドを一切持たないため、他のd05値がすべて正常なら常に受理される
+    // (このテストが無ければ、noPenalty枝が誤って何らかの数値フィールドを要求していても
+    // 検出できない)。
+    expect(
+      validateDestructionConfig({
+        ...baseDraft,
+        d05: { ...baseDraft.d05!, highCurrentPenalty: { kind: 'noPenalty' } },
+      }).ok,
+    ).toBe(true);
+  });
+
+  it('80. 正式Fable P3-3-Q15-4裁定(Suu最終照合是正P52): kindがunsafe castで未知の値になった場合、validateDestructionConfigがinvalidFieldsで拒否する(TypeScriptの型検査を迂回した場合の防御)', () => {
+    const baseDraft: DestructionConfigDraft = goodDestructionConfig();
+    const corruptedD05 = { ...baseDraft.d05!, highCurrentPenalty: { kind: 'unknownKind' } } as unknown as DestructionConfigDraft['d05'];
+    const result = validateDestructionConfig({ ...baseDraft, d05: corruptedD05 });
+    expect(result.ok).toBe(false);
+    expect(result.ok === false && result.invalidFields.some((f) => f.field === 'd05.highCurrentPenalty.kind')).toBe(true);
+  });
+});
+
+describe('destructionOrchestration.ts: P3-3ゲート1 Suu再照合是正(2026-08-10、非初期stateのrestore正例+Q9負例)', () => {
+  it('73. D02Progress: 発火済み(triggered=true・smokingStarted=true・coilHeatGaugeRatio=1)の整合stateがrestore成功する', () => {
+    const snapshot = captureRunSnapshot(motorSnapshotInput());
+    const raw = JSON.parse(JSON.stringify(snapshot));
+    raw.initialDestructionState.modes.D02 = {
+      triggered: true,
+      triggeredAtT: 1,
+      coilHeatGaugeRatio: 1,
+      causeLog: { currentA: 2, rpm: 100, atT: 1, temperature: { kind: 'uncalibratedGauge', ratio: 1 }, coilHeatGaugeRatio: 1 },
+      smokingStarted: true,
+      smokingStartedAtT: 0.5,
+    };
+    const result = restoreRunSnapshot(raw);
+    expect(result.ok, JSON.stringify(raw.initialDestructionState.modes.D02)).toBe(true);
+    expect(result.ok && result.snapshot.initialDestructionState.modes.D02.triggered).toBe(true);
+  });
+
+  it('74. D05Progress: episode成立済み(episodeCount=1・cumulativeWearDeltaFraction>0・recoveryFramesLeft<=上限)の整合stateがrestore成功する', () => {
+    const snapshot = captureRunSnapshot(motorSnapshotInput());
+    const raw = JSON.parse(JSON.stringify(snapshot));
+    expect(raw.destructionConfig.d05.recoveryFrames).toBeGreaterThanOrEqual(3); // goodDestructionConfig()の既定値(6)を前提にする
+    raw.initialDestructionState.modes.D05 = {
+      sparkDurationS: 0,
+      episodeTriggered: false,
+      episodeCount: 1,
+      cumulativeSparkExposure: 0.5,
+      firstEpisodeAtT: 1,
+      causeLog: { currentA: 0, rpm: 100, atT: 1, temperature: { kind: 'unavailable' }, sparkDurationS: 0.15, theoreticalCurrentA: 10 },
+      cumulativeWearDeltaFraction: 0.01,
+      recoveryFramesLeft: 3,
+    };
+    const result = restoreRunSnapshot(raw);
+    expect(result.ok, JSON.stringify(raw.initialDestructionState.modes.D05)).toBe(true);
+    expect(result.ok && result.snapshot.initialDestructionState.modes.D05.episodeCount).toBe(1);
+  });
+
+  it('75. D05CauseLog: theoreticalCurrentAが欠落(undefined)の場合invalidSchemaを返す(P3-3-Q9 raw validatorを直接固定)', () => {
+    const snapshot = captureRunSnapshot(motorSnapshotInput());
+    const raw = JSON.parse(JSON.stringify(snapshot));
+    const causeLog: Record<string, unknown> = {
+      currentA: 0, rpm: 100, atT: 1, temperature: { kind: 'unavailable' }, sparkDurationS: 0.15, theoreticalCurrentA: 10,
+    };
+    delete causeLog.theoreticalCurrentA;
+    raw.initialDestructionState.modes.D05 = {
+      sparkDurationS: 0,
+      episodeTriggered: false,
+      episodeCount: 1,
+      cumulativeSparkExposure: 0.5,
+      firstEpisodeAtT: 1,
+      causeLog,
+      cumulativeWearDeltaFraction: 0.01,
+      recoveryFramesLeft: 0,
+    };
+    const result = restoreRunSnapshot(raw);
+    expect(result.ok).toBe(false);
+  });
+
+  it('77. 正式Fable P3-3-Q15-4裁定: destructionConfig.d05.highCurrentPenalty.kindが不正な文字列・欠落の場合invalidSchemaを返す(raw shape validator直接固定)', () => {
+    const snapshot = captureRunSnapshot(motorSnapshotInput());
+    const rawInvalidKind = JSON.parse(JSON.stringify(snapshot));
+    rawInvalidKind.destructionConfig.d05.highCurrentPenalty = { kind: 'unknownKind' };
+    expect(restoreRunSnapshot(rawInvalidKind).ok).toBe(false);
+
+    const rawMissingKind = JSON.parse(JSON.stringify(snapshot));
+    delete rawMissingKind.destructionConfig.d05.highCurrentPenalty.kind;
+    expect(restoreRunSnapshot(rawMissingKind).ok).toBe(false);
+
+    const rawThresholdMissingFields = JSON.parse(JSON.stringify(snapshot));
+    rawThresholdMissingFields.destructionConfig.d05.highCurrentPenalty = { kind: 'thresholdPenalty' };
+    expect(restoreRunSnapshot(rawThresholdMissingFields).ok).toBe(false);
+  });
+
+  it('78. 正式Fable P3-3-Q15-4裁定: destructionConfig.d05.highCurrentPenalty.kind==="noPenalty"はrestore成功する(数値フィールドを持たない状態のround-trip正例)', () => {
+    const snapshot = captureRunSnapshot(motorSnapshotInput());
+    const raw = JSON.parse(JSON.stringify(snapshot));
+    raw.destructionConfig.d05.highCurrentPenalty = { kind: 'noPenalty' };
+    expect(restoreRunSnapshot(raw).ok).toBe(true);
+  });
+
+  it('79. 正式Fable P3-3-Q15-4裁定(Suu最終照合是正P52): kind==="noPenalty"へ旧番兵フィールド(highCurrentPenaltyThresholdA/highCurrentPenaltyMultiplier)が残っているrawはinvalidSchemaを返す(削除して救済せず不正状態として拒否する)', () => {
+    const snapshot = captureRunSnapshot(motorSnapshotInput());
+
+    const rawWithThreshold = JSON.parse(JSON.stringify(snapshot));
+    rawWithThreshold.destructionConfig.d05.highCurrentPenalty = { kind: 'noPenalty', highCurrentPenaltyThresholdA: 999 };
+    expect(restoreRunSnapshot(rawWithThreshold).ok).toBe(false);
+
+    const rawWithMultiplier = JSON.parse(JSON.stringify(snapshot));
+    rawWithMultiplier.destructionConfig.d05.highCurrentPenalty = { kind: 'noPenalty', highCurrentPenaltyMultiplier: 1 };
+    expect(restoreRunSnapshot(rawWithMultiplier).ok).toBe(false);
+
+    const rawWithBoth = JSON.parse(JSON.stringify(snapshot));
+    rawWithBoth.destructionConfig.d05.highCurrentPenalty = { kind: 'noPenalty', highCurrentPenaltyThresholdA: 999, highCurrentPenaltyMultiplier: 1 };
+    expect(restoreRunSnapshot(rawWithBoth).ok).toBe(false);
+  });
+});
+
 describe('destructionOrchestration.ts: classifyTerminalModes(v12完全形、正式Fable P3-1-Q5(a)裁定)', () => {
   it('D02イベントは常に終端候補として分類される', () => {
     expect(classifyTerminalModes([motorEvent('D02')])).toEqual(['D02']);
@@ -1094,6 +1488,21 @@ describe('destructionOrchestration.ts: composeEffectiveMotorConfig(P3-2ゲート
     return { ...base, modes: { ...base.modes, D07: { ...base.modes.D07, ...overrides } } };
   }
 
+  function stateWithD01(overrides: Partial<DestructionState['modes']['D01']>): DestructionState {
+    const base = createInitialDestructionState('nonLipo');
+    return { ...base, modes: { ...base.modes, D01: { ...base.modes.D01, ...overrides } } };
+  }
+
+  function stateWithD02(overrides: Partial<DestructionState['modes']['D02']>): DestructionState {
+    const base = createInitialDestructionState('nonLipo');
+    return { ...base, modes: { ...base.modes, D02: { ...base.modes.D02, ...overrides } } };
+  }
+
+  function stateWithD05(overrides: Partial<DestructionState['modes']['D05']>): DestructionState {
+    const base = createInitialDestructionState('nonLipo');
+    return { ...base, modes: { ...base.modes, D05: { ...base.modes.D05, ...overrides } } };
+  }
+
   describe('D04分岐(内部抵抗悪化)', () => {
     it('stage="none"ではbatteryInternalResistanceRatioを変更しない(base維持)', () => {
       const base = goodMotorConfig({ batteryInternalResistanceRatio: 1.2 });
@@ -1131,6 +1540,78 @@ describe('destructionOrchestration.ts: composeEffectiveMotorConfig(P3-2ゲート
       const config = goodDestructionConfig('nonLipo');
       const effective = composeEffectiveMotorConfig(base, nonLipoState, config);
       expect(effective).toEqual(base);
+    });
+  });
+
+  describe('D01分岐(実効巻数・占積率、正式Fable P3-3-Q4・Q5裁定、checkpoint4)', () => {
+    it('decayExposureRad=0(未崩壊、初期値)ではeffectiveTurnsRatioを追加しない(base維持)', () => {
+      const base = goodMotorConfig();
+      const config = goodDestructionConfig('nonLipo'); // d01.minEffectiveTurnsRatio=0.5・decayExposureScaleRad=1000(既定)
+      const effective = composeEffectiveMotorConfig(base, stateWithD01({ decayExposureRad: 0 }), config);
+      expect(effective).toEqual(base);
+    });
+
+    it('decayExposureRad>0では1-decayExposureRad/decayExposureScaleRadをeffectiveTurnsRatioへ設定する', () => {
+      const base = goodMotorConfig();
+      const config = goodDestructionConfig('nonLipo'); // decayExposureScaleRad=1000
+      const effective = composeEffectiveMotorConfig(base, stateWithD01({ decayExposureRad: 300, triggered: true }), config);
+      expect(effective.effectiveTurnsRatio).toBeCloseTo(1 - 300 / 1000, 12);
+      expect(effective.wireResistivityRatio).toBe(base.wireResistivityRatio); // D02非活性のため不変
+    });
+
+    it('decayExposureRadが極端に大きい場合、effectiveTurnsRatioはminEffectiveTurnsRatioで頭打ちになる(clamp DoD、5.3節)', () => {
+      const base = goodMotorConfig();
+      const config = goodDestructionConfig('nonLipo'); // minEffectiveTurnsRatio=0.5
+      const effective = composeEffectiveMotorConfig(base, stateWithD01({ decayExposureRad: 999999, triggered: true }), config);
+      expect(effective.effectiveTurnsRatio).toBe(0.5);
+    });
+
+    it('二重計上防止(必須DoD、5.3節): effectiveTurnsRatioの値がaxisOffsetMm系のいかなる計算にも混入しない(axisOffsetMmはbaseのまま不変)', () => {
+      const base = goodMotorConfig({ axisOffsetMm: 3 });
+      const config = goodDestructionConfig('nonLipo');
+      const effective = composeEffectiveMotorConfig(base, stateWithD01({ decayExposureRad: 500, triggered: true }), config);
+      expect(effective.axisOffsetMm).toBe(3);
+    });
+  });
+
+  describe('D02分岐(発煙R_coil重ね掛け、正式Fable P3-3-Q1・Q2・Q8裁定、checkpoint4)', () => {
+    it('smokingStarted=false(初期値)ではwireResistivityRatioを変更しない(base維持)', () => {
+      const base = goodMotorConfig({ wireResistivityRatio: 1.1 });
+      const config = goodDestructionConfig('nonLipo');
+      const effective = composeEffectiveMotorConfig(base, stateWithD02({ smokingStarted: false }), config);
+      expect(effective).toEqual(base);
+    });
+
+    it('smokingStarted=trueではwireResistivityRatioにsmokeResistanceMultiplierを乗算する', () => {
+      const base = goodMotorConfig({ wireResistivityRatio: 1.1 });
+      const config = goodDestructionConfig('nonLipo'); // smokeResistanceMultiplier=1.2(既定)
+      const effective = composeEffectiveMotorConfig(base, stateWithD02({ smokingStarted: true, smokingStartedAtT: 1 }), config);
+      expect(effective.wireResistivityRatio).toBeCloseTo(1.1 * 1.2, 12);
+      expect(effective.magnetStrength).toBe(base.magnetStrength); // D07非活性のため不変
+    });
+
+    it('wireResistivityRatio未指定(base省略時の既定1.0)でもsmokingStarted=trueで正しく乗算される', () => {
+      const base = goodMotorConfig();
+      const config = goodDestructionConfig('nonLipo');
+      const effective = composeEffectiveMotorConfig(base, stateWithD02({ smokingStarted: true, smokingStartedAtT: 1 }), config);
+      expect(effective.wireResistivityRatio).toBeCloseTo(1 * 1.2, 12);
+    });
+  });
+
+  describe('D05分岐(一時接触抵抗悪化、正式Fable P3-3-Q7裁定確定候補a、checkpoint4)', () => {
+    it('recoveryFramesLeft=0(初期値・非アクティブ)ではbrushContactResistanceRatioを変更しない(base維持)', () => {
+      const base = goodMotorConfig({ brushContactResistanceRatio: 1.1 });
+      const config = goodDestructionConfig('nonLipo');
+      const effective = composeEffectiveMotorConfig(base, stateWithD05({ recoveryFramesLeft: 0 }), config);
+      expect(effective).toEqual(base);
+    });
+
+    it('recoveryFramesLeft>0ではbrushContactResistanceRatioにrecoveryContactResistanceMultiplierを乗算する', () => {
+      const base = goodMotorConfig({ brushContactResistanceRatio: 1.1 });
+      const config = goodDestructionConfig('nonLipo'); // recoveryContactResistanceMultiplier=1.2(既定)
+      const effective = composeEffectiveMotorConfig(base, stateWithD05({ recoveryFramesLeft: 3 }), config);
+      expect(effective.brushContactResistanceRatio).toBeCloseTo(1.1 * 1.2, 12);
+      expect(effective.wireResistivityRatio).toBe(base.wireResistivityRatio); // D02非活性のため不変
     });
   });
 
@@ -1194,6 +1675,31 @@ describe('destructionOrchestration.ts: composeEffectiveMotorConfig(P3-2ゲート
     expect(resultB).toEqual(resultA);
   });
 
+  it('合成直交性テスト(必須DoD、checkpoint4、3.2節): D01(effectiveTurnsRatio)・D02(wireResistivityRatio)・D04(batteryInternalResistanceRatio)・D07(magnetStrength)の4分岐が同時に活性化しても、各baseフィールドは自分の担当分岐からのみ変更され、他分岐の入力を取り違えない', () => {
+    const base = goodMotorConfig({ batteryInternalResistanceRatio: 1.2, wireResistivityRatio: 1.1 });
+    const config = goodDestructionConfig('lipo'); // d01.decayExposureScaleRad=1000・minEffectiveTurnsRatio=0.5、d02.smokeResistanceMultiplier=1.2、internalResistanceDegradationMultiplier=1.5、reversibleDroopMultiplier=0.95、demagnetizationDeltaFraction=0.1(いずれも既定)
+    const lipoState = lipoStateWithD04Stage('swelling');
+    const state: DestructionState = {
+      ...lipoState,
+      modes: {
+        ...lipoState.modes,
+        D01: { ...lipoState.modes.D01, triggered: true, decayExposureRad: 300 },
+        D02: { ...lipoState.modes.D02, smokingStarted: true, smokingStartedAtT: 1 },
+        D07: { ...lipoState.modes.D07, reversibleDroopActive: true, irreversibleTriggered: true },
+      },
+    };
+    const effective = composeEffectiveMotorConfig(base, state, config);
+
+    // 各フィールドが「自分の担当分岐だけから」算出した独立計算結果と一致する(取り違えなし)
+    expect(effective.effectiveTurnsRatio).toBeCloseTo(1 - 300 / 1000, 12); // D01のみから算出
+    expect(effective.wireResistivityRatio).toBeCloseTo(1.1 * 1.2, 12); // D02のみから算出(D01のeffectiveTurnsRatioが混入していない)
+    expect(effective.batteryInternalResistanceRatio).toBeCloseTo(1.2 * 1.5, 12); // D04のみから算出
+    expect(effective.magnetStrength).toBeCloseTo(base.magnetStrength * 0.95 * 0.9, 12); // D07のみから算出
+    // D05非活性(brushContactResistanceRatio)・axisOffsetMm(二重計上防止)はbaseのまま不変
+    expect(effective.brushContactResistanceRatio).toBe(base.brushContactResistanceRatio);
+    expect(effective.axisOffsetMm).toBe(base.axisOffsetMm);
+  });
+
   it('予算不変性(付帯条件1): 合成前後でbatteryVoltage/batteryCapacityRatio自体が不変であり、computeEnergyBudgetJの値が実測52Jで一致する', () => {
     const base = goodMotorConfig({ batteryVoltage: 1.5, batteryCapacityRatio: 1.3, batteryInternalResistanceRatio: 1.2 });
     const config = goodDestructionConfig('lipo');
@@ -1208,6 +1714,76 @@ describe('destructionOrchestration.ts: composeEffectiveMotorConfig(P3-2ゲート
     // BATTERY_CAPACITY_J_1_5V(40J、src/engine/constants.ts)×batteryCapacityRatio(1.3)=52Jを実測固定する
     expect(computeEnergyBudgetJ(base)).toBe(52);
     expect(computeEnergyBudgetJ(effective)).toBe(52);
+  });
+
+  it('予算不変性再実行(checkpoint4、必須DoD、5.4節): D01(effectiveTurnsRatio)・D02(wireResistivityRatio)分岐が同時に活性化していても、computeEnergyBudgetJの値は合成前後で一致する(D01/D02の合成対象フィールドはいずれもcomputeEnergyBudgetJの入力に含まれない)', () => {
+    const base = goodMotorConfig({ batteryVoltage: 1.5, batteryCapacityRatio: 1.3, wireResistivityRatio: 1.1 });
+    const config = goodDestructionConfig('nonLipo');
+    const state: DestructionState = {
+      ...createInitialDestructionState('nonLipo'),
+      modes: {
+        ...createInitialDestructionState('nonLipo').modes,
+        D01: { ...createInitialDestructionState('nonLipo').modes.D01, triggered: true, decayExposureRad: 500 },
+        D02: { ...createInitialDestructionState('nonLipo').modes.D02, smokingStarted: true, smokingStartedAtT: 1 },
+      },
+    };
+    const effective = composeEffectiveMotorConfig(base, state, config);
+    // 合成が実際にeffectiveTurnsRatio/wireResistivityRatioを変えていることを先に確認する
+    expect(effective.effectiveTurnsRatio).not.toBe(base.effectiveTurnsRatio);
+    expect(effective.wireResistivityRatio).not.toBe(base.wireResistivityRatio);
+    expect(computeEnergyBudgetJ(base)).toBe(computeEnergyBudgetJ(effective));
+  });
+});
+
+describe('destructionOrchestration.ts: stepMotorWithDestruction(P3-3ゲート3、D02/D05実物理境界DoD)', () => {
+  function runAccumulatorFor(motorConfig: MotorConfig, destructionConfig: DestructionConfig): RunAccumulator {
+    const snapshot = captureRunSnapshot(motorSnapshotInput({ motorConfig, destructionConfig }));
+    return createRunAccumulator(snapshot);
+  }
+
+  it('4.2節必須DoD: isChatteringThisFrame(prev.chatterFramesLeft>0||next.chatterFramesLeft>0)は実物理のCHATTER_BURST_FRAMES境界(バースト最終フレームprev===1→next===0を含む)を正しく判定する(step()公開API経由の実物理)', () => {
+    // brushPressure=0(<CHATTER_PRESSURE_THRESHOLD)でチャタリング確率prob>0にし、rngの最初の
+    // 呼び出しだけ0(必ずトリガー)、以後は1(再トリガーしない)を返すことで単一の24フレーム
+    // バースト(CHATTER_BURST_FRAMES=24)を決定論的に作る。buildXxxFrameInputの内部関数自体は
+    // 非公開のため、その式(prev.chatterFramesLeft>0||next.chatterFramesLeft>0、
+    // destructionOrchestration.tsのbuildMotorOnlyFrameInput/buildVehicleFrameInputに実装済み)を
+    // 本テストでも同一に適用し、step()の実出力に対して直接検証する——current/dead zone等
+    // D05側の物理に一切依存しない、信号そのものの正しさの検証。
+    let rngCallCount = 0;
+    const rng = () => (rngCallCount++ === 0 ? 0 : 1);
+    const config = goodMotorConfig({ brushPressure: 0 });
+
+    let state: SimState = initialSimState();
+    const isChatteringPerFrame: boolean[] = [];
+    for (let i = 0; i < CHATTER_BURST_FRAMES + 1; i++) {
+      const next = step(config, state, 1 / 120, rng);
+      isChatteringPerFrame.push(state.chatterFramesLeft > 0 || next.chatterFramesLeft > 0);
+      state = next;
+    }
+
+    // 最初のCHATTER_BURST_FRAMES(24)フレームすべてがtrue(最終フレームprev=1→next=0を含む)
+    expect(isChatteringPerFrame.slice(0, CHATTER_BURST_FRAMES)).toEqual(new Array(CHATTER_BURST_FRAMES).fill(true));
+    // バースト終了翌フレームではfalseに戻る(新規バーストがrng=1により再トリガーされない)
+    expect(isChatteringPerFrame[CHATTER_BURST_FRAMES]).toBe(false);
+  });
+
+  it('C5負例(10節・12.4節): D02が発煙(smokingStarted=true)するが焼損(coilOverheatGaugeLimit)には未到達の入力では、D02 eventが発行されずterminalModeCandidatesも増えない', () => {
+    const motorConfig = goodMotorConfig();
+    // smokeGaugeThresholdへは到達するがcoilOverheatGaugeLimitには遠く届かない値域にする。
+    const destructionConfig = goodDestructionConfig('nonLipo');
+    const config: DestructionConfig = { ...destructionConfig, d02: { smokeGaugeThreshold: 0.001, coilOverheatGaugeLimit: 1, conductionScale: 0.05, dissipationCoefficient: 0.01, smokeResistanceMultiplier: 1.2 } };
+    let motorState: SimState = { ...initialSimState(), theta: Math.PI / 4 };
+    let accumulator = runAccumulatorFor(motorConfig, config);
+
+    for (let i = 0; i < 10; i++) {
+      const result = stepMotorWithDestruction(motorState, accumulator, 1 / 120);
+      motorState = result.physicsState;
+      accumulator = result.accumulator;
+    }
+    expect(accumulator.destructionState.modes.D02.smokingStarted).toBe(true); // 発煙自体はしている
+    expect(accumulator.destructionState.modes.D02.triggered).toBe(false); // しかし焼損には未到達
+    expect(accumulator.events.filter((e) => e.mode === 'D02')).toHaveLength(0);
+    expect(accumulator.terminalModeCandidates).toEqual([]);
   });
 });
 

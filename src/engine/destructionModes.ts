@@ -12,7 +12,7 @@
 
 import type { SimState } from './motorPhysics';
 import type { VehicleSimState } from './vehiclePhysics';
-import { BATTERY_HEAT_LIMIT } from './constants';
+import { BATTERY_HEAT_LIMIT, COIL_DEFORM_OMEGA } from './constants';
 
 export type DestructionModeId = 'D01' | 'D02' | 'D03' | 'D04' | 'D05' | 'D06' | 'D07' | 'D09';
 // D08はPhase3のengine型に含めない(Phase5の(e)周回拡張完成後)。
@@ -78,11 +78,44 @@ export type GearBreakageProfile = { kind: 'breakable'; gearStrengthThresholdNm: 
 
 export interface DestructionConfig {
   battery: BatteryDestructionConfig;
-  d02: { smokeGaugeThreshold: number; coilOverheatGaugeLimit: number };
+  // 正式Fable P3-3-Q4・Q5裁定(確定、2026-08-09): D01漸減(spec §7.1.1「実効巻数・占積が
+  // 漸減」、P3-1-Q1返済)の較正値。decayExposureScaleRadは進行量(rad単位の累積曝露)から
+  // effectiveTurnsRatioへの写像スケール定数、minEffectiveTurnsRatioは劣化の下限
+  // (0を除く——0だと磁気結合が消滅する退化値になるため)。人間再承認バンドル対象。
+  d01: { decayExposureScaleRad: number; minEffectiveTurnsRatio: number };
+  // 正式Fable P3-3-Q1・Q2裁定(確定): conductionScale/dissipationCoefficientはcoilLossW
+  // (I²R)から0-1熱ゲージへの伝導・放散係数。smokeResistanceMultiplierは発煙後の
+  // wireResistivityRatio悪化倍率(単一固定値、段階内比例則は較正根拠のない発明として不採用)。
+  // 人間再承認バンドル対象。
+  d02: { smokeGaugeThreshold: number; coilOverheatGaugeLimit: number; conductionScale: number; dissipationCoefficient: number; smokeResistanceMultiplier: number };
   // 正式Fable P3-2-Q5裁定(確定): D04延焼時にbody/magnetへ加算するdeltaFraction。単一出典として
   // advanceD04が発火時点でUnstampedDestructionEventへ埋め込む。人間再承認バンドル対象。
   d04: { bodyScorchDeltaFraction: number; magnetScorchDeltaFraction: number };
-  d05: { brushSparkDurationLimitS: number; brushSparkCurrentThresholdA: number };
+  // 正式Fable P3-3-Q3・Q6・Q7裁定(確定): brushWearRateRatio/highCurrentPenaltyは素材ごとの
+  // 摩耗率写像先(DestructionConfig.d05層、6.2節)。wearPerAmpSecondはA·s→wearFraction
+  // 変換係数(素材非依存の単一較正値、4.4節)。recoveryFrames/recoveryContactResistanceMultiplier
+  // はQ7確定(候補a回復区間モデル)の較正値——チャタリングバースト終了直後、アーク放電後の
+  // 接触面荒れによる一時的な接触抵抗悪化を表す(7.2節、スパーク中〈瞬断〉自体の悪化は既存の
+  // 完全瞬断が包含済み)。人間再承認バンドル対象。
+  //
+  // 正式Fable P3-3-Q15-4裁定(確定、2026-08-10、人間再承認対象): highCurrentPenaltyThresholdA/
+  // highCurrentPenaltyMultiplierの2フィールドをフラットに持つ設計は、「ペナルティが存在しない」
+  // 状態(素材の大半)を表すために意味のない番兵値(閾値999A等)を発明する必要があり、D07の
+  // irreversible判別unionと同じ「不正状態を構築不能にする」原則に違反していた。判別unionへ
+  // 変更し、`{ kind: 'noPenalty' }`はペナルティ関連フィールドを一切持たず、
+  // `{ kind: 'thresholdPenalty' }`のみが閾値・倍率を持つ。thresholdPenalty枝の
+  // highCurrentPenaltyMultiplierは`> 1`厳密(`>= 1`ではない)——multiplier===1の
+  // thresholdPenaltyはnoPenaltyの重複表現になるため、同一状態の二重表現を型・validator両方で
+  // 排除する。
+  d05: {
+    brushSparkDurationLimitS: number;
+    brushSparkCurrentThresholdA: number;
+    brushWearRateRatio: number;
+    highCurrentPenalty: { kind: 'noPenalty' } | { kind: 'thresholdPenalty'; highCurrentPenaltyThresholdA: number; highCurrentPenaltyMultiplier: number };
+    wearPerAmpSecond: number;
+    recoveryFrames: number;
+    recoveryContactResistanceMultiplier: number;
+  };
   d06: { breakage: GearBreakageProfile };
   // 正式Fable P3-2-Q11裁定(確定): 熱蓄積(thermal、磁石の種類によらず常に計算する)+
   // 不可逆到達条件(irreversible、判別union)の2部構成。候補(i)の閾値ハック(0-1ゲージ規約違反)は
@@ -115,6 +148,10 @@ export interface D01Progress {
   triggered: boolean;
   triggeredAtT: number | null;
   causeLog: D01CauseLog | null;
+  // 正式Fable P3-3-Q4裁定(確定、P3-1-Q1返済): 崩壊後の回転曝露累積(rad単位、
+  // `max(0, |angularVelocityRadS| − COIL_DEFORM_OMEGA) × dt`の積分)。`triggered===false`の
+  // 間は0固定(崩壊前は漸減しない)。単調非減少。
+  decayExposureRad: number;
 }
 
 export interface D02Progress {
@@ -122,6 +159,11 @@ export interface D02Progress {
   triggeredAtT: number | null;
   coilHeatGaugeRatio: number;
   causeLog: D02CauseLog | null;
+  // 正式Fable P3-3-Q8裁定(確定、候補b不可逆latch): 一度`coilHeatGaugeRatio`が
+  // `smokeGaugeThreshold`に到達したら、そのセッション中不可逆にtrueのまま
+  // (D04の`stage`が後退しない設計と同じ規律、3.5節)。
+  smokingStarted: boolean;
+  smokingStartedAtT: number | null;
 }
 
 export type BatteryDestructionProgress = { profile: 'nonLipo'; d03: D03Progress } | { profile: 'lipo'; d04: D04Progress };
@@ -153,6 +195,14 @@ export interface D05Progress {
   cumulativeSparkExposure: number;
   firstEpisodeAtT: number | null;
   causeLog: D05CauseLog | null;
+  // 正式Fable P3-3-Q3裁定(確定、候補a): 無次元の恒久摩耗差分蓄積値。`advanceD05`が
+  // 素材由来係数(`brushWearRateRatio`・`wearPerAmpSecond`等)まで畳み込み済みの値を
+  // 毎frame積算する。`cumulativeSparkExposure`(A·s、診断用の単一出典)とは別出典であり、
+  // 一方から他方を事後導出しない(4.4節)。
+  cumulativeWearDeltaFraction: number;
+  // 正式Fable P3-3-Q7裁定(確定、候補a回復区間モデル): チャタリングバースト終了直後の
+  // 接触抵抗悪化が残る残余フレーム数(0で非アクティブ、7.2節)。
+  recoveryFramesLeft: number;
 }
 
 export interface D06Progress {
@@ -197,9 +247,9 @@ export function createInitialDestructionState(batteryProfile: 'lipo' | 'nonLipo'
         ? { profile: 'lipo', d04: { triggered: false, triggeredAtT: null, stage: 'none', stageEnteredAtT: null, overDischargeActive: false, initiatingCauseLog: null, causeLog: null } }
         : { profile: 'nonLipo', d03: { triggered: false, triggeredAtT: null, causeLog: null } },
     modes: {
-      D01: { triggered: false, triggeredAtT: null, causeLog: null },
-      D02: { triggered: false, triggeredAtT: null, coilHeatGaugeRatio: 0, causeLog: null },
-      D05: { sparkDurationS: 0, episodeTriggered: false, episodeCount: 0, cumulativeSparkExposure: 0, firstEpisodeAtT: null, causeLog: null },
+      D01: { triggered: false, triggeredAtT: null, causeLog: null, decayExposureRad: 0 },
+      D02: { triggered: false, triggeredAtT: null, coilHeatGaugeRatio: 0, causeLog: null, smokingStarted: false, smokingStartedAtT: null },
+      D05: { sparkDurationS: 0, episodeTriggered: false, episodeCount: 0, cumulativeSparkExposure: 0, firstEpisodeAtT: null, causeLog: null, cumulativeWearDeltaFraction: 0, recoveryFramesLeft: 0 },
       D06: { toothLossCount: 0, firstLossAtT: null, causeLog: null },
       D07: { magnetHeatGaugeRatio: 0, reversibleDroopActive: false, irreversibleTriggered: false, irreversibleTriggeredAtT: null, causeLog: null },
       D09: { triggered: false, triggeredAtT: null, bearingHeatGaugeRatio: 0, causeLog: null },
@@ -218,6 +268,16 @@ export interface DestructionFrameInput {
   coilCollapsedRisingEdge: boolean;
   loadTorqueNm?: number;
   energyUsedRatio?: number;
+  // 正式Fable P3-3-Q1裁定(確定): `computeRCoil(effectiveConfig)`と実電流から算出した
+  // コイル損失電力(W、I²R)。D02熱ゲージの駆動入力(3.1節)。
+  coilLossW: number;
+  // 正式Fable P3-3-Q4裁定に伴うP1是正(確定): `prev.chatterFramesLeft > 0 || next.chatterFramesLeft > 0`
+  // で導出する、バースト最終stepの取りこぼしを解消した正しいチャタリング判定(4.2節)。
+  // 既存`chatterFramesLeft`(残りフレーム数)自体の意味は変えない。
+  isChatteringThisFrame: boolean;
+  // 正式Fable P3-3-Q4裁定(確定): 平滑化前の生角速度(rad/s、`next.omega`)。表示用移動平均の
+  // `rpm`とは単位・時定数が異なるため、D01進行量の駆動には本フィールドを使う(5.2節)。
+  angularVelocityRadS: number;
 }
 
 export type TemperatureReading = { kind: 'measured'; temperatureC: number } | { kind: 'uncalibratedGauge'; ratio: number } | { kind: 'unavailable' };
@@ -230,6 +290,9 @@ export interface CauseLogCommon {
 }
 
 export interface D01CauseLog extends CauseLogCommon {}
+// 正式Fable付帯条件(P3-3、2026-08-09確定): temperatureは{kind:'uncalibratedGauge',
+// ratio: coilHeatGaugeRatio}(専用の較正済み温度計を持たないコイル熱ゲージの生値、
+// P3-1のD01/D03と同じ規律——捏造しない)。
 export interface D02CauseLog extends CauseLogCommon {
   coilHeatGaugeRatio: number;
 }
@@ -246,8 +309,15 @@ export interface D04CauseLog extends CauseLogCommon {
   // 人間再承認バンドル対象。
   initiatingCause: { shortCircuitDurationS: number; overDischargeRatio: number | null };
 }
+// 正式Fable付帯条件(P3-3、2026-08-09確定): temperatureは{kind:'unavailable'}固定
+// (ブラシ温度ゲージは存在しないため捏造しない、P3-1のD01/D03と同じ規律)。
+// 正式Fable P3-3-Q9裁定(確定、候補b): 既存`CauseLogCommon.currentA`はチャタリング中の
+// 実電流(常に0)という事実を正直に保持したまま、理論遮断電流を`theoreticalCurrentA`で
+// 別記する(「二つの真実を両方記録し、フィールドの意味をモード別に読み替えない」)。
+// 人間再承認バンドル対象。
 export interface D05CauseLog extends CauseLogCommon {
   sparkDurationS: number;
+  theoreticalCurrentA: number;
 }
 export interface D06CauseLog extends CauseLogCommon {
   loadTorqueNm: number;
@@ -292,11 +362,12 @@ export type UnstampedDestructionEvent =
 
 // ---------------------------------------------------------------------------
 // advanceDestructionState本体(P3-1、docs/phase3-p3-1-plan.md v7 §2.1。P3-2ゲート3で
-// D04/D07を追加、docs/phase3-p3-2-plan.md v9 §2.2・§2.5)。
+// D04/D07を追加、docs/phase3-p3-2-plan.md v9 §2.2・§2.5。P3-3ゲート3でD02/D05を追加、
+// docs/phase3-p3-3-plan.md v10 §3・§4・§8)。
 // P3-0-Q6不変条件(正式Fable裁定): 差分換算(deriveDegradationDiffs)実装済みのモードの
-// イベントしか発行しない。P3-2ゲート3時点でホワイトリストはD01・D03・D04・D07(いずれも
-// destructionOrchestration.tsのderiveDegradationDiffsが同一ゲートで対応済み)。
-// D02/D05/D06/D09の判定関数はP3-2に存在しない(P3-3以降で追加する)。
+// イベントしか発行しない。P3-3ゲート3時点でホワイトリストはD01・D02・D03・D04・D05・D07
+// (いずれもdestructionOrchestration.tsのderiveDegradationDiffsが同一ゲートで対応済み)。
+// D06/D09の判定関数はまだ存在しない(P3-4以降で追加する)。
 // ---------------------------------------------------------------------------
 
 // 物理較正値ではなく、固定dt累積の浮動小数点誤差だけを吸収する数値許容差(サブステップ1の
@@ -311,12 +382,21 @@ export type UnstampedDestructionEvent =
 // 独立検証する際、この値を複製せず直接importして単一出典を保つ。
 export const DURATION_COMPARISON_EPSILON_S = 1e-9;
 
+// 正式Fable P3-3-Q4裁定(確定、候補b): 崩壊は不可逆・一度きり(spec §7.1.1)だが、崩壊後は
+// 「実効巻数・占積が漸減、走行継続」という返済対象(P3-1-Q1)が進行する。進行量は崩壊トリガと
+// 同じ閾値(COIL_DEFORM_OMEGA)を超えた回転曝露の時間積分——原因と進行が同じ物理機構である
+// ことの正直な表現(Fable評)。
 function advanceD01(
   prev: D01Progress,
   frame: DestructionFrameInput,
   elapsedTimeS: number,
+  dt: number,
 ): { next: D01Progress; event: UnstampedDestructionEvent | null } {
-  if (prev.triggered) return { next: prev, event: null }; // 崩壊は不可逆・一度きり(spec §7.1.1)
+  if (prev.triggered) {
+    const excessOmega = Math.max(0, Math.abs(frame.angularVelocityRadS) - COIL_DEFORM_OMEGA);
+    if (excessOmega === 0) return { next: prev, event: null }; // 停止時ゼロ(必須DoD)
+    return { next: { ...prev, decayExposureRad: prev.decayExposureRad + excessOmega * dt }, event: null };
+  }
   if (!frame.coilCollapsedRisingEdge) return { next: prev, event: null };
   const causeLog: D01CauseLog = {
     currentA: frame.currentA,
@@ -325,9 +405,62 @@ function advanceD01(
     temperature: { kind: 'unavailable' },
   };
   return {
-    next: { triggered: true, triggeredAtT: elapsedTimeS, causeLog },
+    next: { triggered: true, triggeredAtT: elapsedTimeS, causeLog, decayExposureRad: 0 },
     event: { mode: 'D01', causeLog, isFirstThisSession: true },
   };
+}
+
+// D02本体(計画v10 §3、正式Fable P3-3-Q1・Q2・Q8裁定確定)。frame.coilLossWは
+// buildXxxFrameInput側でcomputeRCoil(effectiveConfig)×実電流²として毎step独立に
+// 再計算済み(3.1節)。R_coil自体の合成(発煙後の悪化倍率)はcomposeEffectiveMotorConfig
+// (Gate4)の責務であり、本関数は熱ゲージの状態機械のみを担う。
+function advanceD02(
+  prev: D02Progress,
+  frame: DestructionFrameInput,
+  config: DestructionConfig['d02'],
+  elapsedTimeS: number,
+  dt: number,
+): { next: D02Progress; event: UnstampedDestructionEvent | null } {
+  if (prev.triggered) return { next: prev, event: null };
+
+  const nextCoilHeatGaugeRatio = Math.min(
+    1,
+    Math.max(0, prev.coilHeatGaugeRatio + (frame.coilLossW * config.conductionScale - prev.coilHeatGaugeRatio * config.dissipationCoefficient) * dt),
+  );
+
+  // 正式Fable P3-3-Q8裁定(確定、候補b不可逆latch): 一度でもsmokeGaugeThresholdへ到達したら
+  // そのセッション中不可逆にtrueのまま(3.5節)。
+  let smokingStarted = prev.smokingStarted;
+  let smokingStartedAtT = prev.smokingStartedAtT;
+  if (!smokingStarted && nextCoilHeatGaugeRatio >= config.smokeGaugeThreshold) {
+    smokingStarted = true;
+    smokingStartedAtT = elapsedTimeS;
+  }
+
+  if (nextCoilHeatGaugeRatio >= config.coilOverheatGaugeLimit) {
+    // 値域制約smokeGaugeThreshold < coilOverheatGaugeLimit(11.2節)により、発火に到達する
+    // フレームでは必ずsmokingStarted===trueが成立済み(D02Progress交差不変条件と整合)。
+    const causeLog: D02CauseLog = {
+      currentA: frame.currentA,
+      rpm: frame.rpm,
+      atT: elapsedTimeS,
+      temperature: { kind: 'uncalibratedGauge', ratio: nextCoilHeatGaugeRatio },
+      coilHeatGaugeRatio: nextCoilHeatGaugeRatio,
+    };
+    return {
+      next: {
+        triggered: true,
+        triggeredAtT: elapsedTimeS,
+        coilHeatGaugeRatio: nextCoilHeatGaugeRatio,
+        causeLog,
+        smokingStarted: true,
+        smokingStartedAtT: smokingStartedAtT ?? elapsedTimeS,
+      },
+      event: { mode: 'D02', causeLog, isFirstThisSession: true },
+    };
+  }
+
+  return { next: { ...prev, coilHeatGaugeRatio: nextCoilHeatGaugeRatio, smokingStarted, smokingStartedAtT }, event: null };
 }
 
 function advanceD03(
@@ -453,6 +586,108 @@ function advanceD04(
   return { next: { ...advanced, overDischargeActive: overDischargeActiveNow }, event: null };
 }
 
+// D05本体(計画v10 §4・§7、正式Fable P3-3-Q3・Q7・Q9・Q15-4裁定確定)。D05は常に非終端
+// (classifyTerminalModesに分岐を持たない、10節C5)であり、`triggered`フィールド自体を
+// D05Progressに持たない——1セッション中に反復発火しうるepisode駆動モードである。
+function advanceD05(
+  prev: D05Progress,
+  frame: DestructionFrameInput,
+  config: DestructionConfig['d05'],
+  elapsedTimeS: number,
+  dt: number,
+): { next: D05Progress; event: UnstampedDestructionEvent | null } {
+  const excessCurrentA = Math.max(0, frame.theoreticalCurrentA - config.brushSparkCurrentThresholdA);
+  const isSparkActive = frame.isChatteringThisFrame && excessCurrentA > 0;
+
+  let sparkDurationS: number;
+  let episodeTriggered: boolean;
+  let cumulativeSparkExposure = prev.cumulativeSparkExposure;
+  let cumulativeWearDeltaFraction = prev.cumulativeWearDeltaFraction;
+
+  if (isSparkActive) {
+    sparkDurationS = prev.sparkDurationS + dt;
+    cumulativeSparkExposure = prev.cumulativeSparkExposure + excessCurrentA * dt; // アクティブ中は無条件で加算(episode成立可否と独立、4.1節)
+    episodeTriggered = prev.episodeTriggered;
+
+    // 正式Fable P3-3-Q15-4裁定(確定): highCurrentPenaltyは判別union。thresholdPenalty枝
+    // のみ、理論電流が閾値を超えた場合に倍率を適用する(4.4節)。
+    const penalty = config.highCurrentPenalty;
+    const penaltyMultiplier =
+      penalty.kind === 'thresholdPenalty' && frame.theoreticalCurrentA > penalty.highCurrentPenaltyThresholdA
+        ? penalty.highCurrentPenaltyMultiplier
+        : 1;
+    const wearDelta = excessCurrentA * dt * config.brushWearRateRatio * penaltyMultiplier * config.wearPerAmpSecond; // 無次元(4.4節)
+    cumulativeWearDeltaFraction = prev.cumulativeWearDeltaFraction + wearDelta;
+  } else {
+    sparkDurationS = 0; // 再武装(4.1節)
+    episodeTriggered = false; // 再武装(次のアクティブ区間で新規episodeとして検出可能にする)
+  }
+
+  const justCrossed = isSparkActive && !episodeTriggered && sparkDurationS + DURATION_COMPARISON_EPSILON_S >= config.brushSparkDurationLimitS;
+  if (justCrossed) {
+    episodeTriggered = true;
+  }
+
+  // 正式Fable P3-3-Q7裁定(確定、候補a回復区間モデル、7.2節): バースト終了検出は
+  // 「このstepはチャタリングだった(isChatteringThisFrame)かつ次stepへ持ち越すバースト残り
+  // フレームが0(chatterFramesLeft===0)」の組合せのみで判定する(新規フィールドは追加しない)。
+  // 回復区間中に新しいバーストが始まった(=このstepもチャタリング継続中)場合は、新規バーストを
+  // 優先して0へリセットする——バーストが終了した場合のみrecoveryFramesへ再設定する。
+  let recoveryFramesLeft: number;
+  if (frame.isChatteringThisFrame && frame.chatterFramesLeft === 0) {
+    recoveryFramesLeft = config.recoveryFrames;
+  } else if (frame.isChatteringThisFrame) {
+    recoveryFramesLeft = 0;
+  } else if (prev.recoveryFramesLeft > 0) {
+    recoveryFramesLeft = prev.recoveryFramesLeft - 1;
+  } else {
+    recoveryFramesLeft = 0;
+  }
+
+  if (!justCrossed) {
+    return {
+      next: {
+        sparkDurationS,
+        episodeTriggered,
+        episodeCount: prev.episodeCount,
+        cumulativeSparkExposure,
+        firstEpisodeAtT: prev.firstEpisodeAtT,
+        causeLog: prev.causeLog,
+        cumulativeWearDeltaFraction,
+        recoveryFramesLeft,
+      },
+      event: null,
+    };
+  }
+
+  // 正式Fable P3-3-Q9裁定(確定、候補b): currentA(実電流、チャタリング中は常に0)と
+  // theoreticalCurrentA(理論遮断電流)を両方正直に記録する(「二つの真実」)。temperatureは
+  // {kind:'unavailable'}固定(ブラシ専用の較正済み温度計が存在しないため捏造しない)。
+  const eventCauseLog: D05CauseLog = {
+    currentA: frame.currentA,
+    rpm: frame.rpm,
+    atT: elapsedTimeS,
+    temperature: { kind: 'unavailable' },
+    sparkDurationS,
+    theoreticalCurrentA: frame.theoreticalCurrentA,
+  };
+  const isFirstThisSession = prev.episodeCount === 0;
+
+  return {
+    next: {
+      sparkDurationS,
+      episodeTriggered,
+      episodeCount: prev.episodeCount + 1,
+      cumulativeSparkExposure,
+      firstEpisodeAtT: prev.firstEpisodeAtT ?? elapsedTimeS,
+      causeLog: prev.causeLog ?? eventCauseLog, // Progress.causeLogは最初のepisodeのみ固定(4.3節)
+      cumulativeWearDeltaFraction,
+      recoveryFramesLeft,
+    },
+    event: { mode: 'D05', causeLog: eventCauseLog, isFirstThisSession }, // event自身のcauseLogは都度このepisode固有の瞬間値
+  };
+}
+
 // D07本体(計画v9 §2.5、正式Fable P3-2-Q2・Q3・Q11裁定確定)。熱ゲージ(thermal)は
 // irreversible.kindによらず常に更新する(v12凍結契約「熱ゲージは常時更新」「不可逆到達後も
 // 走行は継続する」)。止めてよいのはevent/causeLogの再発行だけである。
@@ -526,22 +761,26 @@ export function advanceDestructionState(
     batteryEvent = d04Result.event;
   }
 
-  const d01Result = advanceD01(prev.modes.D01, frame, nextShared.elapsedTimeS);
+  const d01Result = advanceD01(prev.modes.D01, frame, nextShared.elapsedTimeS, dt);
+  const d02Result = advanceD02(prev.modes.D02, frame, config.d02, nextShared.elapsedTimeS, dt);
+  const d05Result = advanceD05(prev.modes.D05, frame, config.d05, nextShared.elapsedTimeS, dt);
   const d07Result = advanceD07(prev.modes.D07, frame, config.d07, nextShared.elapsedTimeS, dt);
 
   // 公開eventsは判定順ではなく、v12 2.1節が定める固定順序(D01→D02→[D03またはD04]→
-  // D05→D06→D07→D09)に厳密に従って組み立てる。P3-2時点で実際に発火しうるのは
-  // D01→[D03またはD04]→D07の部分列。
+  // D05→D06→D07→D09)に厳密に従って組み立てる。P3-3時点で実際に発火しうるのは
+  // D01→D02→[D03またはD04]→D05→D07の部分列(8節)。
   const events: UnstampedDestructionEvent[] = [];
   if (d01Result.event) events.push(d01Result.event);
+  if (d02Result.event) events.push(d02Result.event);
   if (batteryEvent) events.push(batteryEvent);
+  if (d05Result.event) events.push(d05Result.event);
   if (d07Result.event) events.push(d07Result.event);
 
   return {
     state: {
       shared: nextShared,
       battery: nextBattery,
-      modes: { ...prev.modes, D01: d01Result.next, D07: d07Result.next },
+      modes: { ...prev.modes, D01: d01Result.next, D02: d02Result.next, D05: d05Result.next, D07: d07Result.next },
     },
     events,
   };

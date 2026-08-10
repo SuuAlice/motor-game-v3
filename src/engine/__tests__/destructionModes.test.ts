@@ -11,6 +11,7 @@ import {
   type DestructionRunContext,
   type DestructionState,
 } from '../destructionModes';
+import { CHATTER_BURST_FRAMES, COIL_DEFORM_OMEGA } from '../constants';
 
 const DT = 1 / 120;
 
@@ -23,6 +24,9 @@ function frameInput(overrides: Partial<DestructionFrameInput> = {}): Destruction
     shorted: false,
     chatterFramesLeft: 0,
     coilCollapsedRisingEdge: false,
+    coilLossW: 0,
+    isChatteringThisFrame: false,
+    angularVelocityRadS: 0,
     ...overrides,
   };
 }
@@ -32,9 +36,18 @@ function frameInput(overrides: Partial<DestructionFrameInput> = {}): Destruction
 function validDestructionConfig(overrides: Partial<DestructionConfig> = {}): DestructionConfig {
   return {
     battery: { profile: 'nonLipo', shortCircuitDurationLimitS: 3.0 },
-    d02: { smokeGaugeThreshold: 0.5, coilOverheatGaugeLimit: 1.0 },
+    d01: { decayExposureScaleRad: 1000, minEffectiveTurnsRatio: 0.5 },
+    d02: { smokeGaugeThreshold: 0.5, coilOverheatGaugeLimit: 1.0, conductionScale: 0.1, dissipationCoefficient: 0.1, smokeResistanceMultiplier: 1.2 },
     d04: { bodyScorchDeltaFraction: 0.2, magnetScorchDeltaFraction: 0.15 },
-    d05: { brushSparkDurationLimitS: 0.5, brushSparkCurrentThresholdA: 5 },
+    d05: {
+      brushSparkDurationLimitS: 0.15,
+      brushSparkCurrentThresholdA: 5,
+      brushWearRateRatio: 1,
+      highCurrentPenalty: { kind: 'thresholdPenalty', highCurrentPenaltyThresholdA: 8, highCurrentPenaltyMultiplier: 1.5 },
+      wearPerAmpSecond: 0.001,
+      recoveryFrames: 6,
+      recoveryContactResistanceMultiplier: 1.2,
+    },
     d06: { breakage: { kind: 'breakable', gearStrengthThresholdNm: 1.0 } },
     d07: {
       thermal: { conductionCoefficient: 0.1, dissipationCoefficient: 0.05 },
@@ -100,8 +113,8 @@ describe('destructionModes.ts: createInitialDestructionState', () => {
 
   it('4. modesの全6モード(D01/D02/D05/D06/D07/D09)が初期値で存在する', () => {
     const state = createInitialDestructionState('nonLipo');
-    expect(state.modes.D01).toEqual({ triggered: false, triggeredAtT: null, causeLog: null });
-    expect(state.modes.D02).toEqual({ triggered: false, triggeredAtT: null, coilHeatGaugeRatio: 0, causeLog: null });
+    expect(state.modes.D01).toEqual({ triggered: false, triggeredAtT: null, causeLog: null, decayExposureRad: 0 });
+    expect(state.modes.D02).toEqual({ triggered: false, triggeredAtT: null, coilHeatGaugeRatio: 0, causeLog: null, smokingStarted: false, smokingStartedAtT: null });
     expect(state.modes.D05).toEqual({
       sparkDurationS: 0,
       episodeTriggered: false,
@@ -109,6 +122,8 @@ describe('destructionModes.ts: createInitialDestructionState', () => {
       cumulativeSparkExposure: 0,
       firstEpisodeAtT: null,
       causeLog: null,
+      cumulativeWearDeltaFraction: 0,
+      recoveryFramesLeft: 0,
     });
     expect(state.modes.D06).toEqual({ toothLossCount: 0, firstLossAtT: null, causeLog: null });
     expect(state.modes.D07).toEqual({
@@ -170,6 +185,158 @@ describe('destructionModes.ts: advanceDestructionState — D01個別設計(P3-1 
     const secondResult = advanceDestructionState(state, frameInput({ coilCollapsedRisingEdge: true, currentA: 999, rpm: 999999 }), validDestructionConfig(), motorRunContext(), DT);
     expect(secondResult.events.some((e) => e.mode === 'D01')).toBe(false);
     expect(secondResult.state.modes.D01).toEqual(snapshotAfterFirstFire); // D01Progress全体(causeLog込み)が初回値のまま
+  });
+});
+
+describe('destructionModes.ts: advanceDestructionState — D01漸減(decayExposureRad、正式Fable P3-3-Q4裁定確定、Gate1レビュー是正)', () => {
+  const HIGH_OMEGA = COIL_DEFORM_OMEGA + 100; // 閾値超過(正回転)
+  const LOW_OMEGA = COIL_DEFORM_OMEGA - 10; // 閾値未満
+
+  it('未trigger(崩壊前)では、高いangularVelocityRadSを与えてもdecayExposureRadは0のまま積算されない', () => {
+    const state = createInitialDestructionState('nonLipo');
+    const result = advanceDestructionState(
+      state, frameInput({ coilCollapsedRisingEdge: false, angularVelocityRadS: HIGH_OMEGA }), validDestructionConfig(), motorRunContext(), DT,
+    );
+    expect(result.state.modes.D01.triggered).toBe(false);
+    expect(result.state.modes.D01.decayExposureRad).toBe(0);
+  });
+
+  it('trigger発生frame自体はdecayExposureRad=0のまま(崩壊前提出のangularVelocityRadSは崩壊原因であり漸減はまだ計上しない)', () => {
+    const state = createInitialDestructionState('nonLipo');
+    const result = advanceDestructionState(
+      state, frameInput({ coilCollapsedRisingEdge: true, angularVelocityRadS: HIGH_OMEGA }), validDestructionConfig(), motorRunContext(), DT,
+    );
+    expect(result.state.modes.D01.triggered).toBe(true);
+    expect(result.state.modes.D01.decayExposureRad).toBe(0);
+  });
+
+  it('trigger後、|angularVelocityRadS| − COIL_DEFORM_OMEGAの正部分×dtだけ厳密に増える', () => {
+    let state = createInitialDestructionState('nonLipo');
+    state = advanceDestructionState(state, frameInput({ coilCollapsedRisingEdge: true }), validDestructionConfig(), motorRunContext(), DT).state;
+    expect(state.modes.D01.decayExposureRad).toBe(0);
+
+    const result = advanceDestructionState(state, frameInput({ angularVelocityRadS: HIGH_OMEGA }), validDestructionConfig(), motorRunContext(), DT);
+    const expectedDelta = (HIGH_OMEGA - COIL_DEFORM_OMEGA) * DT;
+    expect(result.state.modes.D01.decayExposureRad).toBeCloseTo(expectedDelta, 12);
+
+    // 2step目も同じ増分だけ積算される(単調非減少)
+    const result2 = advanceDestructionState(result.state, frameInput({ angularVelocityRadS: HIGH_OMEGA }), validDestructionConfig(), motorRunContext(), DT);
+    expect(result2.state.modes.D01.decayExposureRad).toBeCloseTo(expectedDelta * 2, 12);
+  });
+
+  it('trigger後、|angularVelocityRadS| <= COIL_DEFORM_OMEGA(閾値以下)または停止(0)ではdecayExposureRadが変化しない', () => {
+    let state = createInitialDestructionState('nonLipo');
+    state = advanceDestructionState(state, frameInput({ coilCollapsedRisingEdge: true }), validDestructionConfig(), motorRunContext(), DT).state;
+
+    const afterLow = advanceDestructionState(state, frameInput({ angularVelocityRadS: LOW_OMEGA }), validDestructionConfig(), motorRunContext(), DT);
+    expect(afterLow.state.modes.D01.decayExposureRad).toBe(0);
+
+    const afterStopped = advanceDestructionState(afterLow.state, frameInput({ angularVelocityRadS: 0 }), validDestructionConfig(), motorRunContext(), DT);
+    expect(afterStopped.state.modes.D01.decayExposureRad).toBe(0);
+
+    // ちょうど閾値(境界値)も増分ゼロ(excessOmega=0)
+    const afterExact = advanceDestructionState(afterStopped.state, frameInput({ angularVelocityRadS: COIL_DEFORM_OMEGA }), validDestructionConfig(), motorRunContext(), DT);
+    expect(afterExact.state.modes.D01.decayExposureRad).toBe(0);
+  });
+
+  it('負回転(angularVelocityRadSが負)でも絶対値で閾値超過分を積算する', () => {
+    let state = createInitialDestructionState('nonLipo');
+    state = advanceDestructionState(state, frameInput({ coilCollapsedRisingEdge: true }), validDestructionConfig(), motorRunContext(), DT).state;
+
+    const result = advanceDestructionState(state, frameInput({ angularVelocityRadS: -HIGH_OMEGA }), validDestructionConfig(), motorRunContext(), DT);
+    const expectedDelta = (HIGH_OMEGA - COIL_DEFORM_OMEGA) * DT;
+    expect(result.state.modes.D01.decayExposureRad).toBeCloseTo(expectedDelta, 12);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P3-3ゲート3: D02(コイル焼損)状態機械(計画v10 §3、正式Fable P3-3-Q1・Q2・Q8裁定確定)
+// ---------------------------------------------------------------------------
+
+describe('destructionModes.ts: advanceDestructionState — D02個別設計(P3-3ゲート3、正式Fable Q1・Q2・Q8裁定)', () => {
+  it('coilLossW>0のフレームが続くと熱ゲージ(coilHeatGaugeRatio)が単調に増加する', () => {
+    const config = validDestructionConfig({ d02: { smokeGaugeThreshold: 0.5, coilOverheatGaugeLimit: 1.0, conductionScale: 1, dissipationCoefficient: 0.01, smokeResistanceMultiplier: 1.2 } });
+    let state = createInitialDestructionState('nonLipo');
+    let prevRatio = 0;
+    for (let i = 0; i < 5; i++) {
+      const result = advanceDestructionState(state, frameInput({ coilLossW: 1 }), config, motorRunContext(), DT);
+      state = result.state;
+      expect(state.modes.D02.coilHeatGaugeRatio).toBeGreaterThan(prevRatio);
+      prevRatio = state.modes.D02.coilHeatGaugeRatio;
+    }
+  });
+
+  it('coilLossW=0が続くと熱ゲージは放散のみで単調に減少する(dissipationCoefficient>0)', () => {
+    const config = validDestructionConfig({ d02: { smokeGaugeThreshold: 0.5, coilOverheatGaugeLimit: 1.0, conductionScale: 1, dissipationCoefficient: 0.5, smokeResistanceMultiplier: 1.2 } });
+    let state = createInitialDestructionState('nonLipo');
+    // 一度熱を入れてから冷ます
+    state = advanceDestructionState(state, frameInput({ coilLossW: 100 }), config, motorRunContext(), DT).state;
+    const heated = state.modes.D02.coilHeatGaugeRatio;
+    expect(heated).toBeGreaterThan(0);
+    state = advanceDestructionState(state, frameInput({ coilLossW: 0 }), config, motorRunContext(), DT).state;
+    expect(state.modes.D02.coilHeatGaugeRatio).toBeLessThan(heated);
+  });
+
+  it('熱ゲージはMath.min(1,...)/Math.max(0,...)で0〜1へclampされる(極端なcoilLossWでも1を超えない)', () => {
+    const config = validDestructionConfig({ d02: { smokeGaugeThreshold: 0.5, coilOverheatGaugeLimit: 1.0, conductionScale: 1e9, dissipationCoefficient: 1e-6, smokeResistanceMultiplier: 1.2 } });
+    const state = createInitialDestructionState('nonLipo');
+    const result = advanceDestructionState(state, frameInput({ coilLossW: 1e9 }), config, motorRunContext(), DT);
+    expect(result.state.modes.D02.coilHeatGaugeRatio).toBe(1);
+  });
+
+  it('smokeGaugeThreshold到達でsmokingStarted=trueへ不可逆latchし、以後coilLossW=0で熱ゲージが下がってもsmokingStartedはtrueのまま(正式Fable Q8確定候補b)', () => {
+    const config = validDestructionConfig({ d02: { smokeGaugeThreshold: 0.3, coilOverheatGaugeLimit: 1.0, conductionScale: 1, dissipationCoefficient: 0.5, smokeResistanceMultiplier: 1.2 } });
+    let state = createInitialDestructionState('nonLipo');
+    state = advanceDestructionState(state, frameInput({ coilLossW: 100 }), config, motorRunContext(), DT).state;
+    expect(state.modes.D02.coilHeatGaugeRatio).toBeGreaterThanOrEqual(0.3);
+    expect(state.modes.D02.smokingStarted).toBe(true);
+    const smokingStartedAtT = state.modes.D02.smokingStartedAtT;
+    expect(smokingStartedAtT).toBeCloseTo(DT, 9);
+    const heatedRatio = state.modes.D02.coilHeatGaugeRatio;
+
+    // 冷却させても不可逆にtrueのまま、smokingStartedAtTも不変
+    for (let i = 0; i < 10; i++) {
+      state = advanceDestructionState(state, frameInput({ coilLossW: 0 }), config, motorRunContext(), DT).state;
+    }
+    expect(state.modes.D02.coilHeatGaugeRatio).toBeLessThan(heatedRatio); // 冷却により減少している
+    expect(state.modes.D02.smokingStarted).toBe(true);
+    expect(state.modes.D02.smokingStartedAtT).toBe(smokingStartedAtT);
+  });
+
+  it('smokeGaugeThreshold未到達ではsmokingStarted=falseのまま(C5負例: 発煙未満では発火系状態が一切変化しない)', () => {
+    const config = validDestructionConfig({ d02: { smokeGaugeThreshold: 0.5, coilOverheatGaugeLimit: 1.0, conductionScale: 0.001, dissipationCoefficient: 0.5, smokeResistanceMultiplier: 1.2 } });
+    let state = createInitialDestructionState('nonLipo');
+    for (let i = 0; i < 5; i++) {
+      state = advanceDestructionState(state, frameInput({ coilLossW: 1 }), config, motorRunContext(), DT).state;
+    }
+    expect(state.modes.D02.coilHeatGaugeRatio).toBeLessThan(0.5);
+    expect(state.modes.D02.smokingStarted).toBe(false);
+    expect(state.modes.D02.smokingStartedAtT).toBeNull();
+    expect(state.modes.D02.triggered).toBe(false);
+  });
+
+  it('coilOverheatGaugeLimit到達でtriggered=trueとなりevent(isFirstThisSession:true)が一度だけ発行される。triggered時は必ずsmokingStarted=trueも成立する(交差不変条件)', () => {
+    const config = validDestructionConfig({ d02: { smokeGaugeThreshold: 0.3, coilOverheatGaugeLimit: 0.5, conductionScale: 1, dissipationCoefficient: 1e-6, smokeResistanceMultiplier: 1.2 } });
+    let state = createInitialDestructionState('nonLipo');
+    let result = advanceDestructionState(state, frameInput({ coilLossW: 100, currentA: 3, rpm: 500 }), config, motorRunContext(), DT);
+    state = result.state;
+    expect(state.modes.D02.triggered).toBe(true);
+    expect(state.modes.D02.triggeredAtT).toBeCloseTo(DT, 9);
+    expect(state.modes.D02.smokingStarted).toBe(true); // 交差不変条件: triggered ⟹ smokingStarted
+    const event = result.events.find((e) => e.mode === 'D02');
+    expect(event).toBeDefined();
+    if (event?.mode === 'D02') {
+      expect(event.isFirstThisSession).toBe(true);
+      expect(event.causeLog.temperature).toEqual({ kind: 'uncalibratedGauge', ratio: state.modes.D02.coilHeatGaugeRatio });
+      expect(event.causeLog.coilHeatGaugeRatio).toBe(state.modes.D02.coilHeatGaugeRatio);
+      expect(event.causeLog.currentA).toBe(3);
+      expect(event.causeLog.rpm).toBe(500);
+    }
+
+    // 発火後は再発行されない(不可逆・一度きり、既存D01/D03/D04と同じ規律)
+    result = advanceDestructionState(state, frameInput({ coilLossW: 100 }), config, motorRunContext(), DT);
+    expect(result.events.filter((e) => e.mode === 'D02')).toHaveLength(0);
+    expect(result.state.modes.D02).toEqual(state.modes.D02); // 発火後は完全に不変(D01/D03と同じ規律)
   });
 });
 
@@ -327,9 +494,17 @@ describe('destructionModes.ts: advanceDestructionState — P3-0-Q6不変条件�
 
     const configA = validDestructionConfig();
     const configB = validDestructionConfig({
-      d02: { smokeGaugeThreshold: 0.99, coilOverheatGaugeLimit: 0.01 },
+      d02: { smokeGaugeThreshold: 0.99, coilOverheatGaugeLimit: 0.01, conductionScale: 9.9, dissipationCoefficient: 9.9, smokeResistanceMultiplier: 9.9 },
       d04: { bodyScorchDeltaFraction: 0.99, magnetScorchDeltaFraction: 0.99 },
-      d05: { brushSparkDurationLimitS: 9.9, brushSparkCurrentThresholdA: 0.001 },
+      d05: {
+        brushSparkDurationLimitS: 0.001,
+        brushSparkCurrentThresholdA: 0.001,
+        brushWearRateRatio: 9.9,
+        highCurrentPenalty: { kind: 'thresholdPenalty', highCurrentPenaltyThresholdA: 0.001, highCurrentPenaltyMultiplier: 9.9 },
+        wearPerAmpSecond: 9.9,
+        recoveryFrames: 99,
+        recoveryContactResistanceMultiplier: 9.9,
+      },
       d06: { breakage: { kind: 'nonBreakable' } },
       d09: { bearingSeizureGaugeLimit: 0.001 },
     });
@@ -682,6 +857,220 @@ describe('destructionModes.ts: advanceDestructionState — D04個別設計(P3-2�
 });
 
 // ---------------------------------------------------------------------------
+// P3-3ゲート3: D05(異常ブラシ火花)状態機械(計画v10 §4・§7、正式Fable P3-3-Q3・Q7・Q9・Q15-4裁定確定)
+// ---------------------------------------------------------------------------
+
+describe('destructionModes.ts: advanceDestructionState — D05個別設計(P3-3ゲート3、正式Fable Q3・Q7・Q9裁定)', () => {
+  const D05_CONFIG = validDestructionConfig({
+    d05: {
+      brushSparkDurationLimitS: 3 * DT, // 3フレームでepisode成立(テストしやすい小さな値)
+      brushSparkCurrentThresholdA: 2,
+      brushWearRateRatio: 1,
+      highCurrentPenalty: { kind: 'noPenalty' },
+      wearPerAmpSecond: 0.1,
+      recoveryFrames: 4,
+      recoveryContactResistanceMultiplier: 1.5,
+    },
+  }).d05;
+
+  function d05Config(overrides: Partial<DestructionConfig['d05']> = {}) {
+    return validDestructionConfig({ d05: { ...D05_CONFIG, ...overrides } });
+  }
+
+  it('isChatteringThisFrame===falseの間はexcessCurrentAが正でもsparkDurationS/cumulativeSparkExposureが蓄積しない(通常整流の微小火花を除外、4.1節)', () => {
+    const config = d05Config();
+    let state = createInitialDestructionState('nonLipo');
+    for (let i = 0; i < 5; i++) {
+      state = advanceDestructionState(state, frameInput({ theoreticalCurrentA: 100, isChatteringThisFrame: false, chatterFramesLeft: 0 }), config, motorRunContext(), DT).state;
+    }
+    expect(state.modes.D05.sparkDurationS).toBe(0);
+    expect(state.modes.D05.cumulativeSparkExposure).toBe(0);
+    expect(state.modes.D05.episodeCount).toBe(0);
+  });
+
+  it('isChatteringThisFrame===trueでもtheoreticalCurrentAが閾値以下ならexcessCurrentA=0となり蓄積しない', () => {
+    const config = d05Config();
+    let state = createInitialDestructionState('nonLipo');
+    for (let i = 0; i < 5; i++) {
+      state = advanceDestructionState(state, frameInput({ theoreticalCurrentA: 2, isChatteringThisFrame: true, chatterFramesLeft: 3 - i }), config, motorRunContext(), DT).state;
+    }
+    expect(state.modes.D05.sparkDurationS).toBe(0);
+    expect(state.modes.D05.cumulativeSparkExposure).toBe(0);
+  });
+
+  it('isSparkActive中はcumulativeSparkExposureがexcessCurrentA×dtで無条件に加算される(episode成立可否と独立)', () => {
+    const config = d05Config({ brushSparkDurationLimitS: 100 * DT }); // episodeが絶対成立しない長さにする
+    let state = createInitialDestructionState('nonLipo');
+    state = advanceDestructionState(state, frameInput({ theoreticalCurrentA: 5, isChatteringThisFrame: true, chatterFramesLeft: 10 }), config, motorRunContext(), DT).state;
+    expect(state.modes.D05.cumulativeSparkExposure).toBeCloseTo((5 - 2) * DT, 12);
+    expect(state.modes.D05.episodeCount).toBe(0); // episode自体は未成立
+  });
+
+  it('非アクティブ区間を挟むとsparkDurationS/episodeTriggeredは再武装(リセット)されるが、cumulativeSparkExposureは恒久蓄積のまま保持される', () => {
+    const config = d05Config();
+    let state = createInitialDestructionState('nonLipo');
+    state = advanceDestructionState(state, frameInput({ theoreticalCurrentA: 5, isChatteringThisFrame: true, chatterFramesLeft: 10 }), config, motorRunContext(), DT).state;
+    const exposureBefore = state.modes.D05.cumulativeSparkExposure;
+    expect(state.modes.D05.sparkDurationS).toBeGreaterThan(0);
+    state = advanceDestructionState(state, frameInput({ theoreticalCurrentA: 5, isChatteringThisFrame: false, chatterFramesLeft: 0 }), config, motorRunContext(), DT).state;
+    expect(state.modes.D05.sparkDurationS).toBe(0);
+    expect(state.modes.D05.episodeTriggered).toBe(false);
+    expect(state.modes.D05.cumulativeSparkExposure).toBe(exposureBefore); // 非アクティブでもリセットしない
+  });
+
+  it('sparkDurationSがbrushSparkDurationLimitSへ到達した瞬間にjustCrossed=trueとなりepisodeが成立する(episodeCount=1・event発行・isFirstThisSession=true)', () => {
+    const config = d05Config(); // brushSparkDurationLimitS = 3*DT
+    let state = createInitialDestructionState('nonLipo');
+    let result;
+    for (let i = 1; i <= 3; i++) {
+      result = advanceDestructionState(state, frameInput({ theoreticalCurrentA: 5, currentA: 0, rpm: 200, isChatteringThisFrame: true, chatterFramesLeft: 3 - i }), config, motorRunContext(), DT);
+      state = result.state;
+    }
+    expect(state.modes.D05.episodeCount).toBe(1);
+    expect(state.modes.D05.firstEpisodeAtT).toBeCloseTo(3 * DT, 9);
+    expect(state.modes.D05.causeLog).not.toBeNull();
+    const event = result!.events.find((e) => e.mode === 'D05');
+    expect(event).toBeDefined();
+    if (event?.mode === 'D05') {
+      expect(event.isFirstThisSession).toBe(true);
+      expect(event.causeLog.temperature).toEqual({ kind: 'unavailable' });
+      expect(event.causeLog.currentA).toBe(0); // 正式Fable Q9裁定: チャタリング中の実電流は常に0
+      expect(event.causeLog.theoreticalCurrentA).toBe(5); // 理論遮断電流を別記
+      expect(event.causeLog.sparkDurationS).toBeCloseTo(3 * DT, 9);
+    }
+  });
+
+  it('2episode実経路: 1回目のepisode成立(isFirstThisSession:true)後、非アクティブ区間を挟んで2回目のepisodeが成立すると、event(isFirstThisSession:false・そのepisode固有のcauseLog)が発行されるが、D05Progress.causeLogは1回目のまま不変(必須DoD、4.3節)', () => {
+    const config = d05Config();
+    let state = createInitialDestructionState('nonLipo');
+    // 1回目のepisode
+    for (let i = 1; i <= 3; i++) {
+      state = advanceDestructionState(state, frameInput({ theoreticalCurrentA: 5, rpm: 100, isChatteringThisFrame: true, chatterFramesLeft: 3 - i }), config, motorRunContext(), DT).state;
+    }
+    const firstCauseLog = state.modes.D05.causeLog;
+    expect(state.modes.D05.episodeCount).toBe(1);
+
+    // 非アクティブ区間(再武装)
+    state = advanceDestructionState(state, frameInput({ theoreticalCurrentA: 5, isChatteringThisFrame: false, chatterFramesLeft: 0 }), config, motorRunContext(), DT).state;
+
+    // 2回目のepisode(rpmを変えて瞬間値の独立性を確認)
+    let result;
+    for (let i = 1; i <= 3; i++) {
+      result = advanceDestructionState(state, frameInput({ theoreticalCurrentA: 5, rpm: 999, isChatteringThisFrame: true, chatterFramesLeft: 3 - i }), config, motorRunContext(), DT);
+      state = result.state;
+    }
+    expect(state.modes.D05.episodeCount).toBe(2);
+    expect(state.modes.D05.causeLog).toEqual(firstCauseLog); // Progress.causeLogは初回のまま不変
+    const event = result!.events.find((e) => e.mode === 'D05');
+    expect(event).toBeDefined();
+    if (event?.mode === 'D05') {
+      expect(event.isFirstThisSession).toBe(false); // 2回目以降はfalse
+      expect(event.causeLog.rpm).toBe(999); // event自身のcauseLogはこのepisode固有の瞬間値
+    }
+  });
+
+  it('episode最大継続時間の到達可能性(必須DoD、4.3節): brushSparkDurationLimitSがCHATTER_BURST_FRAMES/120秒を超える較正値では、単一の連続バースト内でepisodeが構造的に到達不能になる', () => {
+    const config = d05Config({ brushSparkDurationLimitS: (CHATTER_BURST_FRAMES + 1) / 120 }); // 到達不能な較正値
+    let state = createInitialDestructionState('nonLipo');
+    // CHATTER_BURST_FRAMES回連続でチャタリング(バースト全長)させても閾値に届かない
+    for (let i = 0; i < CHATTER_BURST_FRAMES; i++) {
+      state = advanceDestructionState(state, frameInput({ theoreticalCurrentA: 5, isChatteringThisFrame: true, chatterFramesLeft: CHATTER_BURST_FRAMES - 1 - i }), config, motorRunContext(), DT).state;
+    }
+    expect(state.modes.D05.episodeCount).toBe(0);
+  });
+
+  it('cumulativeWearDeltaFraction: isSparkActive中、brushWearRateRatio×wearPerAmpSecond×excessCurrentA×dtが無次元差分として累積される(highCurrentPenalty=noPenalty、4.4節)', () => {
+    const config = d05Config({ brushWearRateRatio: 2, wearPerAmpSecond: 0.5, highCurrentPenalty: { kind: 'noPenalty' } });
+    let state = createInitialDestructionState('nonLipo');
+    state = advanceDestructionState(state, frameInput({ theoreticalCurrentA: 5, isChatteringThisFrame: true, chatterFramesLeft: 10 }), config, motorRunContext(), DT).state;
+    const excessCurrentA = 5 - config.d05.brushSparkCurrentThresholdA;
+    expect(state.modes.D05.cumulativeWearDeltaFraction).toBeCloseTo(excessCurrentA * DT * 2 * 0.5, 12);
+  });
+
+  it('cumulativeWearDeltaFraction: highCurrentPenalty=thresholdPenaltyかつtheoreticalCurrentAが閾値超のときのみ倍率が乗算される(4.4節)', () => {
+    const config = d05Config({ brushWearRateRatio: 1, wearPerAmpSecond: 1, highCurrentPenalty: { kind: 'thresholdPenalty', highCurrentPenaltyThresholdA: 4, highCurrentPenaltyMultiplier: 3 } });
+    let state = createInitialDestructionState('nonLipo');
+    // theoreticalCurrentA=5(閾値4を超える)→倍率3が乗算される
+    state = advanceDestructionState(state, frameInput({ theoreticalCurrentA: 5, isChatteringThisFrame: true, chatterFramesLeft: 10 }), config, motorRunContext(), DT).state;
+    const excessCurrentA = 5 - config.d05.brushSparkCurrentThresholdA;
+    expect(state.modes.D05.cumulativeWearDeltaFraction).toBeCloseTo(excessCurrentA * DT * 1 * 3 * 1, 12);
+  });
+
+  it('cumulativeWearDeltaFraction: highCurrentPenalty=thresholdPenaltyでもtheoreticalCurrentAが閾値以下なら倍率1のまま(ペナルティ不適用)', () => {
+    const config = d05Config({ brushWearRateRatio: 1, wearPerAmpSecond: 1, highCurrentPenalty: { kind: 'thresholdPenalty', highCurrentPenaltyThresholdA: 100, highCurrentPenaltyMultiplier: 3 } });
+    let state = createInitialDestructionState('nonLipo');
+    state = advanceDestructionState(state, frameInput({ theoreticalCurrentA: 5, isChatteringThisFrame: true, chatterFramesLeft: 10 }), config, motorRunContext(), DT).state;
+    const excessCurrentA = 5 - config.d05.brushSparkCurrentThresholdA;
+    expect(state.modes.D05.cumulativeWearDeltaFraction).toBeCloseTo(excessCurrentA * DT * 1 * 1 * 1, 12);
+  });
+
+  it('D05は常に非終端(triggeredフィールド自体を持たず、何度でもepisodeが成立しうる)ため、複数episode後もadvanceDestructionStateは呼び出し続けられる', () => {
+    const config = d05Config();
+    let state = createInitialDestructionState('nonLipo');
+    for (let episode = 0; episode < 3; episode++) {
+      for (let i = 1; i <= 3; i++) {
+        state = advanceDestructionState(state, frameInput({ theoreticalCurrentA: 5, isChatteringThisFrame: true, chatterFramesLeft: 3 - i }), config, motorRunContext(), DT).state;
+      }
+      state = advanceDestructionState(state, frameInput({ theoreticalCurrentA: 5, isChatteringThisFrame: false, chatterFramesLeft: 0 }), config, motorRunContext(), DT).state;
+    }
+    expect(state.modes.D05.episodeCount).toBe(3);
+  });
+
+  // ---------------------------------------------------------------------------
+  // 7.2節: 一時接触抵抗悪化の回復区間モデル(正式Fable P3-3-Q7裁定確定、候補a)
+  // ---------------------------------------------------------------------------
+
+  it('回復区間モデル: バースト終了検出(isChatteringThisFrame===true && chatterFramesLeft===0)の直後stepでrecoveryFramesLeft=config.recoveryFramesへ設定される', () => {
+    const config = d05Config({ recoveryFrames: 4 });
+    let state = createInitialDestructionState('nonLipo');
+    // 3フレームのバースト(chatterFramesLeft: 2,1,0)、theoreticalCurrentAは閾値以下にして
+    // episode自体は成立させず回復区間モデルの検出だけを見る。
+    for (const chatterFramesLeft of [2, 1, 0]) {
+      state = advanceDestructionState(state, frameInput({ theoreticalCurrentA: 0, isChatteringThisFrame: true, chatterFramesLeft }), config, motorRunContext(), DT).state;
+    }
+    expect(state.modes.D05.recoveryFramesLeft).toBe(4);
+  });
+
+  it('回復区間モデル: バースト終了後、非チャタリングが続く限りrecoveryFramesLeftが毎step1ずつ減算され、0で頭打ちになる', () => {
+    const config = d05Config({ recoveryFrames: 3 });
+    let state = createInitialDestructionState('nonLipo');
+    state = advanceDestructionState(state, frameInput({ theoreticalCurrentA: 0, isChatteringThisFrame: true, chatterFramesLeft: 0 }), config, motorRunContext(), DT).state;
+    expect(state.modes.D05.recoveryFramesLeft).toBe(3);
+    state = advanceDestructionState(state, frameInput({ theoreticalCurrentA: 0, isChatteringThisFrame: false, chatterFramesLeft: 0 }), config, motorRunContext(), DT).state;
+    expect(state.modes.D05.recoveryFramesLeft).toBe(2);
+    state = advanceDestructionState(state, frameInput({ theoreticalCurrentA: 0, isChatteringThisFrame: false, chatterFramesLeft: 0 }), config, motorRunContext(), DT).state;
+    expect(state.modes.D05.recoveryFramesLeft).toBe(1);
+    state = advanceDestructionState(state, frameInput({ theoreticalCurrentA: 0, isChatteringThisFrame: false, chatterFramesLeft: 0 }), config, motorRunContext(), DT).state;
+    expect(state.modes.D05.recoveryFramesLeft).toBe(0);
+    state = advanceDestructionState(state, frameInput({ theoreticalCurrentA: 0, isChatteringThisFrame: false, chatterFramesLeft: 0 }), config, motorRunContext(), DT).state;
+    expect(state.modes.D05.recoveryFramesLeft).toBe(0); // 頭打ち、負にならない
+  });
+
+  it('回復区間モデル: 回復区間中(recoveryFramesLeft>0)に新規チャタリングバーストが始まる(継続中、まだ終わらない)と、recoveryFramesLeftは直ちに0へリセットされる(新規バースト優先規則、P19是正)', () => {
+    const config = d05Config({ recoveryFrames: 5 });
+    let state = createInitialDestructionState('nonLipo');
+    state = advanceDestructionState(state, frameInput({ theoreticalCurrentA: 0, isChatteringThisFrame: true, chatterFramesLeft: 0 }), config, motorRunContext(), DT).state;
+    expect(state.modes.D05.recoveryFramesLeft).toBe(5);
+    // 回復区間中に新規バーストが始まる(このstepはまだ継続中、chatterFramesLeft>0で次stepへ持ち越す)
+    state = advanceDestructionState(state, frameInput({ theoreticalCurrentA: 0, isChatteringThisFrame: true, chatterFramesLeft: 3 }), config, motorRunContext(), DT).state;
+    expect(state.modes.D05.recoveryFramesLeft).toBe(0);
+  });
+
+  it('回復区間モデル: 回復区間中の新規バーストが再度終了した時点で、recoveryFramesLeftはconfig.recoveryFramesへ再設定される(毎回リセットして最新のバースト終了からの回復期間だけを数える)', () => {
+    const config = d05Config({ recoveryFrames: 5 });
+    let state = createInitialDestructionState('nonLipo');
+    state = advanceDestructionState(state, frameInput({ theoreticalCurrentA: 0, isChatteringThisFrame: true, chatterFramesLeft: 0 }), config, motorRunContext(), DT).state; // 1回目のバースト終了
+    expect(state.modes.D05.recoveryFramesLeft).toBe(5);
+    state = advanceDestructionState(state, frameInput({ theoreticalCurrentA: 0, isChatteringThisFrame: true, chatterFramesLeft: 2 }), config, motorRunContext(), DT).state; // 2回目のバースト開始(継続中)
+    expect(state.modes.D05.recoveryFramesLeft).toBe(0);
+    state = advanceDestructionState(state, frameInput({ theoreticalCurrentA: 0, isChatteringThisFrame: true, chatterFramesLeft: 1 }), config, motorRunContext(), DT).state; // 継続中
+    expect(state.modes.D05.recoveryFramesLeft).toBe(0);
+    state = advanceDestructionState(state, frameInput({ theoreticalCurrentA: 0, isChatteringThisFrame: true, chatterFramesLeft: 0 }), config, motorRunContext(), DT).state; // 2回目のバースト終了
+    expect(state.modes.D05.recoveryFramesLeft).toBe(5); // 再設定
+  });
+});
+
+// ---------------------------------------------------------------------------
 // P3-2ゲート3: D07(三段開示骨格)状態機械(計画v9 §2.5、正式Fable P3-2-Q2・Q3・Q11裁定確定)
 // ---------------------------------------------------------------------------
 
@@ -772,5 +1161,39 @@ describe('destructionModes.ts: advanceDestructionState — events固定順序(D0
       state = result.state;
     }
     expect(result!.events.map((e) => e.mode)).toEqual(['D01', 'D04', 'D07']);
+  });
+
+  it('D01・D02・D04(burning)・D05・D07が同一物理stepで同時発火する境界入力では、eventsが常に["D01","D02","D04","D05","D07"]の順で返る(P3-3ゲート3 DoD: D02・D05込みの固定順序)', () => {
+    const config = lipoDestructionConfig({
+      d02: { smokeGaugeThreshold: 0.02, coilOverheatGaugeLimit: 0.045, conductionScale: 1, dissipationCoefficient: 1e-9, smokeResistanceMultiplier: 1.2 },
+      battery: { profile: 'lipo', shortCircuitDurationLimitS: DT, runawayHeatThreshold: 1.0, unsafeDischargeStartRatio: 0.99, stageDurations: { swellingS: 2 * DT, smokingS: 3 * DT }, internalResistanceDegradationMultiplier: 1.5 },
+      d05: {
+        brushSparkDurationLimitS: 6 * DT,
+        brushSparkCurrentThresholdA: 2,
+        brushWearRateRatio: 1,
+        highCurrentPenalty: { kind: 'noPenalty' },
+        wearPerAmpSecond: 0.1,
+        recoveryFrames: 4,
+        recoveryContactResistanceMultiplier: 1.5,
+      },
+      d07: { thermal: { conductionCoefficient: 1, dissipationCoefficient: 1e-9 }, irreversible: { kind: 'demagnetizing', magnetHeatGaugeLimit: 0.045, reversibleDroopThreshold: 0.01, reversibleDroopMultiplier: 0.95, demagnetizationDeltaFraction: 0.1 } },
+    });
+    let state = createInitialDestructionState('lipo');
+    let result: ReturnType<typeof advanceDestructionState> | undefined;
+    // 全モードとも6フレーム目でちょうど閾値を超えるよう較正済み(D02/D07はcoilLossW=1・
+    // currentA=1・conductionScale=1・dissipationCoefficient≈0によりratio≈n/120、
+    // limit=0.045は5フレーム目(0.0417)未満・6フレーム目(0.05)超。D05はbrushSparkDurationLimitS
+    // =6*DTにより6フレーム連続のisSparkActiveでちょうど到達。D01/D04は既存calibrationのまま)。
+    for (let i = 1; i <= 6; i++) {
+      result = advanceDestructionState(
+        state,
+        frameInput({ shorted: true, batteryHeat: 1.0, coilCollapsedRisingEdge: i === 6, coilLossW: 1, theoreticalCurrentA: 5, isChatteringThisFrame: true, chatterFramesLeft: 0 }),
+        config,
+        vehicleRunContextWithFireExposure(),
+        DT,
+      );
+      state = result.state;
+    }
+    expect(result!.events.map((e) => e.mode)).toEqual(['D01', 'D02', 'D04', 'D05', 'D07']);
   });
 });

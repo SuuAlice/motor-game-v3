@@ -40,9 +40,18 @@ function goodMotorConfig(): MotorConfig {
 function goodDestructionConfig(): DestructionConfig {
   return {
     battery: { profile: 'lipo', shortCircuitDurationLimitS: 2, runawayHeatThreshold: 0.9, unsafeDischargeStartRatio: 0.9, stageDurations: { swellingS: 1, smokingS: 1 }, internalResistanceDegradationMultiplier: 1.5 },
-    d02: { smokeGaugeThreshold: 0.6, coilOverheatGaugeLimit: 1 },
+    d01: { decayExposureScaleRad: 1000, minEffectiveTurnsRatio: 0.5 },
+    d02: { smokeGaugeThreshold: 0.6, coilOverheatGaugeLimit: 1, conductionScale: 0.1, dissipationCoefficient: 0.1, smokeResistanceMultiplier: 1.2 },
     d04: { bodyScorchDeltaFraction: 0.2, magnetScorchDeltaFraction: 0.15 },
-    d05: { brushSparkDurationLimitS: 0.5, brushSparkCurrentThresholdA: 3 },
+    d05: {
+      brushSparkDurationLimitS: 0.15,
+      brushSparkCurrentThresholdA: 3,
+      brushWearRateRatio: 1,
+      highCurrentPenalty: { kind: 'thresholdPenalty', highCurrentPenaltyThresholdA: 8, highCurrentPenaltyMultiplier: 1.5 },
+      wearPerAmpSecond: 0.001,
+      recoveryFrames: 6,
+      recoveryContactResistanceMultiplier: 1.2,
+    },
     d06: { breakage: { kind: 'breakable', gearStrengthThresholdNm: 0.5 } },
     d07: {
       thermal: { conductionCoefficient: 0.1, dissipationCoefficient: 0.05 },

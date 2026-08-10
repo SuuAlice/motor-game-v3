@@ -18,6 +18,9 @@ import type { CarConfig } from '../vehiclePhysics';
 // batteryInternalResistanceRatio/batteryCapacityRatio)を含む、全オプショナル
 // フィールドを明示設定した構成。RECIPE_M_FIELD_KEYSとのドリフト検査(後述)の
 // fixtureとして使うため、MotorConfigの全optionalフィールドを省略しないこと。
+// P3-3(正式Fable P3-3-Q10裁定確定)でbrushContactResistanceRatio/brushChatterProbabilityRatio
+// (bcr/bpr)を追加。effectiveTurnsRatioは実行時合成値でありrecipeCodeへ追従しない
+// (P3-3-Q12裁定で確定済みの区別)ため、ここには含めない。
 function fullMotorConfig(overrides: Partial<MotorConfig> = {}): MotorConfig {
   return {
     coilTurns: 80,
@@ -35,6 +38,8 @@ function fullMotorConfig(overrides: Partial<MotorConfig> = {}): MotorConfig {
     wireDensityRatio: 1,
     batteryInternalResistanceRatio: 1,
     batteryCapacityRatio: 1,
+    brushContactResistanceRatio: 1,
+    brushChatterProbabilityRatio: 1,
     ...overrides,
   };
 }
@@ -447,6 +452,11 @@ describe('recipeCode(MC3-/MC2-/M15-)', () => {
       expect(decoded.motorConfig.wireDensityRatio).toBe(1);
       expect(decoded.motorConfig.batteryInternalResistanceRatio).toBe(1);
       expect(decoded.motorConfig.batteryCapacityRatio).toBe(1);
+      // P3-3(正式Fable P3-3-Q10裁定確定、Suu再照合是正): 旧MC3 payload(bcr/bprキーを
+      // 持たない、validRawFieldsがまさにその代表例)をデコードした場合もbcr/bprが
+      // 両方fallback=1(=カーボンanchor)へ意味論的に正しく復元される(MC3版上げ不要の根拠)。
+      expect(decoded.motorConfig.brushContactResistanceRatio).toBe(1);
+      expect(decoded.motorConfig.brushChatterProbabilityRatio).toBe(1);
     });
 
     it('null・文字列型等の型不一致はfallback=1.0になる', () => {
@@ -523,7 +533,7 @@ describe('recipeCode(MC3-/MC2-/M15-)', () => {
     'coilTurns', 'slitWidthMm', 'sandingQuality', 'brushPressure', 'magnetStrength',
     'magnetDistanceMm', 'batteryVoltage', 'axisOffsetMm', 'wireGaugeMm', 'parallelStrands',
     'varnished', 'wireResistivityRatio', 'wireDensityRatio', 'batteryInternalResistanceRatio',
-    'batteryCapacityRatio',
+    'batteryCapacityRatio', 'brushContactResistanceRatio', 'brushChatterProbabilityRatio',
   ] as const;
   const EXPECTED_CAR_CONFIG_KEYS = [
     'massG', 'gearRatio', 'gearEfficiency', 'wheelDiameterMm', 'tireGrip',
@@ -540,6 +550,8 @@ describe('recipeCode(MC3-/MC2-/M15-)', () => {
       expect(keys).toContain('wireDensityRatio');
       expect(keys).toContain('batteryInternalResistanceRatio');
       expect(keys).toContain('batteryCapacityRatio');
+      expect(keys).toContain('brushContactResistanceRatio');
+      expect(keys).toContain('brushChatterProbabilityRatio');
     });
 
     it('fullCarConfig()/fullAppearance()もRECIPE_C_FIELD_KEYS/RECIPE_A_FIELD_KEYSと件数・集合が一致する', () => {
@@ -614,6 +626,58 @@ describe('recipeCode(MC3-/MC2-/M15-)', () => {
       expect(decoded.motorConfig.wireDensityRatio).toBe(1.5);
       expect(decoded.motorConfig.batteryInternalResistanceRatio).toBe(10);
       expect(decoded.motorConfig.batteryCapacityRatio).toBe(10);
+    });
+  });
+
+  describe('23. P3-3-Q14: encodeRecipeのeffectiveTurnsRatio fail-fast(正式Fable裁定確定、候補c)', () => {
+    it('effectiveTurnsRatioがundefinedのMotorConfigはthrowしない(成功系、既存呼び出しの無改修動作を固定)', () => {
+      const recipe = fullRecipe();
+      expect(() => encodeRecipe(recipe)).not.toThrow();
+    });
+
+    it('effectiveTurnsRatioが1のMotorConfigはthrowしない(base configとして正当な値)', () => {
+      const recipe = fullRecipe({ motorConfig: fullMotorConfig({ effectiveTurnsRatio: 1 }) });
+      expect(() => encodeRecipe(recipe)).not.toThrow();
+    });
+
+    it('effectiveTurnsRatioが1未満のMotorConfigはRecipeCodeErrorをthrowし、文言にP3-3-Q14を含む', () => {
+      const recipe = fullRecipe({ motorConfig: fullMotorConfig({ effectiveTurnsRatio: 0.7 }) });
+      expect(() => encodeRecipe(recipe)).toThrow(RecipeCodeError);
+      expect(() => encodeRecipe(recipe)).toThrow(/P3-3-Q14/);
+    });
+
+    it('effectiveTurnsRatioが1超のMotorConfigもRecipeCodeErrorをthrowし、文言にP3-3-Q14を含む', () => {
+      const recipe = fullRecipe({ motorConfig: fullMotorConfig({ effectiveTurnsRatio: 1.3 }) });
+      expect(() => encodeRecipe(recipe)).toThrow(RecipeCodeError);
+      expect(() => encodeRecipe(recipe)).toThrow(/P3-3-Q14/);
+    });
+  });
+
+  describe('24. P3-3-Q10: bcr/bprの非既定値round-trip(Suu再照合是正、取り違え・片方脱落の検出)', () => {
+    it('brushContactResistanceRatio/brushChatterProbabilityRatioへ異なる非既定値を設定すると、それぞれ元のフィールドへ独立に保持される', () => {
+      const recipe = fullRecipe({
+        motorConfig: fullMotorConfig({
+          brushContactResistanceRatio: 1.25,
+          brushChatterProbabilityRatio: 0.75,
+        }),
+      });
+      const decoded = decodeRecipe(encodeRecipe(recipe));
+      // 値を意図的に非対称にすることで、bcr/bprの取り違え(キーの実装ミスによる
+      // 入れ替わり)や片方だけのfallback脱落を検出できるようにする。
+      expect(decoded.motorConfig.brushContactResistanceRatio).toBe(1.25);
+      expect(decoded.motorConfig.brushChatterProbabilityRatio).toBe(0.75);
+    });
+
+    it('brushContactResistanceRatio/brushChatterProbabilityRatioを入れ替えた値でも独立に保持される(取り違えバグの反証)', () => {
+      const recipe = fullRecipe({
+        motorConfig: fullMotorConfig({
+          brushContactResistanceRatio: 0.6,
+          brushChatterProbabilityRatio: 2.0,
+        }),
+      });
+      const decoded = decodeRecipe(encodeRecipe(recipe));
+      expect(decoded.motorConfig.brushContactResistanceRatio).toBe(0.6);
+      expect(decoded.motorConfig.brushChatterProbabilityRatio).toBe(2.0);
     });
   });
 });

@@ -67,6 +67,23 @@ export interface MotorConfig {
   // MotorConfig所属を確定済み: 実レシピCPUが「レシピ+シードのみ」で定義される
   // 規約と整合するため)。motorPhysics.ts側の物理式には一切関与しない。
   batteryCapacityRatio?: number; // 既定1.0。エネルギー予算(BATTERY_CAPACITY_J_*)の倍率
+  // 正式Fable P3-3-Q5裁定(確定、2026-08-09): D01漸減(P3-1-Q1返済)が磁気結合の2式
+  // (backEmf・tMag)へのみ適用する係数。既定1.0で既存の全計算結果と完全一致する
+  // (Phase2 Step5aと同じ後方互換オプショナル乗数パターン)。実効巻数と占積の健全性を
+  // まとめた単一の磁気結合率であり、R_coil/Jは実coilTurnsのまま据え置く(導線の実在
+  // 質量・線長は変化させない)。backEmf/tMagへ同一係数を掛けるのはエネルギー整合
+  // (K_E=K_T相反性: 逆起電力仕事=機械仕事、片方だけ劣化させるとエネルギー保存が破れる)
+  // の要請である。式への実結線(computeElectricalState/computeMagneticTorque)は
+  // P3-3ゲート4/checkpoint4で完了済み。
+  effectiveTurnsRatio?: number;
+  // 正式Fable P3-3-Q6裁定(確定): ブラシ素材写像のMotorConfig層(既定1.0)。
+  // computeContactResistanceの戻り値への乗数。式への実結線はP3-3ゲート4/checkpoint4で
+  // 完了済み。
+  brushContactResistanceRatio?: number;
+  // 正式Fable P3-3-Q6裁定(確定): ブラシ素材写像のMotorConfig層(既定1.0)。
+  // nextChatterState内のチャタリング確率prob計算への乗数。式への実結線はP3-3ゲート4/
+  // checkpoint4で完了済み(P35是正の最終prob [0,1] clamp込み)。
+  brushChatterProbabilityRatio?: number;
 }
 
 export interface SimState {
@@ -118,10 +135,12 @@ function computeCoggingB(magnetStrength: number, magnetDistanceMm: number): numb
 // spec §3.3: 「削り残し度」と「ブラシ圧」から算出(圧が弱いほど・削り残しが多いほど大)。
 // 指数減衰+floorで実装(spec表にない追加定数、constants.ts参照)。
 export function computeContactResistance(config: MotorConfig): number {
-  return (
+  const base =
     R_CONTACT_FLOOR +
-    R_CONTACT_SCALE * Math.exp(-K_SANDING * config.sandingQuality) * Math.exp(-K_PRESSURE * config.brushPressure)
-  );
+    R_CONTACT_SCALE * Math.exp(-K_SANDING * config.sandingQuality) * Math.exp(-K_PRESSURE * config.brushPressure);
+  // 正式Fable P3-3-Q6裁定(確定、6.2節): ブラシ素材写像のMotorConfig層。既定1.0で
+  // 既存の全計算結果と完全一致する後方互換オプショナル乗数(P3-3ゲート4/checkpoint4)。
+  return base * resolveBrushContactResistanceRatio(config);
 }
 
 // spec-v1.5.md §2.1: 線径・並列巻きに依存する抵抗・慣性・巻ける上限。
@@ -148,6 +167,22 @@ function resolveWireDensityRatio(config: MotorConfig): number {
 
 function resolveBatteryInternalResistanceRatio(config: MotorConfig): number {
   return config.batteryInternalResistanceRatio ?? 1;
+}
+
+// 正式Fable P3-3-Q5裁定(確定、2026-08-09): D01漸減(P3-1-Q1返済)の実効巻数・占積率。
+// 式への実結線(P3-3ゲート4/checkpoint4)。
+function resolveEffectiveTurnsRatio(config: MotorConfig): number {
+  return config.effectiveTurnsRatio ?? 1;
+}
+
+// 正式Fable P3-3-Q6裁定(確定): ブラシ素材写像のMotorConfig層。式への実結線
+// (P3-3ゲート4/checkpoint4)。
+function resolveBrushContactResistanceRatio(config: MotorConfig): number {
+  return config.brushContactResistanceRatio ?? 1;
+}
+
+function resolveBrushChatterProbabilityRatio(config: MotorConfig): number {
+  return config.brushChatterProbabilityRatio ?? 1;
 }
 
 function computeRCoilPerTurn(wireGaugeMm: number, parallelStrands: number): number {
@@ -200,6 +235,7 @@ function resolveEffectiveBatteryInternalResistance(config: MotorConfig): number 
 // (Phase3バランス調整で追加。spec §3.5の「瞬断」の実装詳細)。
 function nextChatterState(
   brushPressure: number,
+  chatterProbabilityRatio: number,
   framesLeft: number,
   rng: Rng,
 ): { chattering: boolean; framesLeft: number } {
@@ -209,8 +245,14 @@ function nextChatterState(
   if (brushPressure >= CHATTER_PRESSURE_THRESHOLD) {
     return { chattering: false, framesLeft: 0 };
   }
-  const prob =
+  const rawProb =
     (CHATTER_MAX_PROB * (CHATTER_PRESSURE_THRESHOLD - brushPressure)) / CHATTER_PRESSURE_THRESHOLD;
+  // 正式Fable P3-3-Q6裁定(確定、6.2節): ブラシ素材写像のMotorConfig層(P3-3ゲート4/
+  // checkpoint4)。P35是正(構造的安全網、二次防御): 較正値バリデータ(prob×ratio<=1を
+  // 要求、11.2節)とは別に、player-adjustable値(brushPressure)との組み合わせで想定外の
+  // 値になった場合に備え、実装自身が最終probを[0,1]へclampする(既存coilHeatGaugeRatioの
+  // [0,1] clampと同じ二重防御の規律)。
+  const prob = Math.min(1, Math.max(0, rawProb * chatterProbabilityRatio));
   if (rng() < prob) {
     return { chattering: true, framesLeft: CHATTER_BURST_FRAMES - 1 };
   }
@@ -298,7 +340,11 @@ export function computeElectricalState(config: MotorConfig, theta: number, omega
   const deadZone = isInDeadZone(theta, config.slitWidthMm);
   const shorted = config.slitWidthMm <= 0;
   const B = computeB(config.magnetStrength, config.magnetDistanceMm);
-  const backEmf = K_E * B * config.coilTurns * omega * sinTheta * s;
+  // 正式Fable P3-3-Q5裁定(確定、5.3節): 実効巻数・占積の単一磁気結合率。backEmf/tMagへ
+  // 同一係数を適用するのはエネルギー整合の要請である(K_E=K_T相反性: 逆起電力仕事=機械仕事、
+  // 片方だけ劣化させるとエネルギー保存が破れる)。R_coil/Jは実coilTurnsのまま据え置く
+  // (導線の実在質量・線長は変化させない、P3-3ゲート4/checkpoint4)。
+  const backEmf = K_E * B * config.coilTurns * resolveEffectiveTurnsRatio(config) * omega * sinTheta * s;
   const rBatteryInternal = resolveEffectiveBatteryInternalResistance(config);
   const rCoil = computeRCoilPerTurn(wireGaugeMm, parallelStrands) * config.coilTurns * resolveWireResistivityRatio(config);
   const rContact = computeContactResistance(config);
@@ -312,7 +358,9 @@ export function computeElectricalState(config: MotorConfig, theta: number, omega
 export function computeMagneticTorque(config: MotorConfig, electrical: MotorElectricalState, current: number): number {
   return electrical.shorted || electrical.deadZone
     ? 0
-    : K_T * electrical.B * current * config.coilTurns * electrical.sinTheta * electrical.commutationSign;
+    // 正式Fable P3-3-Q5裁定(確定): backEmfと同一のeffectiveTurnsRatioを適用する
+    // (K_E=K_T相反性、上記computeElectricalStateのコメント参照)。
+    : K_T * electrical.B * current * config.coilTurns * resolveEffectiveTurnsRatio(config) * electrical.sinTheta * electrical.commutationSign;
 }
 
 // spec-v1.5.md §3.1: コギングは「近いと強く効くが、中距離〜遠距離では無視できる」
@@ -410,7 +458,7 @@ export function evaluateMotorFrame(
 
   // チャタリング判定(rng消費①、条件付き)。T_magの計算前に電流へ反映させることで、
   // 瞬断フレームでは磁気トルクもゼロになる(ブラシ圧弱すぎ→不安定、を物理的に再現)。
-  const chatterState = nextChatterState(config.brushPressure, state.chatterFramesLeft, rng);
+  const chatterState = nextChatterState(config.brushPressure, resolveBrushChatterProbabilityRatio(config), state.chatterFramesLeft, rng);
   if (chatterState.chattering) {
     current = 0;
   }

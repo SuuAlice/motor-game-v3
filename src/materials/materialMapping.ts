@@ -12,7 +12,7 @@ import {
   applyMassAdjustmentToBaselineG,
   type WindingParams,
 } from './assumedGeometry';
-import { BATTERY_MATERIALS, BODY_MATERIALS, GEAR_MATERIALS, MAGNET_MATERIALS, WIRE_MATERIALS, type BatteryMaterial, type GearMaterial, type MagnetMaterial, type WireMaterial } from './materials';
+import { BATTERY_MATERIALS, BODY_MATERIALS, BRUSH_MATERIALS, GEAR_MATERIALS, MAGNET_MATERIALS, WIRE_MATERIALS, type BatteryMaterial, type GearMaterial, type MagnetMaterial, type WireMaterial } from './materials';
 import type { MotorConfig } from '../engine/motorPhysics';
 import type { CarConfig } from '../engine/vehiclePhysics';
 import type { BatteryDestructionConfig, DestructionConfig } from '../engine/destructionOrchestration';
@@ -23,6 +23,10 @@ export type WireMaterialId = (typeof WIRE_MATERIALS)[number]['id'];
 export type BatteryMaterialId = (typeof BATTERY_MATERIALS)[number]['id'];
 // 正式Fable P3-2裁定(0.2節): 既存Gear/Magnet/Wire/Batteryと同じexportパターンを踏襲する新規export。
 export type BodyMaterialId = (typeof BODY_MATERIALS)[number]['id'];
+// P3-3 Gate2(合意事項): Gate1計画表の「BrushMaterialId型宣言のみ本ゲートに残す」という文言と
+// §14.1「materialMapping.tsでexport」という文言が計画v8内で競合していたが、Gear/Magnet/Wire/
+// Battery/Bodyと同じくmaterialMapping.ts側でのexportが正である合意に基づき、ここでexportする。
+export type BrushMaterialId = (typeof BRUSH_MATERIALS)[number]['id'];
 
 /**
  * ギヤ材質の効率比率(設計較正値、カタログ物性ではない)。
@@ -287,6 +291,9 @@ export interface MaterialSelection {
   // 実装追加(下記composeConfigFromMaterials)を同時に行い、有効な入力を受理しながら
   // 結果へ反映しない「受理するが無視する」状態を作らない。
   batteryId: BatteryMaterialId;
+  // P3-3 Gate2で追加(必須フィールド、Q10確定)。batteryIdと同じ規律で型追加と
+  // composeConfigFromMaterialsへの反映を同時に行う。
+  brushId: BrushMaterialId;
 }
 
 export type ComposeConfigResult =
@@ -328,6 +335,8 @@ export function composeConfigFromMaterials(
   if (!gear) return { ok: false, reason: `${selection.gearId}: 未登録のギヤ素材IDです` };
   const battery = BATTERY_MATERIALS.find((m) => m.id === selection.batteryId);
   if (!battery) return { ok: false, reason: `${selection.batteryId}: 未登録の電池素材IDです` };
+  const brush = BRUSH_MATERIALS.find((m) => m.id === selection.brushId);
+  if (!brush) return { ok: false, reason: `${selection.brushId}: 未登録のブラシ素材IDです` };
 
   const wireResistivityRatio = computeWireResistivityRatio(wire);
   if (!wireResistivityRatio.ok) return wireResistivityRatio;
@@ -354,6 +363,8 @@ export function composeConfigFromMaterials(
   const massG = applyMassAdjustmentToBaselineG(baseline.chassisBaselineG, massDelta.deltaG);
   if (!massG.ok) return massG;
 
+  const brushRatios = mapBrushRatios(selection.brushId);
+
   return {
     ok: true,
     motorConfig: {
@@ -363,6 +374,8 @@ export function composeConfigFromMaterials(
       magnetStrength: magnetStrength.magnetStrength,
       batteryInternalResistanceRatio: batteryInternalResistanceRatio.ratio,
       batteryCapacityRatio: batteryCapacityRatio.ratio,
+      brushContactResistanceRatio: brushRatios.brushContactResistanceRatio,
+      brushChatterProbabilityRatio: brushRatios.brushChatterProbabilityRatio,
     },
     carConfig: {
       ...baseCarConfig,
@@ -593,4 +606,123 @@ export function mapD07DestructionConfig(magnetId: MagnetMaterialId): Destruction
     return { thermal, irreversible: { kind: 'nonDemagnetizing' } };
   }
   return { thermal, irreversible: { kind: 'demagnetizing', ...D07_DEMAGNETIZING_CANDIDATE } };
+}
+
+// ---------------------------------------------------------------------------
+// P3-3 Gate2: ブラシ素材(D05摩耗+MotorConfig接触抵抗/チャタリング確率比較正)
+// ---------------------------------------------------------------------------
+
+// 正式Fable P3-3-Q10裁定(確定、6.2〜6.3節): ブラシ素材はMotorConfig層(接触抵抗・
+// チャタリング確率の比率、motorPhysics.tsへの式配線自体はGate4)とDestructionConfig.d05層
+// (摩耗率・高電流ペナルティ、6.2節「Layer2」)の2層にまたがって影響する。本テーブルは
+// MotorConfig層のみを扱う。brush-carbon(標準・自己潤滑)を比率1.0のanchorとし、他素材は
+// 定性記述(materials.ts BRUSH_MATERIALS各descriptionJa)に基づく設計較正値とする:
+// - brush-copper-plate(「V1以来の原点。摩耗大」): 接触抵抗のみ悪化(摩耗はD05層の責務)。
+//   素の銅は良導体だが、実物の銅板ブラシは使用中に酸化被膜(半導体的な酸化銅)が形成され
+//   接触抵抗が急速に悪化・不安定化する——これがcontactResistanceRatio>1(悪化)の物理的根拠
+//   であり、導電率の高さと矛盾しない(正式Fable P3-3-Q15-2裁定、酸化被膜所見)。
+// - brush-silver-graphite(「低接触抵抗」): 接触抵抗のみ改善。チャタリング確率・摩耗は
+//   anchorから変更しない(6.3節の非線形性表〈正式Fable P3-3-Q15-5裁定で精密化済み〉:
+//   銀黒鉛は高電流域でも低接触抵抗の優位を保つが、摩耗率はカーボンと同値という設計方針
+//   のため、摩耗側の変更はmapD05BrushWearConfig側でも行わない)。
+// - brush-precious-metal(「低電流で抜群、大電流で急速に荒れる」): 接触抵抗・チャタリング
+//   確率の双方を改善(低電流域での性能の良さをここで表現)。大電流域での急速な荒れは
+//   mapD05BrushWearConfigのhighCurrentPenaltyで別途表現する(このテーブルでは表現しない)。
+// 最小較正自由度の方針(6.3節)により、記述に根拠のない比率変更は行わない。
+//
+// 正式Fable P3-3-Q15-2裁定(確定、2026-08-10): 接触抵抗ratioの順位(銅板1.3>カーボン1.0>
+// 銀黒鉛0.7>貴金属0.5)を含む6値すべてを暫定候補値として承認する(6.3節の受け入れ表と
+// 実物のブラシ産業の双方に整合)。確定はゲート5のsweepで以下を満たすことによる:
+// (i)少なくとも銅板・貴金属の両極間で、接触抵抗ratio差が定常計測で観測可能であること
+// (D07 Q2 sweepと同型の観測可能性確認)。(ii)6.3節既定の受け入れ条件(両電流域での
+// 順位実証・prob clamp・NORMAL_OPERATION拡張列)はすべて維持する。値の確定経路は
+// 11.1節末尾の「Fable候補裁定→sweep→確定申請→人間commit承認」に従う。
+const BRUSH_MOTOR_CONFIG_RATIO_CANDIDATE: Record<BrushMaterialId, { brushContactResistanceRatio: number; brushChatterProbabilityRatio: number }> = {
+  'brush-carbon': { brushContactResistanceRatio: 1, brushChatterProbabilityRatio: 1 },
+  'brush-copper-plate': { brushContactResistanceRatio: 1.3, brushChatterProbabilityRatio: 1 },
+  'brush-silver-graphite': { brushContactResistanceRatio: 0.7, brushChatterProbabilityRatio: 1 },
+  'brush-precious-metal': { brushContactResistanceRatio: 0.5, brushChatterProbabilityRatio: 0.7 },
+};
+
+/**
+ * ブラシ素材→MotorConfig層(brushContactResistanceRatio・brushChatterProbabilityRatio)の
+ * 写像純関数(Record全網羅、BrushMaterialIdへ新規ティア追加時はTypeScriptの型検査で
+ * 更新漏れを検出する)。物理式(motorPhysics.ts)への実配線はGate4で行う——本関数はGate2
+ * 時点では比率値の算出のみを担い、composeConfigFromMaterials経由でMotorConfigへ格納する。
+ */
+export function mapBrushRatios(brushId: BrushMaterialId): { brushContactResistanceRatio: number; brushChatterProbabilityRatio: number } {
+  return { ...BRUSH_MOTOR_CONFIG_RATIO_CANDIDATE[brushId] };
+}
+
+// 正式Fable P3-3-Q10裁定(確定、6.2〜6.3節): DestructionConfig.d05層(摩耗率・高電流
+// ペナルティ)。brush-carbonをbrushWearRateRatio=1.0のanchorとし、高電流ペナルティなし。
+// - brush-copper-plate: 摩耗率のみ悪化(「摩耗大」)。高電流ペナルティなし(既存の摩耗率
+//   悪化で「大電流に弱い」全般傾向は既に表現されており、二重にペナルティを課さない)。
+// - brush-silver-graphite: 摩耗率はanchorから変更しない(MotorConfig層コメント参照。
+//   低接触抵抗という利点はMotorConfig層のみで表現する)。高電流ペナルティなし(正式Fable
+//   P3-3-Q15-5裁定、確定案i: 6.3節の受け入れ表「銀黒鉛は高電流域でも摩耗率がカーボンより
+//   有利」という記述は物性の発明にあたるため、表を「摩耗率はカーボンと同値、優位は
+//   低接触抵抗のみ」へ精密化する側で確定した。spec/materials.ts原文が摩耗優位を
+//   記述していない以上、wearRateRatio<1を写像する設計〈案ii〉は不採用)。
+// - brush-precious-metal: 低電流域の摩耗率はanchorより良い値とし、6.3節の非線形性
+//   (「大電流で急速に荒れる」)を高電流ペナルティとして表現する唯一の素材とする。他3素材は
+//   該当描写がなくペナルティを発明しないため、ペナルティなしとする。
+//
+// 正式Fable P3-3-Q15-4裁定(確定、2026-08-10、人間再承認対象): 「ペナルティなし」を
+// `highCurrentPenaltyThresholdA`の番兵値(999、根拠のない捏造値)で表現していた設計は、
+// P3-2-Q11で同型の番兵値(閾値1000)を却下した先例と矛盾するため撤回する。D07の
+// irreversible判別unionと同じ「不正状態を構築不能にする」原則に従い、
+// `{ kind: 'noPenalty' }`(ペナルティ関連フィールドを一切持たない)と
+// `{ kind: 'thresholdPenalty' }`(閾値・倍率を持つ、multiplier>1厳密)の判別unionへ変更した。
+//
+// 正式Fable P3-3-Q15-3裁定(確定): brush-precious-metalの高電流ペナルティ具体値
+// (threshold=3A・multiplier=2.5)を暫定候補値として承認する。本エンジンの電流域
+// (通常運用1〜2A級、held-short/失速域で数A超)に対し3Aは「通常域の上端〜虐待域の入口」に
+// 座る妥当な出発点。確定はゲート5のsweepで以下3条件を満たすことによる: (i)NORMAL_OPERATION
+// 構成では理論電流が閾値を超えず、貴金属が通常域で全軸最良のままであること。(ii)高負荷構成
+// (M4条件2型)のスパークepisode中に理論電流が閾値を超え、貴金属の実効摩耗率(0.7×2.5=1.75)が
+// カーボン・銀黒鉛(1.0)を上回る順位逆転が実測されること。(iii)副次的帰結として貴金属(1.75)が
+// 銅板(1.5)をも上回り高電流域の最下位になることは承認済み表と矛盾しないが、実測時に明示的に
+// 観測・報告し確定申請に記載すること(実物の貴金属接点がアーク下で破滅的に荒れるという物理と
+// 整合)。不充足時の調整順は倍率より先に閾値を動かす(閾値がレジーム境界を支配するため)。
+const D05_BRUSH_WEAR_CANDIDATE: Record<
+  BrushMaterialId,
+  { brushWearRateRatio: number; highCurrentPenalty: { kind: 'noPenalty' } | { kind: 'thresholdPenalty'; highCurrentPenaltyThresholdA: number; highCurrentPenaltyMultiplier: number } }
+> = {
+  'brush-carbon': { brushWearRateRatio: 1, highCurrentPenalty: { kind: 'noPenalty' } },
+  'brush-copper-plate': { brushWearRateRatio: 1.5, highCurrentPenalty: { kind: 'noPenalty' } },
+  'brush-silver-graphite': { brushWearRateRatio: 1, highCurrentPenalty: { kind: 'noPenalty' } },
+  'brush-precious-metal': { brushWearRateRatio: 0.7, highCurrentPenalty: { kind: 'thresholdPenalty', highCurrentPenaltyThresholdA: 3, highCurrentPenaltyMultiplier: 2.5 } },
+};
+
+/**
+ * ブラシ素材→DestructionConfig.d05層(素材ごとに変わる部分のみ)の写像純関数(Record全網羅)。
+ * wearPerAmpSecond等のd05共通部(素材非依存)は含まない——共通部との合成はassembleD05Configが
+ * 担う(責務分離。本関数は素材依存の2フィールドのみを返す)。
+ */
+export function mapD05BrushWearConfig(
+  brushId: BrushMaterialId,
+): { brushWearRateRatio: number; highCurrentPenalty: { kind: 'noPenalty' } | { kind: 'thresholdPenalty'; highCurrentPenaltyThresholdA: number; highCurrentPenaltyMultiplier: number } } {
+  return { ...D05_BRUSH_WEAR_CANDIDATE[brushId] };
+}
+
+/**
+ * mapD05BrushWearConfigの素材依存部と、d05共通部(brushSparkDurationLimitS等、
+ * 素材によらない較正値)を合成し、完成したDestructionConfig['d05']を返す純関数
+ * (正式Fable P3-3-Q13裁定、確定候補b)。戻り値型を明示的にDestructionConfig['d05']へ
+ * 注釈することで、d05に将来フィールドが追加された際、本関数がその新規フィールドを
+ * 埋め忘れるとTypeScriptの型検査(戻り値の構造的部分型チェック)がコンパイル時に
+ * 検出する——「共通部の埋め忘れ不能性」をテストではなく型システムで保証する設計。
+ */
+export function assembleD05Config(
+  materialPart: { brushWearRateRatio: number; highCurrentPenalty: { kind: 'noPenalty' } | { kind: 'thresholdPenalty'; highCurrentPenaltyThresholdA: number; highCurrentPenaltyMultiplier: number } },
+  commonPart: {
+    brushSparkDurationLimitS: number;
+    brushSparkCurrentThresholdA: number;
+    wearPerAmpSecond: number;
+    recoveryFrames: number;
+    recoveryContactResistanceMultiplier: number;
+  },
+): DestructionConfig['d05'] {
+  return { ...commonPart, ...materialPart };
 }

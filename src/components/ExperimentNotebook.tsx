@@ -31,6 +31,9 @@ const CONFIG_LABELS: Record<keyof MotorConfig, [string, string]> = {
   wireDensityRatio: ['導線密度', '比'],
   batteryInternalResistanceRatio: ['電池内部抵抗', '比'],
   batteryCapacityRatio: ['電池容量', '比'],
+  effectiveTurnsRatio: ['実効巻数(磁気結合率)', '比'],
+  brushContactResistanceRatio: ['ブラシ接触抵抗', '比'],
+  brushChatterProbabilityRatio: ['ブラシ接触不良確率', '比'],
 };
 
 function displayConfigValue(config: MotorConfig, key: keyof MotorConfig): string {
