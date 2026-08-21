@@ -125,3 +125,12 @@ Phase 0(alice、完了): リポジトリ初期化(同一履歴上、案A)・base
 - 役割境界: `src/engine/`への変更はaliceのみがコミットする。エンジンAPIの変更が必要な場合はagmsgでaliceに依頼し、aliceがテスト込みで実装する
 - コミットメッセージに担当エージェント名を含める(例: `feat(engine): 素材写像層の実装 [alice]`)
 - **`CLAUDE.md` と `AGENTS.md` は常に同内容に保つこと。** どちらかを更新したら必ず他方も同じ内容に更新する(`cmp AGENTS.md CLAUDE.md`で確認)
+
+## Cursor Cloud specific instructions
+
+バックエンドなしの静的Vite+React+TypeScript SPA。標準コマンドは本書冒頭の「コマンド」節を参照(`npm run dev`/`test`/`build`/`lint`/`sweep`)。以下はCloud環境で判明した非自明な注意点のみ。
+
+- **依存インストールは `npm install` を使う(`npm ci` は不可)。** コミット済み `package-lock.json` で esbuild のプラットフォーム別バイナリ(vite@8 が持つ `@esbuild/*`)が `optional` ではなく `extraneous` として記録されていたため、`npm ci` は `EBADPLATFORM`(例: `@esbuild/aix-ppc64`)で失敗する。`npm install` はロックファイルを自己修復して成功する。update スクリプトも `npm install` を採用済み。本ブランチはこの修復済みロックファイルを含む(マージ前でも `npm install` なら問題なし)。
+- **開発サーバー**: `npm run dev` → http://localhost:5173/ 。`--host` は付かないためデフォルトは localhost のみ公開。
+- 動作確認の定番フロー: タイトル画面 →「標準車体でテスト走行」→「手で押してスタート」で10m直線走行が走り、速度・回転数・電流のライブ計測とリザルトが出る(コア機能の hello-world)。
+- 走行音は初期ミュート。`localStorage` 以外の永続化・外部通信は無し。
