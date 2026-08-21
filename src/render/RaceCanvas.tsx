@@ -47,7 +47,7 @@ export function RaceCanvas() {
 
   return (
     <div className="relative overflow-hidden rounded-2xl border border-slate-200 bg-sky-50 shadow-sm">
-      <canvas ref={canvasRef} width={720} height={360} className="block w-full" />
+      <canvas ref={canvasRef} width={720} height={360} className="block w-full" aria-label="走行画面" />
       <div className="pointer-events-none absolute inset-0">
         <IndoorCourseDecor positionM={vehicleState.positionM} />
       </div>

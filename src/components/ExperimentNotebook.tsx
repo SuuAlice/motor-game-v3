@@ -89,7 +89,7 @@ function SessionMotorReplay({ session }: { session: ExperimentSession }) {
 
   return (
     <div>
-      <canvas ref={canvasRef} width={320} height={240} className="w-full rounded-lg bg-slate-100" />
+      <canvas ref={canvasRef} width={320} height={240} className="w-full rounded-lg bg-slate-100" aria-label="実験ノートの時系列再生" />
       <p className="mt-1 text-center text-xs text-slate-400">記録した時系列をループ再生</p>
     </div>
   );

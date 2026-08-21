@@ -49,6 +49,7 @@ export function MotorCanvas() {
       width={320}
       height={240}
       className="w-full max-w-md rounded-lg bg-slate-100"
+      aria-label="モーター断面"
     />
   );
 }

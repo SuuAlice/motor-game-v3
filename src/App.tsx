@@ -1,4 +1,5 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
+import { setDebugOverlay } from './debug/gameDebug'
 import { useGameStore } from './store/gameStore'
 import { LabMode } from './modes/LabMode'
 import { DiagnosisMode } from './modes/DiagnosisMode'
@@ -87,8 +88,13 @@ function App() {
   const setMode = useGameStore((s) => s.setMode)
   const [utilityPage, setUtilityPage] = useState<'glossary' | 'notebook' | null>(null)
 
+  useEffect(() => {
+    setDebugOverlay(utilityPage ?? 'none')
+    return () => setDebugOverlay('none')
+  }, [utilityPage])
+
   return (
-    <main className="min-h-svh bg-slate-50">
+    <main className="min-h-svh bg-slate-50" data-scene={utilityPage ?? mode}>
       <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-2 px-4 pt-4">
         <h1 className="text-lg font-bold text-slate-800 sm:text-xl">走れ!手作りモーターカー</h1>
         <div className="ml-auto flex flex-wrap items-center justify-end gap-2"><MotorAudioControl />{!utilityPage && mode !== 'title' && (

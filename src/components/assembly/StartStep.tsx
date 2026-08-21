@@ -53,6 +53,7 @@ export function StartStep({ draft }: AssemblyStepProps) {
         </p>
         <p className="text-xs text-slate-400">逆向きに弾いてみよう。どっちに回る?</p>
         <canvas
+          aria-label="始動フリック"
           ref={canvasRef}
           width={320}
           height={240}
