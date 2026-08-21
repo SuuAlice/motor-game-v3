@@ -1373,7 +1373,11 @@ describe('G1c: production経路での6モード発火', () => {
           expect(smokingVehicleElapsed).toBe(vehicleElapsedAtStart);
           expect(before._elapsedSec).toBeGreaterThan(smokingElapsedSec);
           expect(before.vehicleState.elapsedTimeS).toBe(vehicleElapsedAtStart);
-          expect(before._runAccumulator!.events.some((event) => event.mode === 'D02')).toBe(true);
+          // 終端stepがaccumulatorをnull化するので、最後の描画可能状態にはD02 eventが無い。
+          // 煙はeventではなく発煙latchから出す必要がある。
+          expect(before._runAccumulator!.events.some((event) => event.mode === 'D02')).toBe(false);
+          expect(before._runAccumulator!.destructionState.modes.D02.smokingStarted).toBe(true);
+          expect(before._runAccumulator!.destructionState.modes.D02.triggered).toBe(false);
           break;
         }
       }
