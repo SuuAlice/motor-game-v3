@@ -26,6 +26,8 @@ V3 Phase 1以降、メニューも低解像度Canvasへ寄せるなら種類B寄
 
 Playwright MCPとchrome-devtools-mcpを同時に使うとブラウザが2つ立つことがある。遷移はPlaywright、原因調査だけchrome-devtools。
 
+Cursor Cloud AgentでMCPが無いときは、computerUseで同じ手順(開く・押す・スクショ・`window.__DEBUG__`を読む)を行う。
+
 ## `window.__DEBUG__`
 
 起動時に`attachGameDebug()`がgetterを載せる。読むたびに現在のDOMとstoreから作る。物理エンジンは知らない。
