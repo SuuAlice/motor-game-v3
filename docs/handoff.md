@@ -81,6 +81,7 @@ Phase 0完了処理の一環として、リポジトリを同一履歴上でV3�
 - V2由来のUI・store・modes・dataはV3の完成形ではなく**凍結参考実装**。Phase 0では削除せず、Phase 1で新UIシェルが構築でき次第、論理単位で置換・削除する
 - 画面・音に関わる判断は`docs/art-spec.md`を根拠とする。同書にない判断は独自解釈せず、agmsg経由でSuuに確認すること
 - 通信はagmsg(チーム`MotorGameV3`)。レビュー条件・承認条件は要約せず全文中継する
+- ブラウザAI検証は種類C(HTMLメニュー+Canvas 2D走行)。手順と`window.__DEBUG__`の境界は`docs/browser-ai-verify.md`
 
 ---
 
@@ -93,3 +94,4 @@ Phase 0完了処理の一環として、リポジトリを同一履歴上でV3�
 - 第三者ライセンス: `THIRD-PARTY-LICENSES`
 - パラメータのチューニング根拠を数値で確認したいとき: `npm run sweep` / `npm run sweep:motor`
 - 「なぜこの実装になっているか」に迷ったら、まず対応する `src/engine/__tests__/` を読む。受け入れ基準はほぼすべてテストとしてコード化されている
+- ブラウザをAIに触らせるとき: `docs/browser-ai-verify.md`

@@ -23,6 +23,18 @@ V3「(仮題)挑め!手作りモーターカーGP」はPhase 0(リポジトリ�
 
 **作業を始める前に、`docs/spec.md`(唯一の正)・`docs/art-spec.md`(UI/描画/音の常時参照物)・`docs/handoff.md`・`docs/baseline-v2.0.md`を読んでください。** 旧資料と実装が矛盾する場合、V3については `docs/spec.md` を優先してください。
 
+## ブラウザAI検証(現行V2 UI)
+
+種類は **C. ハイブリッド**(Unity WebGLではない)。メニュー・計測・モード切替はHTML `<button>`、走行・モーター断面はCanvas 2D、ガレージ車体はSVG。実機ADB/WDAは不要。
+
+- メニュー操作: Playwright MCPのアクセシビリティツリーで名前指定する
+- 走行画面の見た目: `.cursor/mcp.json`の`--caps=vision`でスクショ確認する
+- 状態判定: `window.__DEBUG__`(`src/debug/gameDebug.ts`)。scene/phase/生の計測値は出す。診断の原因・正解は出さない
+- クリック無反応の証拠: chrome-devtools-mcpでコンソールと通信を取る
+- 詳細手順: `docs/browser-ai-verify.md`
+
+V3 Phase 1でメニューも低解像度Canvasへ寄せたら種類B寄りになる。そのときもvisionと`__DEBUG__`は維持する。
+
 ## このプロジェクトについて
 
 自分で巻いたモーターを車に載せ、レースで稼ぎ、稼いだ金で実在素材を買い、より速いマシンを作るチューニングレースゲームです。素材は消耗品で、壊せば失いますが、新しい壊し方の発見は失敗図鑑に刻まれ報酬になります(`巻く→走る→稼ぐ→買う→巻く…`のループに`壊す→図鑑登録/サルベージ`が絡む、仕様書§1)。

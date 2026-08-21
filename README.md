@@ -84,6 +84,7 @@ Vite / React / TypeScript / zustand / SVG / Canvas 2D / Recharts / Tailwind CSS 
 - [実装上の判断と引き継ぎ](docs/handoff.md)
 - [v1.5移植時の回帰基準](docs/baseline-v1.5.md)
 - [リポジトリ立ち上げチェックリスト](docs/repo-birth-checklist.md)
+- [ブラウザAI検証](docs/browser-ai-verify.md)
 
 ## 安全上の注意
 
