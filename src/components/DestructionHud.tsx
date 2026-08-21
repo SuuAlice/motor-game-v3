@@ -9,6 +9,7 @@ import { PALETTE } from '../retro/palette';
 /** 継続演出の日本語ラベル。症状の名前であり、原因の断定ではない。 */
 const LOOP_LABEL: Record<string, string> = {
   D01_wireLash: 'コイルが暴れています',
+  D02_smoke: '煙が出ています',
   D02_D04_flame: '燃えています',
 };
 

@@ -9,7 +9,7 @@ import { SE_MASTER_GAIN } from '../../audio/mixLevels';
 import {
   PARTICLE_BURST_SPECS, findParticleBurstSpec, toPresentationTrigger,
   deriveDestructionHudState, PERFORMANCE_DROP_ICON, D07_D09_PARTICLE_EXEMPTION_REASON,
-  advanceDestructionSeScheduler, computeD09OnsetToneHz, EMPTY_SE_SCHEDULER_STATE,
+  advanceDestructionSeScheduler, computeD09OnsetToneHz, smokingOnsetOneShots, EMPTY_SE_SCHEDULER_STATE,
   type DestructionSeSchedulerState,
 } from '../destructionPresentation';
 
@@ -124,6 +124,17 @@ describe('HUD(art-spec §5.2、spec §7.3の三段開示)', () => {
     expect(hud.activeLoops).toEqual([]);
   });
 
+  it('D02発煙latch中は煙の継続演出だけ出し、継続SEは足さない(発煙SEはoneShot)', () => {
+    const hud = deriveDestructionHudState(stateWith((s) => {
+      s.modes.D02.smokingStarted = true;
+      s.modes.D02.smokingStartedAtT = 1;
+    }));
+    expect(hud.activeLoops).toContain('D02_smoke');
+    expect(hud.activeLoopSes).not.toContain('D02_smoke');
+    expect(smokingOnsetOneShots(false, true)).toEqual(['D02_smoke']);
+    expect(smokingOnsetOneShots(true, true)).toEqual([]);
+  });
+
   it('炎の継続演出はD04燃焼中のみ(nonLipoでは出ない)', () => {
     const lipo = createInitialDestructionState('lipo');
     expect(deriveDestructionHudState(lipo).activeLoops).not.toContain('D02_D04_flame');
@@ -157,6 +168,16 @@ describe('SE scheduler(§8.3): 複数フレーム・run切替・D06 burst・D09 
     });
     return { state, perFrame };
   }
+
+  it('発煙latchのextraOneShotはengine eventなしでもD02発煙SEを1回出す', () => {
+    const result = advanceDestructionSeScheduler(
+      EMPTY_SE_SCHEDULER_STATE,
+      { ...input([], SNAPSHOT_A), extraOneShotSes: ['D02_smoke'] },
+      0,
+    );
+    expect(result.voices.map((v) => v.id)).toEqual(['D02_smoke']);
+    expect(result.voices[0].isNew).toBe(true);
+  });
 
   it('run未開始では何も鳴らず、状態も空のまま', () => {
     const result = advanceDestructionSeScheduler(EMPTY_SE_SCHEDULER_STATE, null, 0);

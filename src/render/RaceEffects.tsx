@@ -8,7 +8,7 @@ import {
   spawnParticles, stepParticles, clearBurst, drawParticles,
   PARTICLE_FIELD_WIDTH, PARTICLE_FIELD_HEIGHT, type Particle,
 } from '../retro/destruction/particleField';
-import { tickAt, ticksToAdvance } from '../retro/destruction/particleTick';
+import { presentationElapsedSeconds, tickAt, ticksToAdvance } from '../retro/destruction/particleTick';
 import { resolveGearMaterialColorKey } from '../retro/destruction/gearMaterialColor';
 import { prefersReducedMotion } from '../retro/destruction/reducedMotion';
 import { useSaveStore } from '../store/saveStore';
@@ -27,7 +27,7 @@ const BURST_COUNT: Record<ParticleBurstId, number> = {
   D01_wireLash: 1, D02_smoke: 3, D02_D04_flame: 3, D05_spark: 6, D06_debris: 8,
 };
 
-const LOOP_BURSTS = ['D01_wireLash', 'D02_D04_flame'] as const;
+const LOOP_BURSTS = ['D01_wireLash', 'D02_smoke', 'D02_D04_flame'] as const;
 
 interface FieldState {
   particles: readonly Particle[];
@@ -91,7 +91,11 @@ export function RaceEffects({ vehicle, active = true, legacyOverlays = true }: {
 
       // run切替はschedulerと同じくreplaySnapshotの参照同一性で検知する。
       const field = fieldRef.current.runRef === accumulator.replaySnapshot ? fieldRef.current : EMPTY_FIELD;
-      const currentTick = tickAt(state.vehicleState.elapsedTimeS);
+      const currentTick = tickAt(presentationElapsedSeconds({
+        runContext: accumulator.replaySnapshot.runContext.context,
+        motorElapsedS: state._elapsedSec,
+        vehicleElapsedS: state.vehicleState.elapsedTimeS,
+      }));
       const steps = field.lastTick < 0 ? 1 : ticksToAdvance(field.lastTick, currentTick);
 
       let particles = field.particles;

@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useGameStore } from '../store/gameStore';
 import { syncSeVoiceHandles } from '../retro/destruction/seVoiceHandles';
 import {
-  advanceDestructionSeScheduler, computeD09OnsetToneHz,
+  advanceDestructionSeScheduler, computeD09OnsetToneHz, smokingOnsetOneShots,
   EMPTY_SE_SCHEDULER_STATE, type DestructionSeSchedulerState,
 } from '../retro/destruction/destructionPresentation';
 import {
@@ -175,6 +175,7 @@ export function MotorAudioControl() {
     // SE schedulerの状態(event cursor・D06 queue・鳴っているvoice集合)。
     // 走行の切替はscheduler側がreplaySnapshotの参照変化で検知してresetする。
     let schedulerState: DestructionSeSchedulerState = EMPTY_SE_SCHEDULER_STATE;
+    let wasSmoking = false;
     const update = () => {
       const nodes = nodesRef.current;
       if (!nodes) return;
@@ -196,15 +197,18 @@ export function MotorAudioControl() {
       // P3-4 G7-D(§8.3): 破壊モードSE。run未開始のときは_runAccumulatorがnullで
       // schedulerが空を返し、production run中はPhase 3のSEを扱う。
       const accumulator = state._runAccumulator;
+      const isSmoking = accumulator?.destructionState.modes.D02.smokingStarted === true;
       const result = advanceDestructionSeScheduler(
         schedulerState,
         accumulator === null ? null : {
           events: accumulator.events,
           destructionState: accumulator.destructionState,
           replaySnapshot: accumulator.replaySnapshot,
+          extraOneShotSes: smokingOnsetOneShots(wasSmoking, isSmoking),
         },
         now,
       );
+      wasSmoking = isSmoking;
       schedulerState = result.next;
 
       // handle集合の同期(起こす/gain追従/止めて捨てる)は純関数側に閉じている。
