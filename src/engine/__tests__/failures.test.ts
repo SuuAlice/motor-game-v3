@@ -3,6 +3,7 @@ import { diagnoseFailures } from '../failures';
 import { step, type MotorConfig, type SimState } from '../motorPhysics';
 import { FLICK_INITIAL_OMEGA } from '../constants';
 import type { HistorySample } from '../scoring';
+import { mulberry32 } from './prng';
 
 // spec docs/spec.md §3.7の設計目標で使う「適正パラメータ」(他のテストと同じ)
 function goodConfig(overrides: Partial<MotorConfig> = {}): MotorConfig {
@@ -126,16 +127,9 @@ describe('diagnoseFailures(実際のstep()出力を使った統合テスト)', (
   // step()出力を使い、各カテゴリが期待通り検出されることを確認する。
   const DT = 1 / 120;
 
-  function mulberry32(seed: number): () => number {
-    let a = seed;
-    return () => {
-      a |= 0;
-      a = (a + 0x6d2b79f5) | 0;
-      let t = Math.imul(a ^ (a >>> 15), 1 | a);
-      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-    };
-  }
+  // P3-4-Q11 A-Q11-1: ローカルのmulberry32実装は削除し、正典run RNG(createRunRng)へ委譲する
+  // 互換wrapper(./prng)を使う。engine配下のmulberry32実装を1箇所へ一元化するため。
+  // アルゴリズムは同一のため、本テスト群の乱数系列・判定結果は変わらない。
 
   function simulateHistory(config: MotorConfig, seed: number, seconds = 15): HistorySample[] {
     const rng = mulberry32(seed);

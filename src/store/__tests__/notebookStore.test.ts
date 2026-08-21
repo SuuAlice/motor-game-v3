@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { createExperimentSession, parseNotebookJson, stringifyNotebook, useNotebookStore } from '../notebookStore';
 import type { MotorConfig } from '../../engine/motorPhysics';
 import type { NotebookSample } from '../notebookStore';
+import { createInitialDestructionState } from '../../engine/destructionModes';
 
 const config: MotorConfig = {
   coilTurns: 80,
@@ -42,12 +43,19 @@ describe('実験ノート', () => {
   });
 
   it('JSONを書き出して読み戻せる', () => {
-    const session = createExperimentSession(config, 456, [sample({})]);
+    // G6(§16.1): createExperimentSessionはLegacy型を返すため、2フィールドを付与して
+    // 現行のExperimentSessionへ昇格させる(export/importは現行型を対象とする)。
+    const session = {
+      ...createExperimentSession(config, 456, [sample({})]),
+      finalDestructionState: createInitialDestructionState('lipo'),
+      recipeKey: 'v1|notebook-fixture',
+    };
     expect(parseNotebookJson(stringifyNotebook([session]))[0].seed).toBe(456);
   });
 
-  it('未知のバージョンを拒否する', () => {
-    expect(() => parseNotebookJson('{"version":2,"sessions":[]}')).toThrow('対応していない');
+  it('未知のバージョンを拒否する(version 2はP3-4項目Cで受理対象になったため、3で確認する)', () => {
+    expect(() => parseNotebookJson('{"version":3,"sessions":[]}')).toThrow('対応していない');
+    expect(() => parseNotebookJson('{"sessions":[]}')).toThrow('対応していない');
   });
 
   it('車体付きコース走行をA/B比較用に保存する', () => {
@@ -59,6 +67,7 @@ describe('実験ノート', () => {
       carConfig: { massG: 150, gearRatio: 4, gearEfficiency: 0.8, wheelDiameterMm: 30, tireGrip: 0.7, axleFriction: 0, wheelAlignmentMm: 0, centerOfMassHeightMm: 20, motorMountOffsetMm: 0 },
       energyBreakdown: { driveJ: 1, gearLossJ: 0.2, slipLossJ: 0, brushLossJ: 0.1, heatJ: 0.5 },
       samples: [],
+      // G6-R2: addCourseRunはlegacy形状専用(手動保存経路はRunOutcomeを持たない)
     });
     expect(useNotebookStore.getState().courseRuns[0].trackId).toBe('straight-10m');
   });

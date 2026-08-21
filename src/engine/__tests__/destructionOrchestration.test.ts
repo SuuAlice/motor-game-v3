@@ -12,7 +12,14 @@ import {
   classifyTerminalModes,
   composeEffectiveMotorConfig,
   computeEnergyBudgetJ,
+  buildVehicleFrameInput,
+  validateDestructionStateShape,
+  composeD06RuntimeEffect,
+  composeD09RuntimeEffect,
+  D09_AXLE_FRICTION_INCREASE_PER_GAUGE,
+  RIPPLE_AMPLITUDE,
   createRunAccumulator,
+  createRunRng,
   deriveDegradationDiffs,
   finalizeDestructionRun,
   finalizeRun,
@@ -20,14 +27,34 @@ import {
   restoreRunSnapshot,
   stepMotorWithDestruction,
   stepTestRunWithDestruction,
+  stepTrackRunWithDestruction,
   validateDestructionConfig,
   validateFireExposureProfile,
 } from '../destructionOrchestration';
 import { computeElectricalState, step } from '../motorPhysics';
 import { createInitialDestructionState } from '../destructionModes';
+import type { D06Progress, D09Progress } from '../destructionModes';
 import type { DestructionState } from '../destructionModes';
-import type { TrackDefinition } from '../trackPhysics';
+import type { TrackDefinition, ValidatedTrackDefinition } from '../trackPhysics';
+import { createValidatedTrack } from '../trackPhysics';
 import { mulberry32 } from './prng';
+import { readdirSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+// P3-4-Q11 Q-R3の構造検査(§20.10.4 DoD4・DoD8)で使う。src/engine/__tests__/ → src/engine/
+const ENGINE_SRC_DIR = fileURLToPath(new URL('../', import.meta.url)).replace(/\/$/u, '');
+
+/** src/engine/配下の.tsファイルを再帰列挙する(構造検査用)。 */
+function collectEngineSourceFiles(dir: string): string[] {
+  const result: string[] = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const full = join(dir, entry.name);
+    if (entry.isDirectory()) result.push(...collectEngineSourceFiles(full));
+    else if (entry.name.endsWith('.ts')) result.push(full);
+  }
+  return result;
+}
 
 function goodMotorConfig(overrides: Partial<MotorConfig> = {}): MotorConfig {
   return {
@@ -84,12 +111,19 @@ function goodDestructionConfig(
       recoveryFrames: 6,
       recoveryContactResistanceMultiplier: 1.2,
     },
-    d06: { breakage: { kind: 'breakable', gearStrengthThresholdNm: 0.5 } },
+    d06: { breakage: { kind: 'breakable', gearStrengthThresholdNm: 0.5 }, toothFatigueExposureNmS: 0.5 },
     d07: {
       thermal: { conductionCoefficient: 0.1, dissipationCoefficient: 0.05 },
       irreversible: { kind: 'demagnetizing', magnetHeatGaugeLimit: 1, reversibleDroopThreshold: 0.7, reversibleDroopMultiplier: 0.95, demagnetizationDeltaFraction: 0.1 },
     },
-    d09: { bearingSeizureGaugeLimit: 1 },
+    d09: {
+        thermal: { conductionCoefficient: 0.25, dissipationCoefficient: 0.5 },
+        bearingSeizureGaugeLimit: 1,
+        metalGearContactAlways: false,
+        highLoadHighSpeed: { loadTorqueThresholdNm: 0.2, rpmThreshold: 3000 },
+        gearSeizureDeltaFraction: 0.15,
+        bearingSeizureDeltaFraction: 0.2,
+      },
   };
 }
 
@@ -122,6 +156,7 @@ function motorSnapshotInput(overrides: Partial<CaptureRunSnapshotInput> = {}): C
     slopeRad: null,
     seed: 1,
     initialDestructionState: createInitialDestructionState('lipo'),
+    recipeKey: 'v1|test-motor',
     ...overrides,
   };
 }
@@ -145,6 +180,7 @@ function vehicleSnapshotInput(overrides: Partial<CaptureRunSnapshotInput> = {}):
     slopeRad: 0,
     seed: 1,
     initialDestructionState: createInitialDestructionState('lipo'),
+    recipeKey: 'v1|test-vehicle',
     ...overrides,
   };
 }
@@ -255,6 +291,50 @@ describe('destructionOrchestration.ts: deriveDegradationDiffs(P3-0限定範囲)'
       { role: 'rotor', kind: 'burnout' },
       { role: 'battery', kind: 'consumed' },
       { role: 'gear', kind: 'toothLoss', deltaCount: 1 },
+    ]);
+  });
+
+  // P3-4 G4(§7.7 R4確定〈候補A〉+E7): D09のdeltaFraction換算。
+  function d09EventFor(gearDelta: number, bearingDelta: number): DestructionEvent {
+    return {
+      mode: 'D09',
+      causeLog: {
+        currentA: 1, rpm: 100, atT: 1,
+        temperature: { kind: 'uncalibratedGauge' as const, ratio: 0.15 },
+        bearingHeatGaugeRatio: 0.15,
+        metalGearContactActive: false,
+        highLoadHighSpeedActive: true,
+      },
+      isFirstThisSession: true,
+      gearSeizureDeltaFraction: gearDelta,
+      bearingSeizureDeltaFraction: bearingDelta,
+      physicsSnapshotAtT: { context: 'motor', state: initialSimState() },
+    } as DestructionEvent;
+  }
+
+  it('8-D09a. D09イベントはgear seizureとbearing seizureの両方のdiffを常に発行する(候補A、選択適用しない)', () => {
+    const diffs = deriveDegradationDiffs([d09EventFor(0.15, 0.2)], createInitialDestructionState('nonLipo'));
+    expect(diffs).toEqual([
+      { role: 'gear', kind: 'seizure', deltaFraction: 0.15 },
+      { role: 'bearing', kind: 'seizure', deltaFraction: 0.2 },
+    ]);
+  });
+
+  it('8-D09b. deltaFractionはevent側の値のみを読む(configを直接参照しない、D07と同型の一方向契約)', () => {
+    // configの既定値(0.15/0.2)とは異なる値をeventへ載せ、その値がそのまま出ることを固定する。
+    const diffs = deriveDegradationDiffs([d09EventFor(0.31, 0.42)], createInitialDestructionState('nonLipo'));
+    expect(diffs).toEqual([
+      { role: 'gear', kind: 'seizure', deltaFraction: 0.31 },
+      { role: 'bearing', kind: 'seizure', deltaFraction: 0.42 },
+    ]);
+  });
+
+  it('8-D09c. D06(歯欠け)とD09(焼付き)が同一run内に共存すると、gearに対して2種のdiffが並立する', () => {
+    const diffs = deriveDegradationDiffs([d06Event(false), d09EventFor(0.15, 0.2)], createInitialDestructionState('nonLipo'));
+    expect(diffs).toEqual([
+      { role: 'gear', kind: 'toothLoss', deltaCount: 1 },
+      { role: 'gear', kind: 'seizure', deltaFraction: 0.15 },
+      { role: 'bearing', kind: 'seizure', deltaFraction: 0.2 },
     ]);
   });
 
@@ -382,9 +462,9 @@ describe('destructionOrchestration.ts: finalizeDestructionRun / finalizeRun', ()
 });
 
 describe('destructionOrchestration.ts: captureRunSnapshot', () => {
-  it('15. contractVersionを常に2として付与する(ゲート6是正: courseLengthM/slopeRad追加により1→2)', () => {
+  it('15. contractVersionを常に3として付与する(P3-4 G1a是正: recipeKey追加により2→3)', () => {
     const snapshot = captureRunSnapshot(motorSnapshotInput());
-    expect(snapshot.contractVersion).toBe(2);
+    expect(snapshot.contractVersion).toBe(3);
   });
 
   it('16. deep copy: 呼び出し後にinputを変更してもRunSnapshotへ波及しない', () => {
@@ -420,9 +500,9 @@ describe('destructionOrchestration.ts: restoreRunSnapshot(12段階検証)', () =
     expect(result.ok).toBe(true);
   });
 
-  it('20. contractVersion不一致はunsupportedContractVersionを返す(ゲート6是正: 現行バージョンは2、旧バージョン1は非対応)', () => {
+  it.each([1, 2, 4])('20. contractVersion=%iはunsupportedContractVersionを返す(P3-4 G1a是正: 現行バージョンは3のみ対応、Suu G1a照合P2)', (invalidVersion) => {
     const snapshot = captureRunSnapshot(motorSnapshotInput());
-    const raw = { ...JSON.parse(JSON.stringify(snapshot)), contractVersion: 1 };
+    const raw = { ...JSON.parse(JSON.stringify(snapshot)), contractVersion: invalidVersion };
     const result = restoreRunSnapshot(raw);
     expect(result).toEqual({ ok: false, reason: 'unsupportedContractVersion' });
   });
@@ -498,6 +578,42 @@ describe('destructionOrchestration.ts: restoreRunSnapshot(12段階検証)', () =
   });
 });
 
+describe('destructionOrchestration.ts: restoreRunSnapshot recipeKey検証(P3-4 G1a、人間再承認一覧A)', () => {
+  it('正常なrecipeKeyを持つsnapshotはok:trueで復元でき、recipeKeyが失われない', () => {
+    const snapshot = captureRunSnapshot(motorSnapshotInput({ recipeKey: 'v1|wire-copper-standard,magnet-ferrite,gear-pom,battery-alkaline,brush-carbon|1,2,3' }));
+    const result = restoreRunSnapshot(JSON.parse(JSON.stringify(snapshot)));
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.snapshot.recipeKey).toBe('v1|wire-copper-standard,magnet-ferrite,gear-pom,battery-alkaline,brush-carbon|1,2,3');
+  });
+
+  it('recipeKeyが空文字列の場合reason=invalidSchema・details=非空文字列要求を厳密に返す(Suu G1a照合P3)', () => {
+    const snapshot = captureRunSnapshot(motorSnapshotInput());
+    const raw = { ...JSON.parse(JSON.stringify(snapshot)), recipeKey: '' };
+    const result = restoreRunSnapshot(raw);
+    expect(result).toEqual({ ok: false, reason: 'invalidSchema', details: 'recipeKey must be a non-empty string' });
+  });
+
+  it('recipeKeyがenvelope形式(v{n}|...)でない場合reason=invalidSchema・details=envelope形式要求を厳密に返す(Suu G1a照合P3)', () => {
+    const snapshot = captureRunSnapshot(motorSnapshotInput());
+    const raw = { ...JSON.parse(JSON.stringify(snapshot)), recipeKey: 'not-an-envelope' };
+    const result = restoreRunSnapshot(raw);
+    expect(result).toEqual({ ok: false, reason: 'invalidSchema', details: 'recipeKey must be in envelope format (v{n}|...)' });
+  });
+
+  it('recipeKeyが数値の場合reason=invalidSchema・details=非空文字列要求を厳密に返す(Suu G1a照合P3)', () => {
+    const snapshot = captureRunSnapshot(motorSnapshotInput());
+    const rawNumber = { ...JSON.parse(JSON.stringify(snapshot)), recipeKey: 123 };
+    expect(restoreRunSnapshot(rawNumber)).toEqual({ ok: false, reason: 'invalidSchema', details: 'recipeKey must be a non-empty string' });
+  });
+
+  it('recipeKeyが欠落の場合reason=invalidSchema・details=非空文字列要求を厳密に返す(Suu G1a照合P3)', () => {
+    const snapshot = captureRunSnapshot(motorSnapshotInput());
+    const rawMissing = JSON.parse(JSON.stringify(snapshot));
+    delete rawMissing.recipeKey;
+    expect(restoreRunSnapshot(rawMissing)).toEqual({ ok: false, reason: 'invalidSchema', details: 'recipeKey must be a non-empty string' });
+  });
+});
+
 describe('destructionOrchestration.ts: validateFireExposureProfile', () => {
   it('30. 正常な入力はok:trueでprofileを返す', () => {
     const result = validateFireExposureProfile({ bodyEquipped: true, adjacentRolesEquipped: ['magnet'] });
@@ -554,7 +670,7 @@ describe('destructionOrchestration.ts: validateDestructionConfig(判別union対�
   });
 
   it('36. breakage.kind="nonBreakable"の場合、gearStrengthThresholdNmの欠落を要求しない', () => {
-    const draft: DestructionConfigDraft = { ...goodDestructionConfig(), d06: { breakage: { kind: 'nonBreakable' } } };
+    const draft: DestructionConfigDraft = { ...goodDestructionConfig(), d06: { breakage: { kind: 'nonBreakable' }, toothFatigueExposureNmS: 0.5 } };
     const result = validateDestructionConfig(draft);
     expect(result.ok).toBe(true);
   });
@@ -2433,5 +2549,729 @@ describe('destructionOrchestration.ts: restoreRunSnapshot courseLengthM/slopeRad
       expect(result.snapshot.courseLengthM).toBe(15);
       expect(result.snapshot.slopeRad).toBeCloseTo(0.05, 10);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P3-4-Q11 Q-R3: 正典run RNG createRunRng(engine計画v15 §20.10.4 DoD1〜4・8)
+// ---------------------------------------------------------------------------
+
+describe('createRunRng(P3-4-Q11 Q-R3、正典run RNG)', () => {
+  // DoD1: 既知系列の固定。アルゴリズム(mulberry32)が将来書き換わった場合に検出する。
+  // 期待値は本実装(mulberry32、seed=1)の実測値であり、リプレイ規約の正典系列そのもの。
+  it('既知seedに対しmulberry32の既知系列を返す(アルゴリズムドリフトの検出)', () => {
+    const rng = createRunRng(1);
+    const actual = [rng(), rng(), rng(), rng(), rng()];
+    expect(actual).toEqual([
+      0.6270739405881613, 0.002735721180215478, 0.5274470399599522, 0.9810509674716741, 0.9683778982143849,
+    ]);
+  });
+
+  // DoD2: 決定論・独立性
+  it('同一seedの2インスタンスは同一系列を返す(決定論)', () => {
+    const a = createRunRng(12345);
+    const b = createRunRng(12345);
+    expect(Array.from({ length: 20 }, () => a())).toEqual(Array.from({ length: 20 }, () => b()));
+  });
+
+  it('異なるseedは異なる系列を返す', () => {
+    const a = createRunRng(1);
+    const b = createRunRng(2);
+    expect(Array.from({ length: 10 }, () => a())).not.toEqual(Array.from({ length: 10 }, () => b()));
+  });
+
+  it('インスタンス間で内部状態を共有しない(片方を進めても他方に影響しない)', () => {
+    const a = createRunRng(7);
+    const b = createRunRng(7);
+    a(); // aだけ1回進める
+    a();
+    a();
+    const bFirst = b();
+    const freshFirst = createRunRng(7)();
+    expect(bFirst).toBe(freshFirst);
+  });
+
+  // DoD3: 値域
+  it('返り値は常に[0, 1)に収まる', () => {
+    for (const seed of [0, 1, -1, 42, 2 ** 31, -(2 ** 31), 987654321]) {
+      const rng = createRunRng(seed);
+      for (let i = 0; i < 500; i++) {
+        const v = rng();
+        expect(Number.isFinite(v)).toBe(true);
+        expect(v).toBeGreaterThanOrEqual(0);
+        expect(v).toBeLessThan(1);
+      }
+    }
+  });
+
+  // DoD4: 純粋性(G1a′で確立した構造検査の作法)
+  it('createRunRngの本体はstore/localStorage/グローバル状態/時刻/乱数源を参照しない(構造検査)', () => {
+    const source = readFileSync(join(ENGINE_SRC_DIR, 'destructionOrchestration.ts'), 'utf-8');
+    const header = /export function createRunRng\b/.exec(source);
+    expect(header).not.toBeNull();
+    const braceStart = source.indexOf('{', source.indexOf(')', header!.index));
+    let depth = 0;
+    let i = braceStart;
+    for (; i < source.length; i++) {
+      if (source[i] === '{') depth++;
+      else if (source[i] === '}') {
+        depth--;
+        if (depth === 0) { i++; break; }
+      }
+    }
+    const body = source.slice(braceStart, i);
+    expect(body.length).toBeGreaterThan(50);
+    expect(body).toContain('0x6d2b79f5'); // 抽出範囲の妥当性(過小抽出の偽陰性防止)
+    for (const pattern of [
+      /\buse[A-Za-z0-9_]*Store\b/, /\.getState\s*\(/, /\.setState\s*\(/, /\.subscribe\s*\(/,
+      /\blocalStorage\b/, /\bsessionStorage\b/, /\bwindow\b/, /\bdocument\b/, /\bglobalThis\b/,
+      /\bprocess\b/, /\bDate\.now\s*\(/, /\bMath\.random\s*\(/, /\bperformance\.now\s*\(/, /\bcrypto\b/,
+    ]) {
+      expect(body).not.toMatch(pattern);
+    }
+  });
+
+  // DoD8: 一元化の構造的固定(A-Q11-1)。engine配下にmulberry32のローカル再実装が再び現れないことを
+  // 構造で担保する。定数リテラル0x6d2b79f5はmulberry32実装の一意な指紋として使う。
+  it('src/engine/配下でmulberry32の実装はdestructionOrchestration.tsのみである(二重管理の再発防止)', () => {
+    const files = collectEngineSourceFiles(ENGINE_SRC_DIR);
+    const withImplementation = files.filter((file) => readFileSync(file, 'utf-8').includes('0x6d2b79f5'));
+    expect(withImplementation.map((f) => f.slice(ENGINE_SRC_DIR.length).replace(/\\/gu, '/')).sort()).toEqual([
+      '/__tests__/destructionOrchestration.test.ts', // 本テスト自身(指紋の参照であり実装ではない)
+      '/destructionOrchestration.ts',
+    ]);
+  });
+
+  // wrapper委譲の同一性(A-Q11-1): __tests__/prng.tsのmulberry32はcreateRunRngそのものである。
+  it('__tests__/prng.tsのmulberry32は正典createRunRngへ委譲されている(同一関数)', () => {
+    expect(mulberry32).toBe(createRunRng);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P3-4 G2: stepTrackRunWithDestruction(docs/phase3-p3-4-plan.md §8)
+// ---------------------------------------------------------------------------
+
+describe('destructionOrchestration.ts: stepTrackRunWithDestruction(P3-4 G2、track-run文脈ラッパー)', () => {
+  const DT = 1 / 120;
+
+  /** track-run文脈のsnapshot。track非null・courseLengthM/slopeRadはnull(交差検証契約)。 */
+  function trackSnapshotInput(
+    track: ValidatedTrackDefinition,
+    overrides: Partial<CaptureRunSnapshotInput> = {},
+  ): CaptureRunSnapshotInput {
+    return vehicleSnapshotInput({ track, courseLengthM: null, slopeRad: null, ...overrides });
+  }
+
+  function trackAccumulator(track: ValidatedTrackDefinition, overrides: Partial<CaptureRunSnapshotInput> = {}): RunAccumulator {
+    return createRunAccumulator(captureRunSnapshot(trackSnapshotInput(track, overrides)));
+  }
+
+  function flatTrack(lengthM: number, overrides: Partial<TrackDefinition> = {}): ValidatedTrackDefinition {
+    return createValidatedTrack({
+      id: 'g2-flat', name: 'g2-flat', description: '',
+      segments: [{ lengthM, slopeDeg: 0, surfaceGrip: 0.9, roughness: 0.05 }],
+      objectives: [],
+      ...overrides,
+    } as TrackDefinition);
+  }
+
+  it('公開シグネチャ: (vehicleState, accumulator, dt, rng?)を受け、DestructionStepResult<VehicleSimState>を返す', () => {
+    const accumulator = trackAccumulator(flatTrack(100));
+    const result = stepTrackRunWithDestruction(accumulator.replaySnapshot.initialVehicleState!, accumulator, DT);
+    expect(result).toHaveProperty('physicsState');
+    expect(result).toHaveProperty('accumulator');
+    expect(result).toHaveProperty('termination');
+    // rngは省略可能(既定はstepTrackRun側のMath.random)
+    expect(() => stepTrackRunWithDestruction(accumulator.replaySnapshot.initialVehicleState!, accumulator, DT, mulberry32(1))).not.toThrow();
+  });
+
+  it('running: 通常構成では1step後もstatus="running"のままtermination===null', () => {
+    const accumulator = trackAccumulator(flatTrack(100));
+    const result = stepTrackRunWithDestruction(accumulator.replaySnapshot.initialVehicleState!, accumulator, DT, mulberry32(1));
+    expect(result.termination).toBeNull();
+    expect(result.physicsState.status).toBe('running');
+  });
+
+  it('trackがsnapshotから実際に消費される: 極短トラックではstatus="finished"へ到達し、terminationはnullのまま(物理終端のRunOutcome化は呼び出し側の責務、§8.3)', () => {
+    let accumulator = trackAccumulator(flatTrack(1e-6));
+    let vehicleState = accumulator.replaySnapshot.initialVehicleState!;
+    let finishedAt: number | null = null;
+    for (let i = 0; i < 600; i++) {
+      const result = stepTrackRunWithDestruction(vehicleState, accumulator, DT, mulberry32(1));
+      vehicleState = result.physicsState;
+      accumulator = result.accumulator;
+      expect(result.termination).toBeNull(); // 破壊終端ではない
+      if (vehicleState.status === 'finished') { finishedAt = i; break; }
+    }
+    expect(finishedAt, 'finishedへ到達すること(trackが実際に使われている証明)').not.toBeNull();
+  });
+
+  it('trackの内容が物理へ届いている: 勾配20度の上り坂は平地より進みが遅い(track非依存なら差が出ない)', () => {
+    const uphill = createValidatedTrack({
+      id: 'g2-uphill', name: 'g2-uphill', description: '',
+      segments: [{ lengthM: 1000, slopeDeg: 20, surfaceGrip: 0.9, roughness: 0.05 }],
+      objectives: [],
+    } as TrackDefinition);
+    function distanceAfter(track: ValidatedTrackDefinition, steps: number): number {
+      let acc = trackAccumulator(track);
+      let vs = acc.replaySnapshot.initialVehicleState!;
+      for (let i = 0; i < steps; i++) {
+        const r = stepTrackRunWithDestruction(vs, acc, DT, mulberry32(1));
+        vs = r.physicsState; acc = r.accumulator;
+      }
+      return vs.positionM;
+    }
+    expect(distanceAfter(uphill, 240)).toBeLessThan(distanceAfter(flatTrack(1000), 240));
+  });
+
+  it('決定論: 同一snapshot・同一rng seedで2回走らせるとphysicsState・destructionState・eventsが完全一致する', () => {
+    function runN(steps: number) {
+      let acc = trackAccumulator(flatTrack(1000));
+      let vs = acc.replaySnapshot.initialVehicleState!;
+      for (let i = 0; i < steps; i++) {
+        const r = stepTrackRunWithDestruction(vs, acc, DT, mulberry32(acc.replaySnapshot.seed));
+        vs = r.physicsState; acc = r.accumulator;
+      }
+      return { vs, destructionState: acc.destructionState, events: acc.events };
+    }
+    expect(runN(300)).toEqual(runN(300));
+  });
+
+  it('リプレイ等価性(§8.6): 同一RunSnapshotから独立に2本走らせた結果が、events/destructionState/terminationまで完全一致する', () => {
+    const snapshot = captureRunSnapshot(trackSnapshotInput(flatTrack(1000)));
+    function replay() {
+      let acc = createRunAccumulator(snapshot);
+      let vs = snapshot.initialVehicleState!;
+      let lastTermination: ReturnType<typeof stepTrackRunWithDestruction>['termination'] = null;
+      const rng = mulberry32(snapshot.seed); // 正典run RNG(Q-R3)と同一アルゴリズム
+      for (let i = 0; i < 240; i++) {
+        const r = stepTrackRunWithDestruction(vs, acc, DT, rng);
+        vs = r.physicsState; acc = r.accumulator; lastTermination = r.termination;
+      }
+      return { events: acc.events, destructionState: acc.destructionState, termination: lastTermination, vs };
+    }
+    expect(replay()).toEqual(replay());
+  });
+
+  it('破壊終端が成立するとtermination非null・endReason="destructionTerminal"になる(同一stepで物理終端と競合しても破壊終端が優先、§8.3)', () => {
+    // 短絡構成(slitWidthMm=0)+非リポでD03を発火させる。極短トラックにして物理終端(finished)と
+    // 同一step付近で競合させても、terminationは破壊終端として返る。
+    const shorted = goodMotorConfig({ slitWidthMm: 0 });
+    let accumulator = trackAccumulator(flatTrack(1000), {
+      motorConfig: shorted,
+      destructionConfig: goodDestructionConfig('nonLipo'),
+      initialDestructionState: createInitialDestructionState('nonLipo'),
+    });
+    let vehicleState = accumulator.replaySnapshot.initialVehicleState!;
+    let termination: ReturnType<typeof stepTrackRunWithDestruction>['termination'] = null;
+    for (let i = 0; i < 600; i++) {
+      const result = stepTrackRunWithDestruction(vehicleState, accumulator, DT, mulberry32(1));
+      vehicleState = result.physicsState;
+      accumulator = result.accumulator;
+      if (result.termination) { termination = result.termination; break; }
+    }
+    expect(termination, 'D03がtrack-run経路でも発火して破壊終端になること').not.toBeNull();
+    expect(termination!.endReason).toBe('destructionTerminal');
+    expect(accumulator.events.map((e) => e.mode)).toContain('D03');
+  });
+
+  it('eventsのphysicsSnapshotAtTは正規化後のphysicsStateと一致する(context="vehicle")', () => {
+    const shorted = goodMotorConfig({ slitWidthMm: 0 });
+    let accumulator = trackAccumulator(flatTrack(1000), {
+      motorConfig: shorted,
+      destructionConfig: goodDestructionConfig('nonLipo'),
+      initialDestructionState: createInitialDestructionState('nonLipo'),
+    });
+    let vehicleState = accumulator.replaySnapshot.initialVehicleState!;
+    for (let i = 0; i < 600; i++) {
+      const result = stepTrackRunWithDestruction(vehicleState, accumulator, DT, mulberry32(1));
+      vehicleState = result.physicsState;
+      accumulator = result.accumulator;
+      if (accumulator.events.length > 0) {
+        expect(result.accumulator.events[0].physicsSnapshotAtT.context).toBe('vehicle');
+        break;
+      }
+    }
+    expect(accumulator.events.length).toBeGreaterThan(0);
+  });
+
+  it('test-run非回帰: 同一のbase構成でstepTestRunWithDestructionを走らせても従来どおり動作する(track-run追加による影響がない)', () => {
+    let accumulator = createRunAccumulator(captureRunSnapshot(vehicleSnapshotInput()));
+    let vehicleState = accumulator.replaySnapshot.initialVehicleState!;
+    for (let i = 0; i < 120; i++) {
+      const result = stepTestRunWithDestruction(vehicleState, accumulator, DT, mulberry32(1));
+      vehicleState = result.physicsState;
+      accumulator = result.accumulator;
+    }
+    expect(accumulator.replaySnapshot.track).toBeNull(); // test-run文脈のまま
+    expect(['running', 'finished', 'stalled', 'derailed', 'overheated']).toContain(vehicleState.status);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P3-4 G3: composeD06RuntimeEffect(計画§9.3契約2 + §9.4リップル)+ jEffのギヤ慣性項(§10.3)
+// ---------------------------------------------------------------------------
+
+describe('destructionOrchestration.ts: composeD06RuntimeEffect(P3-4 G3)', () => {
+  const TOTAL_TEETH = 10;
+  function d06(toothLossCount: number, meshPhaseAccumulator = 0): D06Progress {
+    return { toothLossCount, firstLossAtT: toothLossCount > 0 ? 1 : null, causeLog: null, cumulativeOverloadExposure: 0, meshPhaseAccumulator };
+  }
+
+  it('0恒等性: toothLossCount=0ではgearEfficiencyが1倍で一致する(健全時の既存挙動を変えない)', () => {
+    const base = standardCarConfig();
+    const r = composeD06RuntimeEffect(base, d06(0, 0.37), TOTAL_TEETH);
+    expect(r.ok).toBe(true);
+    if (!r.ok) throw new Error('到達しない');
+    expect(r.carConfig.gearEfficiency).toBe(base.gearEfficiency); // 位相が非0でもリップルは恒等
+    expect(r.carConfig).toEqual(base);
+  });
+
+  it('歯欠け比例で効率が下がる(1歯欠け=0.9倍、位相0でリップル寄与なし)', () => {
+    const base = standardCarConfig();
+    const r = composeD06RuntimeEffect(base, d06(1, 0), TOTAL_TEETH);
+    if (!r.ok) throw new Error('到達しない');
+    expect(r.carConfig.gearEfficiency).toBeCloseTo(base.gearEfficiency * 0.9, 12);
+  });
+
+  it('契約2: 全損直前(9歯欠け)でも有限かつ正のgearEfficiencyを返す(§9.2)', () => {
+    const base = standardCarConfig();
+    const r = composeD06RuntimeEffect(base, d06(9, 0.25), TOTAL_TEETH);
+    expect(r.ok).toBe(true);
+    if (!r.ok) throw new Error('到達しない');
+    expect(Number.isFinite(r.carConfig.gearEfficiency)).toBe(true);
+    expect(r.carConfig.gearEfficiency).toBeGreaterThan(0);
+    expect(r.carConfig.gearEfficiency).toBeLessThanOrEqual(base.gearEfficiency);
+  });
+
+  it('契約2: 全損(10歯)を渡すとok:falseで拒否する(§9.2の保証が壊れた場合の防御)', () => {
+    const r = composeD06RuntimeEffect(standardCarConfig(), d06(10), TOTAL_TEETH);
+    expect(r.ok).toBe(false);
+  });
+
+  it('リップルは効率を下げる方向にのみ働き、エネルギーを増やさない(rippleMultiplier<=1)', () => {
+    const base = standardCarConfig();
+    const noRipple = composeD06RuntimeEffect(base, d06(3, 0), TOTAL_TEETH);
+    if (!noRipple.ok) throw new Error('到達しない');
+    for (const phase of [0.1, 0.25, 0.4, 0.5, 0.75, 0.9]) {
+      const r = composeD06RuntimeEffect(base, d06(3, phase), TOTAL_TEETH);
+      if (!r.ok) throw new Error('到達しない');
+      expect(r.carConfig.gearEfficiency).toBeLessThanOrEqual(noRipple.carConfig.gearEfficiency + 1e-15);
+      expect(r.carConfig.gearEfficiency).toBeGreaterThan(0);
+    }
+  });
+
+  // **相対変調深さ**(その時点の効率に対する割合)がtoothLossRatioに比例することを固定する。
+  // 注意: **絶対振幅は単調ではない**——振幅は base*(1-r)*RIPPLE_AMPLITUDE*r ∝ (1-r)*r であり、
+  // r=0.5(5歯欠け)で最大、r=0.9では効率自体が0.1倍まで下がるため絶対振幅はむしろ小さくなる。
+  // 「歯欠けが進むほど絶対振幅も増える」という直感は誤りである(実装検証時に実測で判明)。
+  it('リップルの相対変調深さは歯欠け比に比例する(絶対振幅は(1-r)*rで非単調)', () => {
+    const base = standardCarConfig();
+    const relativeDepthAt = (loss: number) => {
+      const peak = composeD06RuntimeEffect(base, d06(loss, 0.25), TOTAL_TEETH); // sin²=1
+      const zero = composeD06RuntimeEffect(base, d06(loss, 0), TOTAL_TEETH); // sin²=0
+      if (!peak.ok || !zero.ok) throw new Error('到達しない');
+      return (zero.carConfig.gearEfficiency - peak.carConfig.gearEfficiency) / zero.carConfig.gearEfficiency;
+    };
+    expect(relativeDepthAt(1)).toBeLessThan(relativeDepthAt(5));
+    expect(relativeDepthAt(5)).toBeLessThan(relativeDepthAt(9));
+    // 相対深さは RIPPLE_AMPLITUDE*toothLossRatio に一致する
+    expect(relativeDepthAt(9)).toBeCloseTo(RIPPLE_AMPLITUDE * 0.9, 12);
+  });
+
+  it('絶対振幅は歯欠け50%で最大になる((1-r)*rの形、直感と異なる挙動の明示的固定)', () => {
+    const base = standardCarConfig();
+    const absAmplitudeAt = (loss: number) => {
+      const peak = composeD06RuntimeEffect(base, d06(loss, 0.25), TOTAL_TEETH);
+      const zero = composeD06RuntimeEffect(base, d06(loss, 0), TOTAL_TEETH);
+      if (!peak.ok || !zero.ok) throw new Error('到達しない');
+      return zero.carConfig.gearEfficiency - peak.carConfig.gearEfficiency;
+    };
+    expect(absAmplitudeAt(5)).toBeGreaterThan(absAmplitudeAt(1));
+    expect(absAmplitudeAt(5)).toBeGreaterThan(absAmplitudeAt(9));
+  });
+
+  it('決定論: 同一入力で常に同一結果(rng非依存)、かつ引数を破壊しない', () => {
+    const base = standardCarConfig();
+    const snapshot = structuredClone(base);
+    const progress = d06(4, 1.234);
+    const first = composeD06RuntimeEffect(base, progress, TOTAL_TEETH);
+    const second = composeD06RuntimeEffect(base, progress, TOTAL_TEETH);
+    expect(first).toEqual(second);
+    expect(base).toEqual(snapshot);
+  });
+
+  it('meshPhaseAccumulatorは1周期(整数部)を跨いでも同一位相なら同一結果(%1の周期性)', () => {
+    const base = standardCarConfig();
+    const a = composeD06RuntimeEffect(base, d06(5, 0.3), TOTAL_TEETH);
+    const b = composeD06RuntimeEffect(base, d06(5, 7.3), TOTAL_TEETH);
+    expect(a).toEqual(b);
+  });
+});
+
+describe('vehiclePhysics.ts: gearReflectedInertiaKgM2(P3-4 G3 §10.3)', () => {
+  it('既定(未指定)ではV2と完全に同一のjEff挙動になる(回帰不変)', () => {
+    const motorConfig = goodMotorConfig();
+    const carConfig = standardCarConfig();
+    const withoutField = createInitialVehicleState(motorConfig, carConfig);
+    const withZero = createInitialVehicleState(motorConfig, { ...carConfig, gearReflectedInertiaKgM2: 0 });
+    let a = withoutField;
+    let b = withZero;
+    for (let i = 0; i < 120; i++) {
+      a = stepTestRun(motorConfig, carConfig, a, 1 / 120, 100, mulberry32(1), 0);
+      b = stepTestRun(motorConfig, { ...carConfig, gearReflectedInertiaKgM2: 0 }, b, 1 / 120, 100, mulberry32(1), 0);
+    }
+    expect(b).toEqual(a); // 0恒等性
+  });
+
+  it('正のギヤ慣性を与えると加速が鈍る(spec §4.2「チタンは砕けない代わりに重い(J増で加速鈍化)」)', () => {
+    const motorConfig = goodMotorConfig();
+    const carConfig = standardCarConfig();
+    function distanceAfter(gearReflectedInertiaKgM2: number, steps: number): number {
+      const cfg = { ...carConfig, gearReflectedInertiaKgM2 };
+      let s = createInitialVehicleState(motorConfig, cfg);
+      for (let i = 0; i < steps; i++) s = stepTestRun(motorConfig, cfg, s, 1 / 120, 1000, mulberry32(1), 0);
+      return s.positionM;
+    }
+    // jMotorと同オーダーの値を与えて有意差を作る(較正値そのものの妥当性はG5 sweepの対象)。
+    expect(distanceAfter(1e-5, 240)).toBeLessThan(distanceAfter(0, 240));
+  });
+
+  it('有限性: 正のギヤ慣性でも状態が有限のまま推移する', () => {
+    const motorConfig = goodMotorConfig();
+    const carConfig = { ...standardCarConfig(), gearReflectedInertiaKgM2: 1e-4 };
+    let s = createInitialVehicleState(motorConfig, carConfig);
+    for (let i = 0; i < 600; i++) s = stepTestRun(motorConfig, carConfig, s, 1 / 120, 1000, mulberry32(1), 0);
+    expect(Number.isFinite(s.positionM)).toBe(true);
+    expect(Number.isFinite(s.velocityMps)).toBe(true);
+    expect(Number.isFinite(s.motor.omega)).toBe(true);
+  });
+});
+
+describe('composeD06RuntimeEffect: totalToothCountの防御(Suu_mot3 G3-P1)', () => {
+  function d06p(toothLossCount: number): D06Progress {
+    return { toothLossCount, firstLossAtT: null, causeLog: null, cumulativeOverloadExposure: 0, meshPhaseAccumulator: 0 };
+  }
+  it.each([[0], [-1], [2.5], [NaN], [Infinity]])(
+    'totalToothCount=%sはok:falseで拒否する(0除算・非整数の混入を防ぐ)',
+    (bad) => {
+      const r = composeD06RuntimeEffect(standardCarConfig(), d06p(0), bad);
+      expect(r.ok).toBe(false);
+      if (r.ok) throw new Error('到達しない');
+      expect(r.reason).toContain('totalToothCount');
+    },
+  );
+
+  it('RunSnapshot.runContext.gearTotalToothCountをそのまま渡す想定の正常系(単一出典)', () => {
+    const r = composeD06RuntimeEffect(standardCarConfig(), d06p(0), 10);
+    expect(r.ok).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P3-4 G3-P2: wrapperがD06 runtime効果を物理へ接続していること
+// ---------------------------------------------------------------------------
+
+describe('wrapper × composeD06RuntimeEffect接続(Suu_mot3 G3-P2)', () => {
+  const DT = 1 / 120;
+  const TEETH = 10;
+
+  // **重要(実装確認)**: createRunAccumulatorは`replaySnapshot.initialDestructionState`を使わず、
+  // 常に`createInitialDestructionState(profile)`で初期化する(destructionOrchestration.ts:78)。
+  // したがって「9歯損傷個体をseedしたsnapshotから走る」テストは現時点では書けない——これは
+  // 計画§9.2 M-1(i)・§14.3が「seeding未実装なら赤になる」と予告している既知の欠落であり、
+  // 該当ゲートで実装される。本describeはseedingに依存せず、走行中に実際に歯を失わせて検証する。
+  const G3_TRACK = createValidatedTrack({
+    id: 'g3', name: 'g3', description: '',
+    segments: [{ lengthM: 1000, slopeDeg: 0, surfaceGrip: 0.9, roughness: 0.05 }], objectives: [],
+  } as TrackDefinition);
+
+  function makeAccumulator(d06: DestructionConfig['d06'], trackMode: boolean): RunAccumulator {
+    const destructionConfig = { ...goodDestructionConfig('nonLipo'), d06 };
+    const input = trackMode
+      ? vehicleSnapshotInput({ destructionConfig, track: G3_TRACK, courseLengthM: null, slopeRad: null, initialDestructionState: createInitialDestructionState('nonLipo') })
+      : vehicleSnapshotInput({ destructionConfig, initialDestructionState: createInitialDestructionState('nonLipo') });
+    return createRunAccumulator(captureRunSnapshot(input));
+  }
+
+  /** 歯が確実に欠ける設定(閾値・曝露とも極小)。 */
+  const BREAKING: DestructionConfig['d06'] = { breakage: { kind: 'breakable', gearStrengthThresholdNm: 1e-9 }, toothFatigueExposureNmS: 1e-6 };
+  /** 同一条件で歯が欠けない設定(チタン相当)。 */
+  const NON_BREAKING: DestructionConfig['d06'] = { breakage: { kind: 'nonBreakable' }, toothFatigueExposureNmS: 1e-6 };
+
+  function runN(d06: DestructionConfig['d06'], trackMode: boolean, steps: number) {
+    let acc = makeAccumulator(d06, trackMode);
+    let vs = acc.replaySnapshot.initialVehicleState!;
+    let termination: ReturnType<typeof stepTestRunWithDestruction>['termination'] = null;
+    const step = trackMode ? stepTrackRunWithDestruction : stepTestRunWithDestruction;
+    for (let i = 0; i < steps; i++) {
+      const r = step(vs, acc, DT, mulberry32(1));
+      vs = r.physicsState;
+      acc = r.accumulator;
+      if (r.termination) { termination = r.termination; break; }
+    }
+    return { positionM: vs.positionM, acc, termination };
+  }
+
+  it.each([[false], [true]])('0歯欠けのままなら合成は恒等で、既存挙動を変えない(trackMode=%s)', (trackMode) => {
+    const r = runN(NON_BREAKING, trackMode, 120);
+    expect(r.acc.destructionState.modes.D06.toothLossCount).toBe(0);
+    expect(r.termination).toBeNull();
+    expect(Number.isFinite(r.positionM)).toBe(true);
+  });
+
+  it.each([[false], [true]])('歯欠けが実際に進むと走行距離が縮む(合成した効率が物理へ届いている、trackMode=%s)', (trackMode) => {
+    const broken = runN(BREAKING, trackMode, 200);
+    const intact = runN(NON_BREAKING, trackMode, 200);
+    // 空虚な一致の防止: 実際に歯が欠けたことを先に確認する
+    expect(broken.acc.destructionState.modes.D06.toothLossCount, '歯欠けが発生していること').toBeGreaterThan(0);
+    expect(intact.acc.destructionState.modes.D06.toothLossCount).toBe(0);
+    expect(broken.positionM).toBeLessThan(intact.positionM);
+  });
+
+  it.each([[false], [true]])('全損に到達したstepでtermination非nullかつendReason=destructionTerminalになる(trackMode=%s)', (trackMode) => {
+    const r = runN(BREAKING, trackMode, 600);
+    expect(r.termination, '全損でdestructionTerminalになること').not.toBeNull();
+    expect(r.termination!.endReason).toBe('destructionTerminal');
+    expect(r.acc.destructionState.modes.D06.toothLossCount).toBe(TEETH);
+    expect(r.acc.events.filter((e) => e.mode === 'D06')).toHaveLength(TEETH);
+  });
+
+  it('全損eventはisTotalLoss:trueであり、それ以前の9件はfalseである', () => {
+    const r = runN(BREAKING, false, 600);
+    const d06Events = r.acc.events.filter((e): e is Extract<typeof e, { mode: 'D06' }> => e.mode === 'D06');
+    expect(d06Events).toHaveLength(TEETH);
+    expect(d06Events.slice(0, TEETH - 1).every((e) => e.isTotalLoss === false)).toBe(true);
+    expect(d06Events[TEETH - 1].isTotalLoss).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P3-4 G4: composeD09RuntimeEffect(計画§7.8)+ frame builderのgearFrictionLossW(§7.5 R8)
+// ---------------------------------------------------------------------------
+
+describe('destructionOrchestration.ts: createRunAccumulatorのD06 seeding反映(P3-4 G6 M-1(i))', () => {
+  function snapshotWithSeededTeeth(toothLossCount: number, profile: 'lipo' | 'nonLipo' = 'lipo') {
+    const base = createInitialDestructionState(profile);
+    return captureRunSnapshot(vehicleSnapshotInput({
+      destructionConfig: goodDestructionConfig(profile),
+      initialDestructionState: {
+        ...base,
+        modes: { ...base.modes, D06: { ...base.modes.D06, toothLossCount } },
+      },
+    }));
+  }
+
+  it.each([[0], [1], [9]])('snapshotのseeded toothLossCountがliveのaccumulatorへ引き継がれる: %i', (count) => {
+    // これがないと、snapshotにはseedingが載っているのにlive走行は0本から始まり、
+    // 「走行のたびに歯数が回復する」というM-1の会計破綻が残る。
+    const accumulator = createRunAccumulator(snapshotWithSeededTeeth(count));
+    expect(accumulator.destructionState.modes.D06.toothLossCount).toBe(count);
+  });
+
+  it('D06 toothLossCount以外はcreateInitialDestructionStateの初期値と一致する(seedingの対象を広げない)', () => {
+    const accumulator = createRunAccumulator(snapshotWithSeededTeeth(5));
+    const fresh = createInitialDestructionState('lipo');
+    expect({ ...accumulator.destructionState.modes.D06, toothLossCount: 0 })
+      .toEqual({ ...fresh.modes.D06, toothLossCount: 0 });
+    expect(accumulator.destructionState.modes.D01).toEqual(fresh.modes.D01);
+    expect(accumulator.destructionState.modes.D09).toEqual(fresh.modes.D09);
+    expect(accumulator.destructionState.shared).toEqual(fresh.shared);
+  });
+
+  it('battery profileは引き続きdestructionConfigから一意に導出される(P3-1-Q6の保証を壊さない)', () => {
+    // initialDestructionState側のprofileは採用しない——configとstateのprofile不一致は
+    // 構築不能のまま維持する。nonLipo configのsnapshotからはnonLipoのbattery stateになる。
+    const accumulator = createRunAccumulator(snapshotWithSeededTeeth(3, 'nonLipo'));
+    expect(accumulator.destructionState.battery.profile).toBe('nonLipo');
+    expect(accumulator.destructionState.battery).toEqual(createInitialDestructionState('nonLipo').battery);
+  });
+
+  it('accumulatorの初期stateはsnapshotのinitialDestructionStateと同一実体ではない(復元用snapshotを汚さない)', () => {
+    const snapshot = snapshotWithSeededTeeth(2);
+    const accumulator = createRunAccumulator(snapshot);
+    expect(accumulator.destructionState).not.toBe(snapshot.initialDestructionState);
+    expect(accumulator.destructionState.modes.D06).not.toBe(snapshot.initialDestructionState.modes.D06);
+  });
+});
+
+describe('destructionOrchestration.ts: restoreRunSnapshotのM-1(iv)交差不変条件(P3-4 G6 §13.1)', () => {
+  function vehicleSnapshotRaw(toothLossCount: number): unknown {
+    const snapshot = captureRunSnapshot(vehicleSnapshotInput({
+      initialDestructionState: (() => {
+        const base = createInitialDestructionState('lipo');
+        return { ...base, modes: { ...base.modes, D06: { ...base.modes.D06, toothLossCount } } };
+      })(),
+    }));
+    return JSON.parse(JSON.stringify(snapshot));
+  }
+
+  it.each([[0], [1], [9]])('走行開始時点のtoothLossCountが0〜9(総歯数10未満)なら復元できる: %i', (count) => {
+    const result = restoreRunSnapshot(vehicleSnapshotRaw(count));
+    expect(result.ok, result.ok ? '' : result.reason).toBe(true);
+  });
+
+  it('全損(総歯数と同数)のinitialDestructionStateはinvalidSchemaで拒否される(装備拒否と対をなす)', () => {
+    const result = restoreRunSnapshot(vehicleSnapshotRaw(10));
+    expect(result.ok).toBe(false);
+    if (!result.ok && result.reason === 'invalidSchema') {
+      expect(result.details).toContain('toothLossCount');
+    } else {
+      expect.unreachable('invalidSchemaで拒否されるべきです');
+    }
+  });
+
+  it('負値・非整数のtoothLossCountもinvalidSchemaで拒否される', () => {
+    for (const bad of [-1, 1.5]) {
+      const result = restoreRunSnapshot(vehicleSnapshotRaw(bad));
+      expect(result.ok, `toothLossCount=${bad}`).toBe(false);
+    }
+  });
+
+  it('**finalDestructionStateには同じ制約を適用しない**(§16.3、走行終了時点は全損もありうる)', () => {
+    // 同じ形状のstateでも、走行終了時点の記録としては全損(10)が正当である。共用している
+    // validateDestructionStateShapeは形状のみを見るため、10でもtrueを返す。
+    const base = createInitialDestructionState('lipo');
+    const totalLoss = { ...base, modes: { ...base.modes, D06: { ...base.modes.D06, toothLossCount: 10 } } };
+    expect(validateDestructionStateShape(JSON.parse(JSON.stringify(totalLoss)))).toBe(true);
+  });
+});
+
+describe('destructionOrchestration.ts: composeD09RuntimeEffect(P3-4 G4)', () => {
+  function d09(bearingHeatGaugeRatio: number): D09Progress {
+    return { triggered: false, triggeredAtT: null, bearingHeatGaugeRatio, causeLog: null };
+  }
+
+  it('no-op境界: ゲージ0では合成結果がbaseと完全一致する(健全時の既存挙動を変えない)', () => {
+    const base = standardCarConfig();
+    const r = composeD09RuntimeEffect(base, d09(0));
+    expect(r.ok).toBe(true);
+    if (!r.ok) throw new Error('到達しない');
+    expect(r.carConfig.axleFriction).toBe(base.axleFriction);
+    expect(r.carConfig).toEqual(base);
+  });
+
+  it('単調性: ゲージ増加に対しaxleFrictionが厳密に単調増加する', () => {
+    const base = standardCarConfig();
+    const values = [0, 0.25, 0.5, 0.75, 1].map((g) => {
+      const r = composeD09RuntimeEffect(base, d09(g));
+      if (!r.ok) throw new Error('到達しない');
+      return r.carConfig.axleFriction;
+    });
+    for (let i = 1; i < values.length; i++) expect(values[i]).toBeGreaterThan(values[i - 1]);
+  });
+
+  it('補完合成式1-(1-a)(1-b)に一致し、ゲージ満タンでも残り余地の10%しか消費しない', () => {
+    const base = standardCarConfig();
+    const r = composeD09RuntimeEffect(base, d09(1));
+    if (!r.ok) throw new Error('到達しない');
+    const expected = 1 - (1 - base.axleFriction) * (1 - D09_AXLE_FRICTION_INCREASE_PER_GAUGE);
+    expect(r.carConfig.axleFriction).toBeCloseTo(expected, 15);
+    expect(r.carConfig.axleFriction).toBeLessThan(1); // 1へ張り付かない(補完合成の性質)
+  });
+
+  it('値域: ゲージ[0,1]の全域でaxleFrictionが[0,1]に収まり、axleFriction以外のフィールドを変えない', () => {
+    const base = standardCarConfig();
+    for (let i = 0; i <= 20; i++) {
+      const r = composeD09RuntimeEffect(base, d09(i / 20));
+      if (!r.ok) throw new Error('到達しない');
+      expect(r.carConfig.axleFriction).toBeGreaterThanOrEqual(0);
+      expect(r.carConfig.axleFriction).toBeLessThanOrEqual(1);
+      expect({ ...r.carConfig, axleFriction: base.axleFriction }).toEqual(base);
+    }
+  });
+
+  it('base側が契約違反(axleFrictionが範囲外)なら防御的にok:falseを返す', () => {
+    const r = composeD09RuntimeEffect({ ...standardCarConfig(), axleFriction: Number.NaN }, d09(0.5));
+    expect(r.ok).toBe(false);
+  });
+
+  it('D06との合成は可換(作用フィールドが異なるため順序に依存しない)', () => {
+    const base = standardCarConfig();
+    const d06Progress: D06Progress = { toothLossCount: 3, firstLossAtT: 1, causeLog: null, cumulativeOverloadExposure: 0, meshPhaseAccumulator: 0.3 };
+    const a = composeD06RuntimeEffect(base, d06Progress, 10);
+    if (!a.ok) throw new Error('到達しない');
+    const ab = composeD09RuntimeEffect(a.carConfig, d09(0.4));
+    const b = composeD09RuntimeEffect(base, d09(0.4));
+    if (!b.ok || !ab.ok) throw new Error('到達しない');
+    const ba = composeD06RuntimeEffect(b.carConfig, d06Progress, 10);
+    if (!ba.ok) throw new Error('到達しない');
+    expect(ab.carConfig).toEqual(ba.carConfig);
+  });
+});
+
+describe('destructionOrchestration.ts: buildVehicleFrameInputのgearFrictionLossW(P3-4 G4 §7.5 R8)', () => {
+  const motorConfig = goodMotorConfig();
+
+  /** loadTorqueNm・motor.omegaだけを差し替えたvehicle stateを作る。 */
+  function vehicleStateWith(loadTorqueNm: number, omega: number, carConfig: CarConfig): VehicleSimState {
+    const base = createInitialVehicleState(motorConfig, carConfig);
+    return { ...base, loadTorqueNm, motor: { ...base.motor, omega } };
+  }
+
+  it('P_loss = |loadTorqueNm × ω_motor| × (1 - eta) に一致する(既存反射式の下でのギヤ噛合散逸)', () => {
+    const carConfig = standardCarConfig({ gearEfficiency: 0.8 });
+    const prev = vehicleStateWith(0, 0, carConfig);
+    const next = vehicleStateWith(0.02, 300, carConfig);
+    const frame = buildVehicleFrameInput(motorConfig, carConfig, prev, next);
+    expect(frame.gearFrictionLossW).toBeCloseTo(0.02 * 300 * (1 - 0.8), 12);
+  });
+
+  it('負のトルク(降坂等)でも損失は非負である(絶対値をとる)', () => {
+    const carConfig = standardCarConfig({ gearEfficiency: 0.8 });
+    const frame = buildVehicleFrameInput(
+      motorConfig, carConfig, vehicleStateWith(0, 0, carConfig), vehicleStateWith(-0.02, 300, carConfig),
+    );
+    expect(frame.gearFrictionLossW).toBeGreaterThan(0);
+    expect(frame.gearFrictionLossW).toBeCloseTo(0.02 * 300 * 0.2, 12);
+  });
+
+  it('eta=1(無損失)なら損失が厳密に0になる(0恒等性)', () => {
+    const carConfig = standardCarConfig({ gearEfficiency: 1 });
+    const frame = buildVehicleFrameInput(
+      motorConfig, carConfig, vehicleStateWith(0, 0, carConfig), vehicleStateWith(0.02, 300, carConfig),
+    );
+    expect(frame.gearFrictionLossW).toBe(0);
+  });
+
+  it('axleAngularVelocityRadSはω_motor/gearRatioであり、rpmThresholdと同じ車軸側の量である(§7.4 R15)', () => {
+    const carConfig = standardCarConfig({ gearRatio: 4 });
+    const frame = buildVehicleFrameInput(
+      motorConfig, carConfig, vehicleStateWith(0, 0, carConfig), vehicleStateWith(0.02, 400, carConfig),
+    );
+    expect(frame.axleAngularVelocityRadS).toBeCloseTo(100, 12);
+  });
+});
+
+describe('destructionOrchestration.ts: validateDestructionConfigのd09拡張フィールド検証(P3-4 G4)', () => {
+  type D09Config = NonNullable<DestructionConfigDraft['d09']>;
+  function draftWithD09(overrides: Partial<D09Config>): DestructionConfigDraft {
+    const base = goodDestructionConfig();
+    return { ...base, d09: { ...base.d09, ...overrides } };
+  }
+
+  it.each([
+    ['d09.thermal.conductionCoefficient', { thermal: { conductionCoefficient: 0, dissipationCoefficient: 0.5 } }],
+    ['d09.thermal.dissipationCoefficient', { thermal: { conductionCoefficient: 0.25, dissipationCoefficient: -1 } }],
+    ['d09.highLoadHighSpeed.loadTorqueThresholdNm', { highLoadHighSpeed: { loadTorqueThresholdNm: 0, rpmThreshold: 3000 } }],
+    ['d09.highLoadHighSpeed.rpmThreshold', { highLoadHighSpeed: { loadTorqueThresholdNm: 0.2, rpmThreshold: Number.NaN } }],
+    ['d09.gearSeizureDeltaFraction', { gearSeizureDeltaFraction: 0 }],
+    ['d09.bearingSeizureDeltaFraction', { bearingSeizureDeltaFraction: 1.5 }],
+  ] as [string, Partial<D09Config>][])('%s が値域外ならinvalidFieldsへ報告される', (field, overrides) => {
+    const result = validateDestructionConfig(draftWithD09(overrides));
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.invalidFields.some((f) => f.field === field)).toBe(true);
+  });
+
+  it('metalGearContactAlwaysがboolean以外ならinvalidFieldsへ報告される', () => {
+    const result = validateDestructionConfig(draftWithD09({ metalGearContactAlways: 1 as unknown as boolean }));
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.invalidFields.some((f) => f.field === 'd09.metalGearContactAlways')).toBe(true);
+  });
+
+  it('deltaFractionは境界値1を受理する((0,1]の閉じた上端)', () => {
+    const result = validateDestructionConfig(draftWithD09({ gearSeizureDeltaFraction: 1, bearingSeizureDeltaFraction: 1 }));
+    expect(result.ok).toBe(true);
   });
 });

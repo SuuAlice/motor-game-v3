@@ -51,6 +51,11 @@ export interface CarConfig {
   wheelAlignmentMm: number; // 0–3
   centerOfMassHeightMm: number; // 10–40
   motorMountOffsetMm: number; // 0–10
+  // P3-4 G3(計画§10.3、R13確定裁定)。モーター軸換算済み(reflected)のギヤ回転慣性(kg·m²)。
+  // 既定0(未指定時)であり、既存の全config・全テストはこのフィールドを持たないため
+  // jEffの計算結果はV2と完全に同一になる(回帰不変)。
+  // actual→reflectedの変換は J_reflected = J_actual / gearRatio²(src/materials/gearInertia.ts)。
+  gearReflectedInertiaKgM2?: number;
 }
 
 // spec §6.2のリザルト画面「エネルギー内訳」表示用。Fableレビューにより、
@@ -408,7 +413,13 @@ export function stepVehicle(
   const resist = computeResistances(carConfig, massKg, velocityMpsPre, slopeRad, effectiveAxisOffsetMm, omegaMotorPre, roughness, state.positionM);
 
   const jMotor = computeJ(motorConfig);
-  const jEff = jMotor + (massKg * wheelRadius * wheelRadius) / (gearRatio * gearRatio * eta);
+  // P3-4 G3(計画§10.3、R13確定裁定): ギヤの反射慣性を独立項として加算する。**質量反射項の
+  // /(gearRatio²*eta)と意図的に異なり、etaで除算しない**——慣性(回転エネルギーの貯蔵)はetaが
+  // 表す伝達損失(散逸)とは別の物理現象であり、jMotor(モーター軸上の慣性)がetaで除算されない
+  // のと同じ扱いにする。またgearReflectedInertiaKgM2はcapture時固定のスカラーであるため、
+  // etaを焼き込むとD06劣化でetaがstep毎に変動する際に「古いeta」が固定される不整合を生む。
+  // 既定0によりV2の計算結果と完全一致する(回帰不変)。
+  const jEff = jMotor + (massKg * wheelRadius * wheelRadius) / (gearRatio * gearRatio * eta) + (carConfig.gearReflectedInertiaKgM2 ?? 0);
   const tResistReflected = (wheelRadius / (gearRatio * eta)) * resist.total;
 
   let nextMotor: SimState;

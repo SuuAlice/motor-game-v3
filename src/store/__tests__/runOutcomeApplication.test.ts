@@ -7,13 +7,23 @@
 // 流し込む統合テストのみを追加する(1.2節)。applyRunOutcome自体のaction契約(P3-0で検証済み)は
 // 再検証しない。saveStore.ts・gameStore.tsはいずれも無改修(P3-0-Q2裁定、production配線はP3-4)。
 import { describe, expect, it } from 'vitest';
+// S-4構造監査(arbiter補足裁定HB-DEC-011ケースA)専用。既存src/engine/__tests__/
+// destructionModesImportStructure.test.tsと同型のソーステキスト走査パターン。
+import { readFileSync, readdirSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { join, relative } from 'node:path';
 import {
   abandonPendingApplication,
   applyRunOutcome,
   beginRun,
+  buildCourseRunNotebookRecord,
+  buildExperimentSession,
+  buildVehicleTestRunNotebookRecord,
   captureEquipmentIdSnapshot,
   createInitialPlayerInventoryAndLoadout,
   deriveFireExposureProfileFromLoadout,
+  deriveMaterialSelectionFromEquipment,
+  resolveProductionMaterialCompositionBaseline,
   isLeaseHeartbeatStale,
   LEASE_STALE_THRESHOLD_MS,
   PROVISIONAL_DISCOVERY_REWARD_G,
@@ -23,12 +33,14 @@ import {
   touchLeaseHeartbeat,
   validateEquipmentIdSnapshot,
   validateEquipmentLoadout,
+  type DeriveMaterialSelectionResult,
   type EquipmentIdSnapshot,
   type EquipmentLoadout,
   type RunApplicationEnvelope,
   type SaveEnvelopeMeta,
 } from '../runOutcomeApplication';
-import type { PlayerInventory, BodyPartState } from '../../materials/inventoryItem';
+import { DEFAULT_GARAGE_SELECTION, GEAR_PRESETS, resolveGarageBuild, type GarageSelection } from '../../data/partPresets';
+import type { PlayerInventory, BodyPartState, RotorAssemblyState } from '../../materials/inventoryItem';
 import { GEAR_TOTAL_TOOTH_COUNT } from '../../materials/inventoryItem';
 import { INITIAL_CASH_G } from '../shopEconomy';
 import {
@@ -44,6 +56,9 @@ import {
 } from '../../engine/destructionOrchestration';
 import type { DestructionRunContext, FireExposureProfile, RunOutcome, RunSnapshot } from '../../engine/destructionOrchestration';
 import type { DestructionModeId } from '../../engine/destructionModes';
+import { validateNotebookFinalFields } from '../notebookValidation';
+import type { LegacyExperimentSession, LegacyCourseRunNotebookRecord } from '../notebookStore';
+import type { LegacyVehicleTestRunNotebookRecord } from '../runOutcomeApplication';
 import { createInitialDestructionState, validateFireExposureProfile } from '../../engine/destructionModes';
 import type { MotorConfig, SimState } from '../../engine/motorPhysics';
 import { COIL_DEFORM_FRAMES, COIL_DEFORM_OMEGA } from '../../engine/constants';
@@ -103,8 +118,18 @@ function d01Event() {
 function d09Event() {
   return {
     mode: 'D09' as const,
-    causeLog: { currentA: 1, rpm: 1, atT: 1, temperature: { kind: 'uncalibratedGauge' as const, ratio: 1 }, bearingHeatGaugeRatio: 1 },
+    causeLog: {
+      currentA: 1,
+      rpm: 1,
+      atT: 1,
+      temperature: { kind: 'uncalibratedGauge' as const, ratio: 1 },
+      bearingHeatGaugeRatio: 1,
+      metalGearContactActive: false,
+      highLoadHighSpeedActive: true,
+    },
     isFirstThisSession: true as const,
+    gearSeizureDeltaFraction: 0.15,
+    bearingSeizureDeltaFraction: 0.2,
     physicsSnapshotAtT: { context: 'vehicle' as const, state: {} as never },
   };
 }
@@ -121,6 +146,80 @@ function baseEnvelope(overrides: Partial<RunApplicationEnvelope> = {}): RunAppli
     ...overrides,
   };
 }
+
+describe('runOutcomeApplication.ts: notebook record 3専用builder(P3-4 G6 §16.5)', () => {
+  const FINAL_STATE = createInitialDestructionState('lipo');
+
+  function outcomeWith(recipeKey: string): RunOutcome {
+    return {
+      destructionState: FINAL_STATE,
+      replaySnapshot: { recipeKey } as unknown as RunSnapshot,
+    } as unknown as RunOutcome;
+  }
+
+  const baseSession: LegacyExperimentSession = {
+    id: 's1', startedAt: 'a', endedAt: 'b', config: {} as never, seed: 1, steadyRpm: 0,
+    averageCurrent: 0, maxCurrent: 0, currentRatio: 0, rpmVariation: 0, maxBatteryHeat: 0,
+    events: [], samples: [],
+  };
+  const baseCourseRun: LegacyCourseRunNotebookRecord = {
+    id: 'c1', savedAt: 'a', trackId: 't', motorConfig: {} as never, carConfig: {} as never,
+    seed: 1, status: 'finished', elapsedTimeS: 0, positionM: 0, energyUsedJ: 0,
+    energyBreakdown: {} as never, samples: [],
+  };
+  const baseTestRun: LegacyVehicleTestRunNotebookRecord = {
+    id: 'v1', savedAt: 'a', motorConfig: {} as never, carConfig: {} as never, seed: 1,
+    status: 'finished', elapsedTimeS: 0, positionM: 0, energyUsedJ: 0,
+    energyBreakdown: {} as never, samples: [],
+  };
+
+  it('G6-B1. 3腕とも、RunOutcomeからfinalDestructionStateとrecipeKeyを一方向複写する', () => {
+    const outcome = outcomeWith('v1|abc');
+    for (const built of [
+      buildExperimentSession(baseSession, outcome),
+      buildCourseRunNotebookRecord(baseCourseRun, outcome),
+      buildVehicleTestRunNotebookRecord(baseTestRun, outcome),
+    ]) {
+      expect(built.finalDestructionState).toBe(FINAL_STATE);
+      expect(built.recipeKey).toBe('v1|abc');
+    }
+  });
+
+  it('G6-B2. base recordの他フィールドは一切変更しない(付与のみ)', () => {
+    const built = buildExperimentSession(baseSession, outcomeWith('v1|abc'));
+    const { finalDestructionState: _f, recipeKey: _r, ...rest } = built;
+    expect(rest).toEqual(baseSession);
+  });
+
+  it('G6-B3. 入力のbase recordを破壊しない(純関数)', () => {
+    const snapshot = structuredClone(baseCourseRun);
+    buildCourseRunNotebookRecord(baseCourseRun, outcomeWith('v1|abc'));
+    expect(baseCourseRun).toEqual(snapshot);
+  });
+
+  it('G6-B4. recipeKeyを呼出し側が指定する引数は存在しない(builderの引数は2つのみ)', () => {
+    // 一方向複写契約の構造的固定: 別のrecipeKey値を渡せるAPIがそもそも無いことを引数長で示す。
+    expect(buildExperimentSession.length).toBe(2);
+    expect(buildCourseRunNotebookRecord.length).toBe(2);
+    expect(buildVehicleTestRunNotebookRecord.length).toBe(2);
+  });
+
+  it('G6-B5. 生成結果は共通validatorのcurrent判定を通る(§16.4との接続)', () => {
+    const built = buildVehicleTestRunNotebookRecord(baseTestRun, outcomeWith('v1|abc'));
+    const result = validateNotebookFinalFields(built as unknown as Record<string, unknown>);
+    expect(result).toMatchObject({ ok: true, kind: 'current' });
+    // base record(builder適用前)はlegacy判定になる——pending経路では拒否される側。
+    expect(validateNotebookFinalFields(baseTestRun as unknown as Record<string, unknown>))
+      .toEqual({ ok: true, kind: 'legacy' });
+  });
+
+  it('G6-B6. 二重適用は型で不能(既に2フィールドを持つ値はLegacy型へ代入できない)', () => {
+    const built = buildVehicleTestRunNotebookRecord(baseTestRun, outcomeWith('v1|abc'));
+    // @ts-expect-error 既にfinalDestructionState/recipeKeyを持つ値はLegacy型の入力に取れない
+    // (D9是正: 既存値の黙った上書きを型システムで構築不能にする)。
+    buildVehicleTestRunNotebookRecord(built, outcomeWith('v1|xyz'));
+  });
+});
 
 describe('runOutcomeApplication.ts: validateEquipmentLoadout', () => {
   it('1. 正常なloadoutはok:trueを返す', () => {
@@ -141,6 +240,70 @@ describe('runOutcomeApplication.ts: validateEquipmentLoadout', () => {
   it('4. batteryItemIdがfamily不一致(gearのIDを渡す)はmissingRole:"battery"を返す', () => {
     const result = validateEquipmentLoadout({ ...baseLoadout(), batteryItemId: 'initial-gear-01' }, baseInventory());
     expect(result).toMatchObject({ ok: false, missingRole: 'battery' });
+  });
+
+  // --- P3-4 G6(§15.2・§15.3): 破壊済み個体の装備拒否 -------------------------
+  it('G6-1. collapsed rotorはdestroyedRole:"rotor"で拒否される(missingRoleではない)', () => {
+    const inventory = baseInventory();
+    const rotor = inventory.rotorAssemblies[0];
+    const withCollapsed: PlayerInventory = {
+      ...inventory,
+      rotorAssemblies: [{ ...rotor, collapsed: true }],
+    };
+    const result = validateEquipmentLoadout(baseLoadout(), withCollapsed);
+    expect(result).toMatchObject({ ok: false, destroyedRole: 'rotor' });
+    expect(result.ok ? '' : result.reason).toContain('崩壊済み');
+    // 失敗の意味が異なるため、missingRole腕とは混同されない。
+    expect(result.ok ? true : 'missingRole' in result).toBe(false);
+  });
+
+  it('G6-2. burnedOut rotorはdestroyedRole:"rotor"で拒否される(R17確定)', () => {
+    const inventory = baseInventory();
+    const rotor = inventory.rotorAssemblies[0];
+    const withBurnedOut: PlayerInventory = {
+      ...inventory,
+      rotorAssemblies: [{ ...rotor, burnedOut: true }],
+    };
+    const result = validateEquipmentLoadout(baseLoadout(), withBurnedOut);
+    expect(result).toMatchObject({ ok: false, destroyedRole: 'rotor' });
+    expect(result.ok ? '' : result.reason).toContain('焼損済み');
+  });
+
+  it('G6-3. 全損ギヤ(toothLossCount>=GEAR_TOTAL_TOOTH_COUNT)はdestroyedRole:"gear"で拒否される(M-1(v)確定)', () => {
+    const inventory = baseInventory();
+    const items = inventory.items.map((item) => (
+      item.family === 'gear'
+        ? { ...item, wearState: { ...item.wearState, toothLossCount: GEAR_TOTAL_TOOTH_COUNT } }
+        : item
+    ));
+    const result = validateEquipmentLoadout(baseLoadout(), { ...inventory, items } as PlayerInventory);
+    expect(result).toMatchObject({ ok: false, destroyedRole: 'gear' });
+    expect(result.ok ? '' : result.reason).toContain('全損済み');
+  });
+
+  it('G6-4. 全損の1本手前(9歯欠け)は装備できる(境界、seedingが受け取る値域0〜9の上端)', () => {
+    const inventory = baseInventory();
+    const items = inventory.items.map((item) => (
+      item.family === 'gear'
+        ? { ...item, wearState: { ...item.wearState, toothLossCount: GEAR_TOTAL_TOOTH_COUNT - 1 } }
+        : item
+    ));
+    const result = validateEquipmentLoadout(baseLoadout(), { ...inventory, items } as PlayerInventory);
+    expect(result.ok).toBe(true);
+  });
+
+  it('G6-5. 破壊済み個体はbeginRunでもdestroyedRole腕として伝わる(腕を潰さない)', () => {
+    const inventory = baseInventory();
+    const rotor = inventory.rotorAssemblies[0];
+    const result = beginRun(
+      baseLoadout(),
+      { ...inventory, rotorAssemblies: [{ ...rotor, collapsed: true }] },
+      'vehicle',
+      goodSaveMeta(),
+      null,
+      true,
+    );
+    expect(result).toMatchObject({ ok: false, destroyedRole: 'rotor' });
   });
 
   it('5. brush/magnet/gear不在はそれぞれ対応するmissingRoleを返す', () => {
@@ -664,12 +827,19 @@ describe('P3-1サブステップ4: stepMotorWithDestruction → applyRunOutcome�
         recoveryFrames: 6,
         recoveryContactResistanceMultiplier: 1.2,
       },
-      d06: { breakage: { kind: 'breakable', gearStrengthThresholdNm: 0.5 } },
+      d06: { breakage: { kind: 'breakable', gearStrengthThresholdNm: 0.5 }, toothFatigueExposureNmS: 0.5 },
       d07: {
         thermal: { conductionCoefficient: 0.1, dissipationCoefficient: 0.05 },
         irreversible: { kind: 'demagnetizing', magnetHeatGaugeLimit: 1, reversibleDroopThreshold: 0.7, reversibleDroopMultiplier: 0.95, demagnetizationDeltaFraction: 0.1 },
       },
-      d09: { bearingSeizureGaugeLimit: 1 },
+      d09: {
+        thermal: { conductionCoefficient: 0.25, dissipationCoefficient: 0.5 },
+        bearingSeizureGaugeLimit: 1,
+        metalGearContactAlways: false,
+        highLoadHighSpeed: { loadTorqueThresholdNm: 0.2, rpmThreshold: 3000 },
+        gearSeizureDeltaFraction: 0.15,
+        bearingSeizureDeltaFraction: 0.2,
+      },
     };
   }
 
@@ -690,6 +860,7 @@ describe('P3-1サブステップ4: stepMotorWithDestruction → applyRunOutcome�
       slopeRad: null,
       seed: 1,
       initialDestructionState: createInitialDestructionState('nonLipo'),
+      recipeKey: 'v1|test-motor',
       ...overrides,
     };
   }
@@ -740,6 +911,7 @@ describe('P3-1サブステップ4: stepMotorWithDestruction → applyRunOutcome�
       slopeRad: 0,
       seed: 1,
       initialDestructionState: createInitialDestructionState('nonLipo'),
+      recipeKey: 'v1|test-vehicle',
       ...overrides,
     };
   }
@@ -812,12 +984,19 @@ describe('P3-1サブステップ4: stepMotorWithDestruction → applyRunOutcome�
         recoveryFrames: 6,
         recoveryContactResistanceMultiplier: 1.2,
       },
-      d06: { breakage: { kind: 'breakable', gearStrengthThresholdNm: 0.5 } },
+      d06: { breakage: { kind: 'breakable', gearStrengthThresholdNm: 0.5 }, toothFatigueExposureNmS: 0.5 },
       d07: overrides.d07 ?? {
         thermal: { conductionCoefficient: 0.1, dissipationCoefficient: 0.05 },
         irreversible: { kind: 'demagnetizing', magnetHeatGaugeLimit: 1, reversibleDroopThreshold: 0.7, reversibleDroopMultiplier: 0.95, demagnetizationDeltaFraction: 0.1 },
       },
-      d09: { bearingSeizureGaugeLimit: 1 },
+      d09: {
+        thermal: { conductionCoefficient: 0.25, dissipationCoefficient: 0.5 },
+        bearingSeizureGaugeLimit: 1,
+        metalGearContactAlways: false,
+        highLoadHighSpeed: { loadTorqueThresholdNm: 0.2, rpmThreshold: 3000 },
+        gearSeizureDeltaFraction: 0.15,
+        bearingSeizureDeltaFraction: 0.2,
+      },
     };
   }
 
@@ -1488,9 +1667,16 @@ describe('P3-1サブステップ4: stepMotorWithDestruction → applyRunOutcome�
       d02: confirmedD02(),
       d04: { bodyScorchDeltaFraction: 0.2, magnetScorchDeltaFraction: 0.15 },
       d05: assembleD05Config(mapD05BrushWearConfig(brushId), d05CommonPart()),
-      d06: { breakage: { kind: 'breakable', gearStrengthThresholdNm: 0.5 } },
+      d06: { breakage: { kind: 'breakable', gearStrengthThresholdNm: 0.5 }, toothFatigueExposureNmS: 0.5 },
       d07: mapD07DestructionConfig(magnetId),
-      d09: { bearingSeizureGaugeLimit: 1 },
+      d09: {
+        thermal: { conductionCoefficient: 0.25, dissipationCoefficient: 0.5 },
+        bearingSeizureGaugeLimit: 1,
+        metalGearContactAlways: false,
+        highLoadHighSpeed: { loadTorqueThresholdNm: 0.2, rpmThreshold: 3000 },
+        gearSeizureDeltaFraction: 0.15,
+        bearingSeizureDeltaFraction: 0.2,
+      },
     };
   }
 
@@ -1959,5 +2145,459 @@ describe('P3-1サブステップ4: stepMotorWithDestruction → applyRunOutcome�
     const rotor = inputInventory.rotorAssemblies.find((r) => r.assemblyId === envelope.equipmentSnapshot.rotorAssemblyId);
     const rotorBefore = inputInventorySnapshotForComparison.rotorAssemblies.find((r) => r.assemblyId === envelope.equipmentSnapshot.rotorAssemblyId);
     expect(rotor).toEqual(rotorBefore);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// G1a′(arbiter補足裁定HB-DEC-011ケースA、docs/phase3-p3-4-plan.md v13 §4.4・§12・§20.8)。
+// production配線(gameStore.ts等からの実際の呼び出し)・beginRunActionへの統合は含まない
+// (G1b以降)。resolver・baseline構築純関数とその構造監査・負例のみを対象とする。
+// ---------------------------------------------------------------------------
+
+describe('runOutcomeApplication.ts: deriveMaterialSelectionFromEquipment(G1a′ resolver、Q1・Q2)', () => {
+  function validatedInitialLoadout(): EquipmentLoadout & { batteryItemId: string } {
+    const validated = validateEquipmentLoadout(baseLoadout(), baseInventory());
+    if (!validated.ok) throw new Error('テスト前提が崩れています: 初期loadoutの検証に失敗しました');
+    return validated.loadout;
+  }
+
+  it('検証済みloadout+inventoryから、素材5ID(MaterialSelection)+equipmentContext(bodyId)を単一経路で導出する', () => {
+    const result = deriveMaterialSelectionFromEquipment(validatedInitialLoadout(), baseInventory());
+    expect(result).toEqual<DeriveMaterialSelectionResult>({
+      ok: true,
+      selection: {
+        wireId: 'wire-copper-standard',
+        magnetId: 'magnet-ferrite',
+        gearId: 'gear-pom',
+        batteryId: 'battery-alkaline',
+        brushId: 'brush-copper-plate',
+      },
+      equipmentContext: { bodyId: 'body-none' },
+    });
+  });
+
+  it('bodyAssemblyIdが非nullの場合、equipmentContext.bodyIdをinventory.bodyPartsのmaterialIdから解決する(Q1: bodyId解決の統合)', () => {
+    const inventory = baseInventory();
+    const bodyPart: BodyPartState = { assemblyId: 'body-01', materialId: 'body-cardboard-cowl', scorchFraction: 0 };
+    const inventoryWithBody: PlayerInventory = { ...inventory, bodyParts: [bodyPart] };
+    const loadout = { ...validatedInitialLoadout(), bodyAssemblyId: 'body-01' };
+    const result = deriveMaterialSelectionFromEquipment(loadout, inventoryWithBody);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.equipmentContext).toEqual({ bodyId: 'body-cardboard-cowl' });
+  });
+
+  it('N-1(arbiter補足裁定負例仕様): sourceWireMaterialIdがnullのローター個体を防御的に拒否する(missingRole: rotor)。P6是正: 失敗分岐でも引数非破壊+同一入力同一出力を固定する', () => {
+    const inventory = baseInventory();
+    const rotorWithNullWire: RotorAssemblyState = { assemblyId: 'r1', sourceWireMaterialId: null, consumedWireM: 1, collapsed: false, burnedOut: false };
+    const inventoryWithBrokenRotor: PlayerInventory = { ...inventory, rotorAssemblies: [rotorWithNullWire] };
+    const loadout = { ...validatedInitialLoadout(), rotorAssemblyId: 'r1' };
+    const loadoutSnapshot: typeof loadout = JSON.parse(JSON.stringify(loadout));
+    const inventorySnapshot: typeof inventoryWithBrokenRotor = JSON.parse(JSON.stringify(inventoryWithBrokenRotor));
+
+    const result = deriveMaterialSelectionFromEquipment(loadout, inventoryWithBrokenRotor);
+    expect(result).toEqual<DeriveMaterialSelectionResult>({
+      ok: false,
+      reason: 'ローター個体の導線素材が特定できません(sourceWireMaterialIdが未設定です)',
+      missingRole: 'rotor',
+    });
+
+    // P6(純関数性、失敗分岐): 引数非破壊。
+    expect(loadout).toEqual(loadoutSnapshot);
+    expect(inventoryWithBrokenRotor).toEqual(inventorySnapshot);
+
+    // P6(純関数性、失敗分岐): 同一内容・別実体の引数で再呼出しし、同一の失敗出力を返すこと。
+    const result2 = deriveMaterialSelectionFromEquipment(
+      JSON.parse(JSON.stringify(loadoutSnapshot)),
+      JSON.parse(JSON.stringify(inventorySnapshot)),
+    );
+    expect(result2).toEqual(result);
+  });
+});
+
+describe('runOutcomeApplication.ts: resolveProductionMaterialCompositionBaseline(G1a′ baseline単一出典、Q4・P1是正)', () => {
+  function motorConfigWithVoltage(batteryVoltage: 1.5 | 3.0): MotorConfig {
+    return { coilTurns: 80, slitWidthMm: 1.5, sandingQuality: 0.9, brushPressure: 0.3, magnetStrength: 0.5, magnetDistanceMm: 10, batteryVoltage, axisOffsetMm: 0 };
+  }
+
+  it('batteryVoltage=1.5(one-cell)のとき、chassisBaselineGはresolveChassisBaselineGの凍結契約どおり135になる', () => {
+    const garageBuild = resolveGarageBuild(DEFAULT_GARAGE_SELECTION);
+    const baseline = resolveProductionMaterialCompositionBaseline(motorConfigWithVoltage(1.5), garageBuild);
+    expect(baseline.chassisBaselineG).toBe(135);
+  });
+
+  it('batteryVoltage=3.0(two-cell)のとき、chassisBaselineGは凍結契約どおり150になる', () => {
+    const garageBuild = resolveGarageBuild(DEFAULT_GARAGE_SELECTION);
+    const baseline = resolveProductionMaterialCompositionBaseline(motorConfigWithVoltage(3.0), garageBuild);
+    expect(baseline.chassisBaselineG).toBe(150);
+  });
+
+  it.each(GEAR_PRESETS.map((g) => [g.id, g.gearEfficiency] as const))(
+    'garageSelection.gearId=%s のとき、baseGearEfficiencyはgarageBuild.carConfig.gearEfficiency(%f)をそのまま返す(resolveGarageBuild再呼出しなし)',
+    (gearId, expectedEfficiency) => {
+      const garageSelection: GarageSelection = { ...DEFAULT_GARAGE_SELECTION, gearId };
+      const garageBuild = resolveGarageBuild(garageSelection);
+      const baseline = resolveProductionMaterialCompositionBaseline(motorConfigWithVoltage(3.0), garageBuild);
+      expect(baseline.baseGearEfficiency).toBe(expectedEfficiency);
+    },
+  );
+
+  it('P1是正(Suu_mot3指摘): baseGearEfficiencyとgearRatioが同一のresolveGarageBuild呼び出し結果(同一オブジェクト実体)から導出される——baseline関数がresolveGarageBuildを再呼出ししないことを、単一呼び出しの戻り値をそのまま2箇所(rawPlayerCarConfig相当・baseline)へ渡す形で固定する', () => {
+    const garageSelection: GarageSelection = { ...DEFAULT_GARAGE_SELECTION, gearId: 'torque' };
+    // G1bが行う「exact 1回」の呼び出しを模す。この1回の戻り値のみを以後使い回す。
+    const garageBuild = resolveGarageBuild(garageSelection);
+    const rawPlayerCarConfig = garageBuild.carConfig; // G1bがrawPlayerCarConfigとして使う実体
+    const baseline = resolveProductionMaterialCompositionBaseline(motorConfigWithVoltage(3.0), garageBuild);
+    // 同一実体(garageBuild.carConfig)からgearRatio・baseGearEfficiencyの両方が一貫して導出される
+    expect(rawPlayerCarConfig.gearRatio).toBe(GEAR_PRESETS.find((g) => g.id === 'torque')!.gearRatio);
+    expect(baseline.baseGearEfficiency).toBe(rawPlayerCarConfig.gearEfficiency);
+    expect(baseline.baseGearEfficiency).toBe(GEAR_PRESETS.find((g) => g.id === 'torque')!.gearEfficiency);
+  });
+
+  it('N-2(arbiter補足裁定負例仕様、compose直接部分): S-3関数を経由しない範囲外baseline(chassisBaselineG=10)をcomposeConfigFromMaterialsへ直接注入するとmassG下限80g未満のreasonでok:falseを返す(P3是正: exact reason固定、P6是正: 失敗分岐でも純関数性を固定)', () => {
+    const outOfRangeBaseline: MaterialCompositionBaseline = { chassisBaselineG: 10, baseGearEfficiency: 0.8 };
+    const motorConfig = motorConfigWithVoltage(3.0);
+    const carConfig: CarConfig = { massG: 150, gearEfficiency: 0.8, gearRatio: 4, wheelDiameterMm: 30, tireGrip: 0.7, axleFriction: 0, wheelAlignmentMm: 0, centerOfMassHeightMm: 20, motorMountOffsetMm: 0 };
+    const selection: MaterialSelection = { wireId: 'wire-copper-standard', magnetId: 'magnet-ferrite', gearId: 'gear-pom', batteryId: 'battery-alkaline', brushId: 'brush-copper-plate' };
+    const motorSnapshot: MotorConfig = JSON.parse(JSON.stringify(motorConfig));
+    const carSnapshot: CarConfig = JSON.parse(JSON.stringify(carConfig));
+    const baselineSnapshot: MaterialCompositionBaseline = JSON.parse(JSON.stringify(outOfRangeBaseline));
+    const selectionSnapshot: MaterialSelection = JSON.parse(JSON.stringify(selection));
+
+    const result = composeConfigFromMaterials(motorConfig, carConfig, outOfRangeBaseline, selection);
+    // 期待パス: massG計算(applyMassAdjustmentToBaselineG)のclamp範囲外reasonへ入ること。
+    // 部分成功値(ok:trueで一部だけ範囲外)・throwのいずれにも入らないことを、
+    // Result型の判別(ok:false固定)+reason文言(既存assumedGeometry.tsの実装文言と一致)で固定する。
+    expect(result).toEqual({
+      ok: false,
+      reason: 'baseline+deltaが既存clamp範囲[80,250]gを外れました: 10',
+    });
+
+    // P6(純関数性、失敗分岐): 引数非破壊。
+    expect(motorConfig).toEqual(motorSnapshot);
+    expect(carConfig).toEqual(carSnapshot);
+    expect(outOfRangeBaseline).toEqual(baselineSnapshot);
+    expect(selection).toEqual(selectionSnapshot);
+
+    // P6(純関数性、失敗分岐): 同一内容・別実体の引数で再呼出しし、同一の失敗出力を返すこと。
+    const result2 = composeConfigFromMaterials(
+      JSON.parse(JSON.stringify(motorSnapshot)),
+      JSON.parse(JSON.stringify(carSnapshot)),
+      JSON.parse(JSON.stringify(baselineSnapshot)),
+      JSON.parse(JSON.stringify(selectionSnapshot)),
+    );
+    expect(result2).toEqual(result);
+    // beginRunAction統合(nextRunSequence不変・RunSnapshot不生成、S-5の完全な不変条件)は
+    // G1a′の対象外——arbiter追加裁定Q9(2026-08-16、人間承認済み・発効済み)により、S-5と
+    // 本負例の後半(beginRunAction統合テストでの再現)はG1bの必須DoDへ正式に移管された
+    // (契約内容は不変、検証時期のみ変更)。G1a′ではresolver・baseline構築関数・composeの
+    // 純関数性(store/localStorage等非参照+引数非破壊+同一入力同一出力)を代替保証として
+    // テスト固定する(下記「G1a′純関数性」describe参照)。8段全体の再固定はG6で行う。
+  });
+});
+
+describe('runOutcomeApplication.ts: S-4構造監査(MaterialCompositionBaseline単一出典、arbiter補足裁定HB-DEC-011ケースA、P2是正)', () => {
+  const SRC_DIR = fileURLToPath(new URL('../../', import.meta.url)); // src/store/__tests__/ → src/
+  // 唯一の許可呼び出し元(S-3関数の定義ファイル)。'/'区切りへ正規化して比較する。
+  const ALLOWED_CALLER = 'store/runOutcomeApplication.ts';
+  // resolveChassisBaselineGの定義ファイル自体(呼び出しではなく宣言のため除外)。
+  const DEFINITION_FILE = 'materials/assumedGeometry.ts';
+  // S-3関数(resolveProductionMaterialCompositionBaseline)自体の名前。ALLOWED_CALLERファイル内でも
+  // この関数の本体範囲**外**は検査対象に含める(P2是正: ファイル単位の一律除外は、同一ファイル内・
+  // 関数外への不正呼出し混入を見逃す偽陰性を生むことがN-3で実際に確認された)。
+  const S3_FUNCTION_NAME = 'resolveProductionMaterialCompositionBaseline';
+
+  // P2是正: .tsxもproductionコードとして走査対象に含める(旧実装は.tsのみだった)。
+  function listProductionSourceFiles(dirPath: string): string[] {
+    const entries = readdirSync(dirPath, { withFileTypes: true });
+    const files: string[] = [];
+    for (const entry of entries) {
+      if (entry.name === '__tests__') continue;
+      const fullPath = join(dirPath, entry.name);
+      if (entry.isDirectory()) {
+        files.push(...listProductionSourceFiles(fullPath));
+      } else if (entry.isFile() && (entry.name.endsWith('.ts') || entry.name.endsWith('.tsx')) && !entry.name.endsWith('.test.ts') && !entry.name.endsWith('.test.tsx')) {
+        files.push(fullPath);
+      }
+    }
+    return files;
+  }
+
+  function relSrcPath(fullPath: string): string {
+    return relative(SRC_DIR, fullPath).split(/[\\/]/).join('/');
+  }
+
+  // コメント行(トリム後 '//'・'*'・'/**' で始まる行、JSDoc本文を含む)は実コードではないため
+  // 走査対象から除外する——doc comment中の関数名言及(例:
+  // 「assumedGeometry.tsのresolveChassisBaselineG()の結果を渡す」)を誤検知しないための措置。
+  function nonCommentLines(source: string): string[] {
+    return source.split('\n').filter((line) => {
+      const trimmed = line.trim();
+      return trimmed.length > 0 && !trimmed.startsWith('//') && !trimmed.startsWith('*') && !trimmed.startsWith('/**');
+    });
+  }
+
+  // 宣言行(`function resolveChassisBaselineG(`)は呼出しではないため除外する。
+  function isDeclarationLine(line: string): boolean {
+    return /\bfunction\s+resolveChassisBaselineG\s*\(/.test(line);
+  }
+
+  // P2是正(Suu_mot3指摘): ALLOWED_CALLERファイルであっても、S-3関数の本体範囲**外**は
+  // 検査対象に含める。波括弧の対応関係を数えて関数本体だけを抽出し、ALLOWED_CALLERファイルの
+  // 走査対象からその本体部分のみを除外する(ファイル丸ごと除外はしない)。
+  //
+  // 実装上の注意(Q9純関数性テスト実装時に発見・是正した不具合): 関数名直後の最初の'{'を
+  // 本体開始とみなす単純な実装は、引数の型注釈がインライン交差型オブジェクト
+  // (例: `EquipmentLoadout & { batteryItemId: string }`)を含む場合、その型注釈内の'{'を
+  // 誤って本体開始と判定してしまう(本関数の対象resolveProductionMaterialCompositionBaseline
+  // 自体は該当しないため実害はなかったが、同型の抽出関数がQ9純関数性テストで実際に
+  // 誤検出を起こしたため、両実装を統一して是正する)。引数リストの対応する')'を先に
+  // 括弧の対応関係で特定し、その**後**で最初に現れる'{'を本体開始とする。
+  function extractFunctionBody(source: string, functionName: string): string {
+    const headerPattern = new RegExp(`export function ${functionName}\\b`);
+    const headerMatch = headerPattern.exec(source);
+    if (!headerMatch) throw new Error(`監査テストの前提が崩れています: ${functionName}の定義が見つかりません`);
+    const parenStart = source.indexOf('(', headerMatch.index);
+    if (parenStart === -1) throw new Error(`監査テストの前提が崩れています: ${functionName}の開始丸括弧が見つかりません`);
+    let parenDepth = 0;
+    let parenEnd = parenStart;
+    for (; parenEnd < source.length; parenEnd++) {
+      if (source[parenEnd] === '(') parenDepth++;
+      else if (source[parenEnd] === ')') {
+        parenDepth--;
+        if (parenDepth === 0) { parenEnd++; break; }
+      }
+    }
+    if (parenDepth !== 0) throw new Error(`監査テストの前提が崩れています: ${functionName}の引数リストの終了丸括弧を検出できませんでした`);
+    const braceStart = source.indexOf('{', parenEnd);
+    if (braceStart === -1) throw new Error(`監査テストの前提が崩れています: ${functionName}の開始波括弧が見つかりません`);
+    let depth = 0;
+    let i = braceStart;
+    for (; i < source.length; i++) {
+      if (source[i] === '{') depth++;
+      else if (source[i] === '}') {
+        depth--;
+        if (depth === 0) { i++; break; }
+      }
+    }
+    if (depth !== 0) throw new Error(`監査テストの前提が崩れています: ${functionName}の終了波括弧を検出できませんでした`);
+    return source.slice(braceStart, i);
+  }
+
+  // 検査対象テキストを返す: ALLOWED_CALLERファイルはS-3関数の本体を除いた残り全文、
+  // 他ファイルは全文そのまま。
+  function scanTargetText(relPath: string, source: string): string {
+    if (relPath !== ALLOWED_CALLER) return source;
+    const body = extractFunctionBody(source, S3_FUNCTION_NAME);
+    return source.replace(body, '');
+  }
+
+  it('resolveChassisBaselineGの直接呼出しがS-3関数(resolveProductionMaterialCompositionBaseline)本体以外のproductionコードに存在しない', () => {
+    const files = listProductionSourceFiles(SRC_DIR);
+    const violations: string[] = [];
+    for (const filePath of files) {
+      const relPath = relSrcPath(filePath);
+      const source = readFileSync(filePath, 'utf-8');
+      // DEFINITION_FILE(assumedGeometry.ts)は宣言行のみisDeclarationLineで除外し、
+      // それ以外(同一ファイル内への不正呼出し混入等)は走査を継続する——ファイル単位の
+      // 一律除外(旧実装)は行わない(P2是正、N-3で検出漏れを実際に確認済み)。
+      const target = scanTargetText(relPath, source);
+      const hasCall = nonCommentLines(target).some((line) => /resolveChassisBaselineG\(/.test(line) && !isDeclarationLine(line));
+      if (hasCall) violations.push(relPath);
+    }
+    expect(violations, `想定外のresolveChassisBaselineG直接呼出し(S-3単一出典契約違反): ${violations.join(', ')}`).toEqual([]);
+  });
+
+  it('MaterialCompositionBaselineのリテラル構築(chassisBaselineG: <数値>)がS-3関数(resolveProductionMaterialCompositionBaseline)本体以外のproductionコードに存在しない', () => {
+    const files = listProductionSourceFiles(SRC_DIR);
+    const violations: string[] = [];
+    for (const filePath of files) {
+      const relPath = relSrcPath(filePath);
+      const source = readFileSync(filePath, 'utf-8');
+      const target = scanTargetText(relPath, source);
+      if (nonCommentLines(target).some((line) => /chassisBaselineG:\s*\d/.test(line))) violations.push(relPath);
+    }
+    expect(violations, `想定外のMaterialCompositionBaselineリテラル構築(S-3単一出典契約違反): ${violations.join(', ')}`).toEqual([]);
+  });
+
+  it('監査対象ファイル一覧が空でない・.tsxを含む(正規表現の不備・パス解決の誤りによる偽陰性を防ぐ)', () => {
+    const files = listProductionSourceFiles(SRC_DIR);
+    expect(files.length).toBeGreaterThan(50);
+    expect(files.some((f) => relSrcPath(f) === ALLOWED_CALLER)).toBe(true);
+    expect(files.some((f) => relSrcPath(f) === DEFINITION_FILE)).toBe(true);
+    expect(files.some((f) => f.endsWith('.tsx'))).toBe(true);
+  });
+
+  it('extractFunctionBodyがS-3関数の本体を正しく抽出する(監査ロジック自体の健全性、除外範囲が広すぎ/狭すぎないことの固定)', () => {
+    const source = readFileSync(join(SRC_DIR, 'store', 'runOutcomeApplication.ts'), 'utf-8');
+    const body = extractFunctionBody(source, S3_FUNCTION_NAME);
+    expect(body).toContain('resolveChassisBaselineG(cellSelection)');
+    expect(body).toContain('chassisBaselineG: resolveChassisBaselineG(cellSelection)');
+    // 本体は該当関数の閉じ括弧までで止まり、後続の無関係なコードを含まないこと。
+    expect(body).not.toContain(S3_FUNCTION_NAME + '__NEVER_PRESENT__');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// G1a′純関数性(arbiter追加裁定Q9、docs/phase3-p3-4-plan.md v14 §3.1・§20.9・§22)。
+// S-5不変条件(nextRunSequence不変等)のうち純関数側で成立しうる唯一の部分——
+// 「関数自身が副作用を持たない」ことをG1a′で先取り固定する。beginRunAction統合後の
+// 完全なS-5不変条件はG1b必須DoDへ移管済み(G1a′の対象外)。
+// ---------------------------------------------------------------------------
+
+describe('G1a′純関数性(arbiter追加裁定Q9、resolver・baseline構築関数・compose)', () => {
+  const PURITY_SRC_DIR = fileURLToPath(new URL('../../', import.meta.url)); // src/store/__tests__/ → src/
+
+  // 引数リストの対応する')'を先に括弧の対応関係で特定し、その後で最初に現れる'{'を本体開始と
+  // する(型注釈中のインライン交差型オブジェクト、例: `EquipmentLoadout & { batteryItemId: string }`、
+  // を誤って本体開始と判定しないため——実装時に実際に発生したバグの是正、下記デバッグログ参照)。
+  function extractNamedFunctionBody(source: string, functionName: string): string {
+    const headerPattern = new RegExp(`export function ${functionName}\\b`);
+    const headerMatch = headerPattern.exec(source);
+    if (!headerMatch) throw new Error(`テスト前提が崩れています: ${functionName}の定義が見つかりません`);
+    const parenStart = source.indexOf('(', headerMatch.index);
+    if (parenStart === -1) throw new Error(`テスト前提が崩れています: ${functionName}の開始丸括弧が見つかりません`);
+    let parenDepth = 0;
+    let parenEnd = parenStart;
+    for (; parenEnd < source.length; parenEnd++) {
+      if (source[parenEnd] === '(') parenDepth++;
+      else if (source[parenEnd] === ')') {
+        parenDepth--;
+        if (parenDepth === 0) { parenEnd++; break; }
+      }
+    }
+    if (parenDepth !== 0) throw new Error(`テスト前提が崩れています: ${functionName}の引数リストの終了丸括弧を検出できませんでした`);
+    const braceStart = source.indexOf('{', parenEnd);
+    if (braceStart === -1) throw new Error(`テスト前提が崩れています: ${functionName}の開始波括弧が見つかりません`);
+    let depth = 0;
+    let i = braceStart;
+    for (; i < source.length; i++) {
+      if (source[i] === '{') depth++;
+      else if (source[i] === '}') {
+        depth--;
+        if (depth === 0) { i++; break; }
+      }
+    }
+    if (depth !== 0) throw new Error(`テスト前提が崩れています: ${functionName}の終了波括弧を検出できませんでした`);
+    return source.slice(braceStart, i);
+  }
+
+  // Q9裁定が禁じる対象: store/localStorage/sessionStorage/グローバル状態への一切のアクセス。
+  // P7是正(Suu_mot3指摘): 個別store名の列挙(useGameStore等)だけでは将来の別store名への
+  // 差替えを見逃すため、use*Store一般形+.getState/.setState/subscribeの汎用アクセスパターンを
+  // 追加。時刻・乱数・crypto(非決定・環境依存の副作用源、純関数の同一入力同一出力性を壊す)、
+  // processの一般形(env限定ではなくprocess全体)も追加する。
+  const FORBIDDEN_GLOBAL_PATTERNS: RegExp[] = [
+    /\buse[A-Za-z0-9_]*Store\b/, // use*Store一般形(useGameStore/useSaveStore/useNotebookStore等を包含)
+    /\.getState\s*\(/,
+    /\.setState\s*\(/,
+    /\.subscribe\s*\(/,
+    /\blocalStorage\b/,
+    /\bsessionStorage\b/,
+    /\bwindow\b/,
+    /\bdocument\b/,
+    /\bglobalThis\b/,
+    /\bprocess\b/, // process.envに限らずprocess全体(process.argv等の環境依存も含む)
+    /\bDate\.now\s*\(/,
+    /\bMath\.random\s*\(/,
+    /\bperformance\.now\s*\(/,
+    /\bcrypto\b/,
+  ];
+
+  const PURITY_TARGETS: Array<[string, string]> = [
+    ['deriveMaterialSelectionFromEquipment', join(PURITY_SRC_DIR, 'store', 'runOutcomeApplication.ts')],
+    ['resolveProductionMaterialCompositionBaseline', join(PURITY_SRC_DIR, 'store', 'runOutcomeApplication.ts')],
+    ['composeConfigFromMaterials', join(PURITY_SRC_DIR, 'materials', 'materialMapping.ts')],
+  ];
+
+  // P7是正(Suu_mot3指摘): extractNamedFunctionBodyの抽出範囲自体が正しいことを恒久的に固定する
+  // (今回発見した「型注釈内の{を本体開始と誤認」の回帰防止)。各対象関数の本体に必ず含まれる
+  // 既知のトークンを直接assertし、空/過小抽出(誤って別関数やコメントのみを抽出してしまう偽陰性)
+  // を防ぐ。
+  const PURITY_TARGET_KNOWN_TOKENS: Record<string, string[]> = {
+    deriveMaterialSelectionFromEquipment: ['sourceWireMaterialId', 'findNarrowedInventoryItemById'],
+    resolveProductionMaterialCompositionBaseline: ['resolveChassisBaselineG'],
+    composeConfigFromMaterials: ['computeWireMagnetMassAdjustmentG'],
+  };
+
+  it.each(PURITY_TARGETS)('%sの抽出本体が既知トークンを含む(extractNamedFunctionBodyの抽出範囲自体の恒久回帰テスト)', (functionName, filePath) => {
+    const source = readFileSync(filePath, 'utf-8');
+    const body = extractNamedFunctionBody(source, functionName);
+    const knownTokens = PURITY_TARGET_KNOWN_TOKENS[functionName];
+    expect(knownTokens, `テスト前提が崩れています: ${functionName}の既知トークン一覧が未定義です`).toBeDefined();
+    for (const token of knownTokens) {
+      expect(body, `${functionName}の抽出本体が既知トークン"${token}"を含んでいません——本体抽出が過小/誤った範囲になっている可能性があります(空/過小抽出の偽陰性防止)`).toContain(token);
+    }
+  });
+
+  it.each(PURITY_TARGETS)('%sの本体がstore/localStorage/sessionStorage/グローバル状態/時刻・乱数・crypto/processを一切参照しない(構造検査)', (functionName, filePath) => {
+    const source = readFileSync(filePath, 'utf-8');
+    const body = extractNamedFunctionBody(source, functionName);
+    for (const pattern of FORBIDDEN_GLOBAL_PATTERNS) {
+      expect(body, `${functionName}が禁止パターン${pattern}を含んでいます(Q9純関数性違反)`).not.toMatch(pattern);
+    }
+  });
+
+  it('deriveMaterialSelectionFromEquipmentは引数(loadout/inventory)を変更せず、同一入力で同一出力を返す', () => {
+    const validated = validateEquipmentLoadout(baseLoadout(), baseInventory());
+    if (!validated.ok) throw new Error('テスト前提が崩れています: 初期loadoutの検証に失敗しました');
+    const loadout = validated.loadout;
+    const inventory = baseInventory();
+    const loadoutSnapshot: typeof loadout = JSON.parse(JSON.stringify(loadout));
+    const inventorySnapshot: typeof inventory = JSON.parse(JSON.stringify(inventory));
+
+    const result1 = deriveMaterialSelectionFromEquipment(loadout, inventory);
+    // 引数非破壊(呼出し後も入力オブジェクトが変異していないこと)。
+    expect(loadout).toEqual(loadoutSnapshot);
+    expect(inventory).toEqual(inventorySnapshot);
+
+    // 同一内容だが別実体の引数で再呼出しし、同一出力を返すこと(参照透過性)。
+    const result2 = deriveMaterialSelectionFromEquipment(
+      JSON.parse(JSON.stringify(loadoutSnapshot)),
+      JSON.parse(JSON.stringify(inventorySnapshot)),
+    );
+    expect(result2).toEqual(result1);
+  });
+
+  it('resolveProductionMaterialCompositionBaselineは引数を変更せず、同一入力で同一出力を返す', () => {
+    const rawPlayerMotorConfig: MotorConfig = { coilTurns: 80, slitWidthMm: 1.5, sandingQuality: 0.9, brushPressure: 0.3, magnetStrength: 0.5, magnetDistanceMm: 10, batteryVoltage: 3, axisOffsetMm: 0 };
+    const garageBuild = resolveGarageBuild({ ...DEFAULT_GARAGE_SELECTION, gearId: 'torque' });
+    const motorConfigSnapshot: MotorConfig = JSON.parse(JSON.stringify(rawPlayerMotorConfig));
+    const garageBuildSnapshot: typeof garageBuild = JSON.parse(JSON.stringify(garageBuild));
+
+    const result1 = resolveProductionMaterialCompositionBaseline(rawPlayerMotorConfig, garageBuild);
+    expect(rawPlayerMotorConfig).toEqual(motorConfigSnapshot);
+    expect(garageBuild).toEqual(garageBuildSnapshot);
+
+    const result2 = resolveProductionMaterialCompositionBaseline(
+      JSON.parse(JSON.stringify(motorConfigSnapshot)),
+      JSON.parse(JSON.stringify(garageBuildSnapshot)),
+    );
+    expect(result2).toEqual(result1);
+  });
+
+  it('composeConfigFromMaterialsは引数(baseMotorConfig/baseCarConfig/baseline/selection)を変更せず、同一入力で同一出力を返す(成功系)', () => {
+    const baseMotorConfig: MotorConfig = { coilTurns: 80, slitWidthMm: 1.5, sandingQuality: 0.9, brushPressure: 0.3, magnetStrength: 0.5, magnetDistanceMm: 10, batteryVoltage: 3, axisOffsetMm: 0 };
+    const baseCarConfig: CarConfig = { massG: 150, gearEfficiency: 0.8, gearRatio: 4, wheelDiameterMm: 30, tireGrip: 0.7, axleFriction: 0, wheelAlignmentMm: 0, centerOfMassHeightMm: 20, motorMountOffsetMm: 0 };
+    const baseline: MaterialCompositionBaseline = { chassisBaselineG: 150, baseGearEfficiency: 0.8 };
+    const selection: MaterialSelection = { wireId: 'wire-copper-standard', magnetId: 'magnet-ferrite', gearId: 'gear-pom', batteryId: 'battery-alkaline', brushId: 'brush-copper-plate' };
+
+    const motorSnapshot: MotorConfig = JSON.parse(JSON.stringify(baseMotorConfig));
+    const carSnapshot: CarConfig = JSON.parse(JSON.stringify(baseCarConfig));
+    const baselineSnapshot: MaterialCompositionBaseline = JSON.parse(JSON.stringify(baseline));
+    const selectionSnapshot: MaterialSelection = JSON.parse(JSON.stringify(selection));
+
+    const result1 = composeConfigFromMaterials(baseMotorConfig, baseCarConfig, baseline, selection);
+    expect(baseMotorConfig).toEqual(motorSnapshot);
+    expect(baseCarConfig).toEqual(carSnapshot);
+    expect(baseline).toEqual(baselineSnapshot);
+    expect(selection).toEqual(selectionSnapshot);
+
+    const result2 = composeConfigFromMaterials(
+      JSON.parse(JSON.stringify(motorSnapshot)),
+      JSON.parse(JSON.stringify(carSnapshot)),
+      JSON.parse(JSON.stringify(baselineSnapshot)),
+      JSON.parse(JSON.stringify(selectionSnapshot)),
+    );
+    expect(result2).toEqual(result1);
   });
 });

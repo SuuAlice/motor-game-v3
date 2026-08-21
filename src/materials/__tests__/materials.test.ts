@@ -177,11 +177,13 @@ describe('materials.ts 9ファミリー静的検査', () => {
       // 導線: 抵抗率4(projectSpec)+密度3(verified: Al/Cu/Ag)+密度1(pending: 銀メッキ)
       // 被膜: 耐熱クラス4(projectSpec)
       // 磁石: Br4+使用上限温度4(projectSpec)+密度4(verified: 全ティア manufacturerDatasheet)
-      // ギヤ: 密度4(verified: PEEKのみVictrex公式データシート確認済み。POM/PA6/チタンはpending)
+      // ギヤ: 密度4(verified: PEEK〈Victrex公式〉+チタン〈TIMET公式〉+POM〈Celanese公式〉の3件、
+      //       いずれもP3-4 G3のR14(c)で本文直接確認。PA6のみ公式PDFが画像のみでテキスト抽出
+      //       不能のためpending維持、写像層のdesignAssumptionで接続)
       // 台紙: 密度3(pending: 全ティア)
       // ボディ: 密度3(pending: 全ティア、tier1-3)
-      expect(verifiedCount).toBe(24);
-      expect(pendingCount).toBe(10);
+      expect(verifiedCount).toBe(26); // P3-4 G3: チタン(TIMET)+POM(Celanese)をverified化(24→26)
+      expect(pendingCount).toBe(8); // 同上(10→8)
       expect(verifiedCount + pendingCount).toBe(properties.length);
     });
 

@@ -9,9 +9,14 @@ import { TRACK_BY_ID } from '../data/tracks';
 import type { CarConfig } from '../engine/vehiclePhysics';
 import { MotorCanvas } from '../render/MotorCanvas';
 import { RaceCanvas } from '../render/RaceCanvas';
+import { RaceEffects } from '../render/RaceEffects';
+import { DestructionHud } from '../components/DestructionHud';
 import { useGameStore } from '../store/gameStore';
 
-const CAR_CONTROLS: Array<{ key: keyof CarConfig; label: string; min: number; max: number; step: number; unit: string }> = [
+// P3-4 G3: CarConfigへ追加したオプショナルフィールド(gearReflectedInertiaKgM2、計画§10.3)は
+// プレイヤーが直接操作する値ではない(素材から導出される)ため、スライダー対象のキー集合から
+// 除外する。これによりcar[control.key]の型はnumberのまま保たれる。
+const CAR_CONTROLS: Array<{ key: Exclude<keyof CarConfig, 'gearReflectedInertiaKgM2'>; label: string; min: number; max: number; step: number; unit: string }> = [
   { key: 'massG', label: '車体質量', min: 80, max: 250, step: 1, unit: 'g' },
   { key: 'gearRatio', label: '総減速比', min: 1, max: 12, step: 0.1, unit: ': 1' },
   { key: 'gearEfficiency', label: 'ギヤ効率', min: 0.6, max: 0.95, step: 0.01, unit: '' },
@@ -49,8 +54,14 @@ export function LabMode() {
     </div>
 
     {contact === 'lifted'
-      ? <section className="grid gap-4 lg:grid-cols-[1fr_0.9fr]"><div className="grid gap-4"><MotorCanvas /><RpmMeter /><ControlBar /><ObservationPanel /><GraphPanel /></div><ParamPanel /></section>
-      : <section className="grid gap-4"><RaceCanvas /><div className="grid grid-cols-2 gap-3 sm:grid-cols-5"><Meter label="速度" value={vehicle.velocityMps.toFixed(2)} unit="m/s" /><Meter label="回転数" value={vehicle.motor.rpm.toFixed(0)} unit="RPM" /><Meter label="電流" value={vehicle.motor.current.toFixed(2)} unit="A" /><Meter label="空転率" value={(vehicle.slipRatio * 100).toFixed(1)} unit="%" /><Meter label="発熱" value={(vehicle.motor.batteryHeat * 100).toFixed(0)} unit="%" /></div><div className="flex gap-3">{phase === 'running' ? <button type="button" onClick={abort} className="flex-1 rounded-xl bg-rose-700 px-4 py-3 font-black text-white">走行を中止</button> : <button type="button" onClick={start} className="flex-1 rounded-xl bg-sky-700 px-4 py-3 font-black text-white">手で押して走行</button>}<button type="button" onClick={reset} className="rounded-xl border border-slate-300 bg-white px-4 py-3 font-black">リセット</button></div><CourseResultGraph history={history} track={track} /></section>}
+      ? <section className="grid gap-4 lg:grid-cols-[1fr_0.9fr]"><div className="grid gap-4"><DestructionHud /><div className="relative"><MotorCanvas />
+          {/* G8: motor-only走行の破壊演出。RaceCanvasは持ち込まない(stepTestRunを回すため)。
+              legacy overlayは前走行の残骸vehicleStateに由来するので抑止する。 */}
+          <RaceEffects vehicle={vehicle} active={true} legacyOverlays={false} />
+        </div><RpmMeter /><ControlBar /><ObservationPanel /><GraphPanel /></div><ParamPanel /></section>
+      : <section className="grid gap-4"><DestructionHud /><RaceCanvas /><div className="grid grid-cols-2 gap-3 sm:grid-cols-5"><Meter label="速度" value={vehicle.velocityMps.toFixed(2)} unit="m/s" /><Meter label="回転数" value={vehicle.motor.rpm.toFixed(0)} unit="RPM" /><Meter label="電流" value={vehicle.motor.current.toFixed(2)} unit="A" /><Meter label="空転率" value={(vehicle.slipRatio * 100).toFixed(1)} unit="%" /><Meter label="発熱" value={(vehicle.motor.batteryHeat * 100).toFixed(0)} unit="%" /></div><div className="flex gap-3">{phase === 'running' ? <button type="button" onClick={abort} className="flex-1 rounded-xl bg-rose-700 px-4 py-3 font-black text-white">走行を中止</button> : <button type="button" onClick={start} className="flex-1 rounded-xl bg-sky-700 px-4 py-3 font-black text-white">手で押して走行</button>}<button type="button" onClick={reset} className="rounded-xl border border-slate-300 bg-white px-4 py-3 font-black">リセット</button></div><CourseResultGraph history={history} track={track} /></section>}
+
+    <p className="text-center text-xs text-slate-500">安全注意: 実物の電池や導線を短絡させないでください。発熱した場合はすぐに接続を外してください。</p>
 
     <section className="rounded-2xl bg-white p-5 shadow-sm"><h3 className="text-xl font-black">車体パラメータ</h3><p className="mt-1 text-xs text-slate-500">単位付きの数値入力とスライダーはキーボードでも操作できます。</p><div className="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">{CAR_CONTROLS.map((control) => <SliderRow key={control.key} label={control.label} value={car[control.key]} min={control.min} max={control.max} step={control.step} unit={control.unit} onChange={(value) => setCar({ [control.key]: value })} />)}</div></section>
   </div>;

@@ -14,6 +14,7 @@ import { CourseResultGraph } from '../components/CourseResultGraph';
 import { BATTERY_HEAT_LIMIT } from '../engine/constants';
 import { useState } from 'react';
 import { useNotebookStore } from '../store/notebookStore';
+import { DestructionHud } from '../components/DestructionHud';
 
 const TRACK_ICONS: Record<string, string> = {
   'straight-10m': '↔',
@@ -69,6 +70,8 @@ export function CourseMode() {
 
   return (
     <div className="mx-auto flex w-full max-w-5xl flex-col gap-5 p-4 pb-12">
+      {/* G7-D: 走行中の破壊症状HUD。run未開始の間は何も描かない(コンポーネント内で判定)。 */}
+      <DestructionHud />
       <header className="overflow-hidden rounded-3xl bg-slate-900 p-6 text-white shadow-lg">
         <p className="text-xs font-black tracking-[0.24em] text-amber-300">HANDMADE COURSE SELECT</p>
         <h2 className="mt-2 text-3xl font-black">工作コースを選ぶ</h2>
@@ -263,7 +266,19 @@ function CourseResult({
         <ComparisonCard title="前回との比較" record={previous} current={vehicle} />
         <ComparisonCard title="このコースのベスト" record={best} />
       </div>
-      <button type="button" disabled={savedToNotebook} onClick={() => {
+      {/*
+        G6-R2(人間承認2026-08-19): 同一走行はPhase 3の原子経路により`kind:'courseRun'`で
+        自動記録されるため、手動保存は常に無効化する。許すと同一runの二重記録(しかも
+        片方はlegacy形状)になる。
+        無効化の形式はUI計画§6.4.1のdisabled規律に従う——**恒常的に既知の禁止**なので
+        native `disabled`+隣接する理由テキスト。色のみで状態を示さない。
+      */}
+      <p id="course-notebook-auto-save-note" className="mt-4 text-sm text-slate-600">
+        走行結果は自動で実験ノートへ記録されます。
+      </p>
+      <button type="button" disabled
+        aria-describedby="course-notebook-auto-save-note"
+        onClick={() => {
         const savedAt = new Date().toISOString();
         addCourseRun({
           id: `${Date.now()}-${track.id}-${courseRunSeed.toString(16)}`,
@@ -280,7 +295,7 @@ function CourseResult({
           samples: history.map((sample) => ({ ...sample })),
         });
         setSavedToNotebook(true);
-      }} className="mt-4 w-full rounded-xl bg-indigo-700 px-4 py-3 font-black text-white disabled:bg-emerald-700">{savedToNotebook ? '✓ A/B比較用に保存しました' : 'A/B比較用に実験ノートへ保存'}</button>
+      }} className="mt-4 w-full rounded-xl bg-indigo-700 px-4 py-3 font-black text-white disabled:bg-emerald-700 disabled:opacity-70">{savedToNotebook ? '✓ A/B比較用に保存しました' : 'A/B比較用に実験ノートへ保存'}</button>
     </section>
   );
 }

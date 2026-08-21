@@ -24,7 +24,9 @@ describe('formatRepresentativeProperty', () => {
   });
 
   it('PendingNumericValueは数値を出さず「未検証」と単位のみ表示する', () => {
-    const gear = materialOf('gear-pom'); // density: pending
+    // P3-4 G3(R14(c)): gear-pomはCelanese公式資料の本文確認によりverifiedへ昇格したため、
+    // pendingの実例をPA6へ差し替えた(PA6は公式PDFが画像のみでテキスト抽出不能、pending維持)。
+    const gear = materialOf('gear-nylon-pa6'); // density: pending
     const line = formatRepresentativeProperty(gear);
     expect(line).toContain('未検証');
     expect(line).not.toMatch(/\d/);

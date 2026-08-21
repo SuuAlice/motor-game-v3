@@ -7,14 +7,28 @@
 import type { MotorConfig } from '../engine/motorPhysics';
 import type { CarConfig, EnergyBreakdown, VehicleSimState } from '../engine/vehiclePhysics';
 import type { DegradationDiff, DestructionEvent, DestructionRunContext, FireExposureProfile, RunOutcome, RunSnapshot } from '../engine/destructionOrchestration';
-import type { DestructionModeId } from '../engine/destructionModes';
+import type { DestructionModeId, DestructionState } from '../engine/destructionModes';
 import type { BearingAssemblyState, BodyPartState, EquipmentRole, InventoryItem, PlayerInventory, RotorAssemblyState } from '../materials/inventoryItem';
 import { GEAR_TOTAL_TOOTH_COUNT } from '../materials/inventoryItem';
 import { applyBearingDiff, applyBodyDiff, applyBrushDiff, applyGearDiff, applyMagnetDiff, applyRotorDiff } from '../materials/degradationApplication';
+// G1a′(arbiter補足裁定HB-DEC-011ケースA Q1・Q4)。resolverはstore層(EquipmentLoadout/
+// PlayerInventoryの所在)に置き、materials→store方向のimport逆転を作らない(Q1根拠)。
+import type { BodyMaterialId, EquipmentDestructionContext, MaterialCompositionBaseline, MaterialSelection } from '../materials/materialMapping';
+import type { ChassisBaselineSelection } from '../materials/assumedGeometry';
+import { resolveChassisBaselineG } from '../materials/assumedGeometry';
 // 型のみの参照(brabit_mot3所有ファイルを一切変更しない、import typeは実行時の依存を持たない)
-import type { ExperimentSession, CourseRunNotebookRecord } from './notebookStore';
+import type {
+  ExperimentSession,
+  CourseRunNotebookRecord,
+  LegacyExperimentSession,
+  LegacyCourseRunNotebookRecord,
+} from './notebookStore';
 import type { TestRunSample } from './gameStore';
 import { INITIAL_CASH_G } from './shopEconomy';
+// G1a′(Q4、Suu_mot3精度追補指摘)。値importだが本ファイル内では一切呼び出さない——
+// GarageBuildResultの型抽出(ReturnType<typeof resolveGarageBuild>)専用。実際の呼び出しは
+// G1b(brabit所有)がexact 1回行う。
+import { resolveGarageBuild } from '../data/partPresets';
 
 // ---------------------------------------------------------------------------
 // 1節: EquipmentLoadout / EquipmentIdSnapshot
@@ -56,13 +70,28 @@ export function deriveFireExposureProfileFromLoadout(snapshot: EquipmentIdSnapsh
 
 export type ValidateEquipmentLoadoutResult =
   | { ok: true; loadout: EquipmentLoadout & { batteryItemId: string } }
-  | { ok: false; reason: string; missingRole: EquipmentRole };
+  | { ok: false; reason: string; missingRole: EquipmentRole }
+  // P3-4 G6(§15.2): 個体は実在するが**破壊済みで装備できない**場合の新分岐。
+  // missingRole(実在しない)とは失敗の意味が異なるため別腕にする。UI側は`reason`
+  // (日本語文言として構築済み)をそのまま表示してよい。
+  | { ok: false; reason: string; destroyedRole: EquipmentRole };
 
 // 生きたloadoutがinventoryに対して実在・family一致することを検証する。
 // bearingAssembly.gearItemId===loadout.gearItemId の一致も必須検証する(1.2節)。
 export function validateEquipmentLoadout(loadout: EquipmentLoadout, inventory: PlayerInventory): ValidateEquipmentLoadoutResult {
   const rotor = inventory.rotorAssemblies.find((r) => r.assemblyId === loadout.rotorAssemblyId);
   if (!rotor) return { ok: false, reason: `rotorAssemblyId(${loadout.rotorAssemblyId})が見つかりません`, missingRole: 'rotor' };
+  // P3-4 G6(§15.2・§15.3): 破壊済み個体の装備拒否。collapsed(D01由来)・burnedOut(D02由来、
+  // R17確定)・gear全損(D06由来、M-1(v)確定)の3つは、いずれも「実在するが装備できない」個体。
+  // これらの拒否は§14.1(burnedOutは装備されない前提)・§14.3(seeding時のtoothLossCountは
+  // 常に0〜9)・§13.1のrestore検証(M-1(iv))が置く不変条件を装備段階で構造的に保証する、
+  // 互いを支え合う一体の設計である。
+  if (rotor.collapsed) {
+    return { ok: false, reason: `rotorAssemblyId(${loadout.rotorAssemblyId})は崩壊済みです`, destroyedRole: 'rotor' };
+  }
+  if (rotor.burnedOut) {
+    return { ok: false, reason: `rotorAssemblyId(${loadout.rotorAssemblyId})は焼損済みです`, destroyedRole: 'rotor' };
+  }
 
   if (loadout.batteryItemId === null) {
     return { ok: false, reason: '電池が未装備です', missingRole: 'battery' };
@@ -76,8 +105,15 @@ export function validateEquipmentLoadout(loadout: EquipmentLoadout, inventory: P
   if (!findInventoryItemById(inventory, loadout.magnetItemId, 'magnet')) {
     return { ok: false, reason: `magnetItemId(${loadout.magnetItemId})が見つかりません`, missingRole: 'magnet' };
   }
-  if (!findInventoryItemById(inventory, loadout.gearItemId, 'gear')) {
+  const gearItem = findNarrowedInventoryItemById(inventory, loadout.gearItemId, 'gear');
+  if (!gearItem) {
     return { ok: false, reason: `gearItemId(${loadout.gearItemId})が見つかりません`, missingRole: 'gear' };
+  }
+  // 全損ギヤ(歯が1本も残っていない)は装備拒否する(§15.3 M-1(v)確定)。判定は計画どおり
+  // GEAR_TOTAL_TOOTH_COUNTで行う(個体のwearState.totalToothCountも同値だが、契約に書かれた
+  // 定数を単一出典とする)。
+  if (gearItem.wearState.toothLossCount >= GEAR_TOTAL_TOOTH_COUNT) {
+    return { ok: false, reason: `gearItemId(${loadout.gearItemId})は全損済みです`, destroyedRole: 'gear' };
   }
   const bearing = inventory.bearingAssemblies.find((b) => b.assemblyId === loadout.bearingAssemblyId);
   if (!bearing) return { ok: false, reason: `bearingAssemblyId(${loadout.bearingAssemblyId})が見つかりません`, missingRole: 'bearing' };
@@ -172,7 +208,10 @@ export type BeginRunResult =
   | { ok: false; reason: 'leaseNotAcquired' }
   | { ok: false; reason: 'runInProgress' }
   | { ok: false; reason: 'pendingApplicationExists' }
-  | { ok: false; reason: string; missingRole: EquipmentRole };
+  | { ok: false; reason: string; missingRole: EquipmentRole }
+  // P3-4 G6(§15.2、UI計画§6.1失敗パターン表の「装備破壊済み」行): 破壊済み個体の装備拒否を
+  // run開始経路へもそのまま伝える。missingRole(実在しない)とは失敗の意味が異なるため別腕。
+  | { ok: false; reason: string; destroyedRole: EquipmentRole };
 
 // 前提: lease取得済み・pending=null・current=null・validateEquipmentLoadout成功。
 // leaseAcquiredは呼び出し元(store action)が4.2節の状態機械から判定した現在値を渡す。
@@ -188,10 +227,135 @@ export function beginRun(
   if (currentRunSequence !== null) return { ok: false, reason: 'runInProgress' };
   if (saveMeta.pendingApplication !== null) return { ok: false, reason: 'pendingApplicationExists' };
   const validated = validateEquipmentLoadout(loadout, inventory);
-  if (!validated.ok) return { ok: false, reason: validated.reason, missingRole: validated.missingRole };
+  if (!validated.ok) {
+    // 失敗腕を潰さずそのまま伝える(missingRole=実在しない / destroyedRole=実在するが破壊済み)。
+    return 'destroyedRole' in validated
+      ? { ok: false, reason: validated.reason, destroyedRole: validated.destroyedRole }
+      : { ok: false, reason: validated.reason, missingRole: validated.missingRole };
+  }
   const equipmentSnapshot = captureEquipmentIdSnapshot(validated.loadout, context);
   const runSequence = saveMeta.nextRunSequence;
   return { ok: true, runSequence, nextSaveMeta: { ...saveMeta, nextRunSequence: runSequence + 1 }, equipmentSnapshot };
+}
+
+// ---------------------------------------------------------------------------
+// 4.5節: G1a′ resolver/baseline(arbiter補足裁定HB-DEC-011ケースA、docs/phase3-p3-4-plan.md
+// v13 §4.4・§12・§20.8)。beginRunActionへの実配線(G1b)・Wear反映との合流(G6)は含まない。
+// ---------------------------------------------------------------------------
+
+export type DeriveMaterialSelectionResult =
+  | { ok: true; selection: MaterialSelection; equipmentContext: EquipmentDestructionContext }
+  | { ok: false; reason: string; missingRole: EquipmentRole };
+
+// findInventoryItemById(既存、1節)はfamily引数で絞り込むが戻り値をInventoryItem全体の
+// unionのまま返す(呼び出し時点のfamily値による型narrowingを行わない設計、既存の
+// validateEquipmentLoadoutは存在確認のみでmaterialIdを読まないため問題にならなかった)。
+// 本関数はmaterialIdを読むためfamily別に絞り込まれた型が必要——型述語(is)による
+// 専用narrowing版をここに新設する(既存findInventoryItemByIdは変更しない)。
+function findNarrowedInventoryItemById<F extends InventoryItem['family']>(
+  inventory: PlayerInventory,
+  itemId: string,
+  family: F,
+): Extract<InventoryItem, { family: F }> | undefined {
+  return inventory.items.find((item): item is Extract<InventoryItem, { family: F }> => item.itemId === itemId && item.family === family);
+}
+
+/**
+ * 検証済みloadout(validateEquipmentLoadoutのok側narrowing)+inventoryから、
+ * production DestructionConfig assembler(materialMapping.tsのassembleDestructionConfig)が
+ * 要求するMaterialSelection(素材5ID)+EquipmentDestructionContext(bodyId)を単一経路で
+ * 導出する(Q1確定)。存在・family・bearing一致検証は再実装しない——本関数を呼ぶ前に
+ * validateEquipmentLoadoutが既に検証済みであることを引数の型(narrowing済みloadout)で
+ * 前提とする(trusted precondition、単一検証権威、S-1)。
+ *
+ * bodyId解決(null→'body-none'、非null→検証済みbodyParts.materialId)を同一関数へ統合する
+ * (S-2)——同一のloadout+inventory読取りから素材5ID+bodyIdを一括導出する単一関数が、
+ * C-4監査(単一読取り・単一経路)の自然な実装単位である。
+ *
+ * beginRun合流契約(Q5): 本関数の失敗腕`{ok:false; reason; missingRole}`は、
+ * `ValidateEquipmentLoadoutResult`・`BeginRunResult`の既存missingRole腕と同一shapeであり、
+ * 新規のエラー型を導入しない。呼び出し側(brabit、G1b以降)はこの腕をそのままbeginRun不開始
+ * (UI計画§6.4.1の既存行)へ合流させられる。
+ */
+export function deriveMaterialSelectionFromEquipment(
+  loadout: EquipmentLoadout & { batteryItemId: string },
+  inventory: PlayerInventory,
+): DeriveMaterialSelectionResult {
+  const rotor = inventory.rotorAssemblies.find((r) => r.assemblyId === loadout.rotorAssemblyId);
+  // rotor自体の存在はvalidateEquipmentLoadoutが保証する(trusted precondition)。
+  // sourceWireMaterialIdのnullはvalidateEquipmentLoadoutの検証対象外(rotor個体の存在とは
+  // 別の懸念)であるため、ここで唯一防御的に検証する(現行の生成経路は
+  // createInitialPlayerInventoryAndLoadoutの非null初期値のみで、実際にnullとなる経路は
+  // 0件——理論上到達しない防御的分岐、arbiter補足裁定N-1)。
+  if (!rotor || rotor.sourceWireMaterialId === null) {
+    return { ok: false, reason: 'ローター個体の導線素材が特定できません(sourceWireMaterialIdが未設定です)', missingRole: 'rotor' };
+  }
+
+  // 以下4件はvalidateEquipmentLoadoutが既に存在・family一致を検証済み(trusted precondition、
+  // S-1の「検証ロジックの再実装禁止」)。非null assertionはこの契約に基づく。
+  const magnetItem = findNarrowedInventoryItemById(inventory, loadout.magnetItemId, 'magnet')!;
+  const gearItem = findNarrowedInventoryItemById(inventory, loadout.gearItemId, 'gear')!;
+  const batteryItem = findNarrowedInventoryItemById(inventory, loadout.batteryItemId, 'battery')!;
+  const brushItem = findNarrowedInventoryItemById(inventory, loadout.brushItemId, 'brush')!;
+
+  // bodyIdはMaterialSelectionの対象外(§3.4)だがequipmentContextとして同一関数が解決する(Q1)。
+  // bodyAssemblyId非null時の実在も同様にvalidateEquipmentLoadoutが検証済み(trusted precondition)。
+  const bodyId: BodyMaterialId =
+    loadout.bodyAssemblyId === null
+      ? 'body-none'
+      : inventory.bodyParts.find((b) => b.assemblyId === loadout.bodyAssemblyId)!.materialId;
+
+  return {
+    ok: true,
+    selection: {
+      wireId: rotor.sourceWireMaterialId,
+      magnetId: magnetItem.materialId,
+      gearId: gearItem.materialId,
+      batteryId: batteryItem.materialId,
+      brushId: brushItem.materialId,
+    },
+    equipmentContext: { bodyId },
+  };
+}
+
+// resolveGarageBuildの戻り値型をReturnType経由で参照する(値としては一切呼び出さない——
+// typeof は型クエリであり実行時呼び出しを伴わない)。手書きでshapeを複製すると
+// resolveGarageBuildの戻り値が将来変わった際にここが追従し忘れて静かにズレる
+// (戻り型ドリフト)ため、参照のみで固定する。構造型は値の出自・同一実体までは強制
+// しない点に注意——本関数のシグネチャはbaseline内でのresolveGarageBuild再呼出しを
+// 構造的に排除するのみであり、G1b呼び出し元が実際にexact 1回しか呼ばないこと・
+// rawPlayerCarConfigと同一実体を渡すことは、G1bのC-4統合テストで別途固定する
+// (Suu_mot3精度追補指摘)。
+export type GarageBuildResult = ReturnType<typeof resolveGarageBuild>;
+
+/**
+ * production `MaterialCompositionBaseline`の単一出典構築関数(Q4確定式)。
+ * chassis側は凍結関数`resolveChassisBaselineG`(§1.5訂正、135/150g=電池込み標準シャーシ)、
+ * gear側は呼び出し元が渡す`garageBuild`(=`resolveGarageBuild(garageSelection)`のexact 1回の
+ * 呼び出し結果)の`carConfig.gearEfficiency`(gearRatioと同一の単一呼び出し結果)——chassis/gearで
+ * 出典が非対称であることが確定形(候補(a)原文の「両方ともresolveGarageBuildから取る」対称案は
+ * 不採用、指摘3)。cellSelectionは`rawPlayerMotorConfig.batteryVoltage`という単一の別入力から
+ * 導出する(garageBuild.batteryVoltageは使わない、Q4「第二の入力経路を作らない」を
+ * cellSelection側にも適用——garageBuild.batteryVoltageとrawPlayerMotorConfig.batteryVoltageは
+ * 独立に乖離しうる別事実であり、cellSelectionの単一出典はrawPlayerMotorConfigのみとする)。
+ *
+ * `resolveGarageBuild`のchassis側(chassis.baseMassG、電池質量抜き60/110/190g)は使わない
+ * ——凍結契約135/150g(電池込み)と数値矛盾するため(指摘3)。
+ *
+ * S-4(構造監査): 本関数本体以外のproductionコードが`resolveChassisBaselineG`を直接呼び出す・
+ * `MaterialCompositionBaseline`をリテラル構築することを禁じる(テスト・
+ * scripts/materialSweep.tsは対象外)。監査テストは
+ * src/store/__tests__/runOutcomeApplication.test.tsに実装する。
+ */
+export function resolveProductionMaterialCompositionBaseline(
+  rawPlayerMotorConfig: MotorConfig,
+  garageBuild: GarageBuildResult,
+): MaterialCompositionBaseline {
+  const cellSelection: ChassisBaselineSelection = rawPlayerMotorConfig.batteryVoltage === 1.5 ? 'one-cell' : 'two-cell';
+  return {
+    chassisBaselineG: resolveChassisBaselineG(cellSelection),
+    baseGearEfficiency: garageBuild.carConfig.gearEfficiency,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -211,6 +375,62 @@ export interface VehicleTestRunNotebookRecord {
   energyUsedJ: number;
   energyBreakdown: EnergyBreakdown;
   samples: TestRunSample[];
+  // P3-4 G6(§16.1、項目B)。3腕共通。
+  finalDestructionState: DestructionState;
+  recipeKey: string;
+}
+
+export type LegacyVehicleTestRunNotebookRecord = Omit<VehicleTestRunNotebookRecord, 'finalDestructionState' | 'recipeKey'> & {
+  finalDestructionState?: never;
+  recipeKey?: never;
+};
+
+export type StoredVehicleTestRunNotebookRecord = VehicleTestRunNotebookRecord | LegacyVehicleTestRunNotebookRecord;
+
+// ---------------------------------------------------------------------------
+// P3-4 G6 §16.5: notebook record 3腕の専用builder(alice所有、純関数、D9是正)
+//
+// 汎用`<T>`builderは、既に2フィールドを持つ型を渡しても受理してしまい既存値を黙って
+// 上書きできる——「新規書込みで欠落・二重上書きを構築不能にする」というD9の要求を
+// 満たさない。是正として**3腕それぞれのLegacy型(2フィールドを持たない型)を入力に固定した
+// 専用builder**へ分割する: 既に2フィールドを持つ値を渡すこと自体がコンパイルエラーになる。
+//
+// `recipeKey`は`runOutcome.replaySnapshot.recipeKey`から**一方向に複写**する(§13.1 exact
+// transport契約3)——呼出し側が別のrecipeKey値を渡せる引数は設けない。これにより
+// 「RunSnapshotの権威値→record自身の権威値」への移行点はこの3関数だけになる(P3-1-Q9)。
+// ---------------------------------------------------------------------------
+
+export function buildVehicleTestRunNotebookRecord(
+  recordWithoutFinalState: LegacyVehicleTestRunNotebookRecord,
+  runOutcome: RunOutcome,
+): VehicleTestRunNotebookRecord {
+  return {
+    ...recordWithoutFinalState,
+    finalDestructionState: runOutcome.destructionState,
+    recipeKey: runOutcome.replaySnapshot.recipeKey,
+  };
+}
+
+export function buildExperimentSession(
+  recordWithoutFinalState: LegacyExperimentSession,
+  runOutcome: RunOutcome,
+): ExperimentSession {
+  return {
+    ...recordWithoutFinalState,
+    finalDestructionState: runOutcome.destructionState,
+    recipeKey: runOutcome.replaySnapshot.recipeKey,
+  };
+}
+
+export function buildCourseRunNotebookRecord(
+  recordWithoutFinalState: LegacyCourseRunNotebookRecord,
+  runOutcome: RunOutcome,
+): CourseRunNotebookRecord {
+  return {
+    ...recordWithoutFinalState,
+    finalDestructionState: runOutcome.destructionState,
+    recipeKey: runOutcome.replaySnapshot.recipeKey,
+  };
 }
 
 export type PendingNotebookRecord =
@@ -222,11 +442,53 @@ export type PendingNotebookRecord =
 // 5.2節: 図鑑記録の型(codexRecords、trim対象外)
 // ---------------------------------------------------------------------------
 
+/**
+ * P3-4 G7(項目K、R25承認済み。人間再承認は2026-08-15「A〜O、15件」に含まれ承認済み):
+ * 検死レポートが必要とする2フィールドを追加する。
+ *
+ * - `discoveryEvent`: 初回登録イベント(`physicsSnapshotAtT`+causeLog込み)。「その瞬間に
+ *   何が観測されたか」を保持する
+ * - `runDegradationDiffs`: **走行単位の事実**。mode別に虚偽の帰属をしない——1回の走行で
+ *   複数モードが発火した場合、どのdiffがどのmodeに由来するかは一般に決定できないため、
+ *   走行単位でまとめて持つ
+ *
+ * **legacy/currentの判別はproperty-presence**であり、交差不変条件
+ * `hasDiscoveryEvent === hasRunDegradationDiffs`を守る——2フィールドは同時にP3-4で追加された
+ * ため、「片方だけ存在する」半状態はどちらの経路から来ても壊れたデータである
+ * (notebook 3腕の`finalDestructionState`/`recipeKey`と同型の設計)。
+ */
 export interface CodexRecordEntry {
   modeId: DestructionModeId;
   firstDiscoveredAtRunSequence: number; // envelope.runKey.runSequenceから取得する
   replaySnapshot: RunSnapshot;
+  discoveryEvent: DestructionEvent;
+  runDegradationDiffs: readonly DegradationDiff[];
 }
+
+/** P3-4以前に永続化された図鑑記録(2フィールドとも持たない)。`?: never`で片側だけの保持を禁じる。 */
+export type LegacyCodexRecordEntry = Omit<CodexRecordEntry, 'discoveryEvent' | 'runDegradationDiffs'> & {
+  discoveryEvent?: never;
+  runDegradationDiffs?: never;
+};
+
+/** 永続層から読み取る図鑑記録。過去の記録を読めなくしないためunionで受理する。 */
+export type StoredCodexRecordEntry = CodexRecordEntry | LegacyCodexRecordEntry;
+
+/**
+ * P3-4 G7(項目J、承認済み): 計測器の所持状態。`encyclopedia`(破壊モードの発見状態)とは
+ * 概念的に独立した経済領域(店で買う道具)であるため、`PersistedSaveState`直下へ
+ * `encyclopedia`と**同格**で置く(§11.3(a)、対立案の`encyclopedia`配下は却下)。
+ *
+ * `Set`ではなく配列で持つ——`writeV16`は`JSON.stringify`で永続化するため`Set`は要素を失う
+ * (§11.3のJ2是正。既存`discoveredModes`と同型)。
+ */
+export type InstrumentId = 'gaussMeter';
+
+export interface InstrumentOwnership {
+  ownedInstrumentIds: readonly InstrumentId[];
+}
+
+export const INSTRUMENT_IDS: readonly InstrumentId[] = ['gaussMeter'];
 
 // ---------------------------------------------------------------------------
 // 附録A.4: SaveEnvelopeMeta・TabRuntimeState・RunApplicationEnvelope

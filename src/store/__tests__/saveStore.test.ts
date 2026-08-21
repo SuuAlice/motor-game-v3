@@ -4,7 +4,7 @@
 // fake localStorageをglobalThisへ注入する(必須1のクロスタブ検証もこれで行う——同一store
 // インスタンスのruntimeLeaseTokenを差し替えることでタブA/タブBを模擬する)。
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { useSaveStore, __testOnly, type NotebookSlice, type PersistedSaveState } from '../saveStore';
+import { useSaveStore, __testOnly, type NotebookSlice, type PersistedSaveState, type RunPreparationCallback, type RunPreparationResult } from '../saveStore';
 import {
   applyRunOutcome,
   captureEquipmentIdSnapshot,
@@ -14,6 +14,7 @@ import {
   type RunApplicationEnvelope,
 } from '../runOutcomeApplication';
 import { GEAR_TOTAL_TOOTH_COUNT } from '../../materials/inventoryItem';
+import { useGameStore } from '../gameStore';
 import { captureRunSnapshot, restoreRunSnapshot, type CaptureRunSnapshotInput, type DestructionConfig, type DestructionRunContext, type RunOutcome } from '../../engine/destructionOrchestration';
 import { createInitialDestructionState } from '../../engine/destructionModes';
 import type { DestructionModeId } from '../../engine/destructionModes';
@@ -52,12 +53,19 @@ function goodDestructionConfig(): DestructionConfig {
       recoveryFrames: 6,
       recoveryContactResistanceMultiplier: 1.2,
     },
-    d06: { breakage: { kind: 'breakable', gearStrengthThresholdNm: 0.5 } },
+    d06: { breakage: { kind: 'breakable', gearStrengthThresholdNm: 0.5 }, toothFatigueExposureNmS: 0.5 },
     d07: {
       thermal: { conductionCoefficient: 0.1, dissipationCoefficient: 0.05 },
       irreversible: { kind: 'demagnetizing', magnetHeatGaugeLimit: 1, reversibleDroopThreshold: 0.7, reversibleDroopMultiplier: 0.95, demagnetizationDeltaFraction: 0.1 },
     },
-    d09: { bearingSeizureGaugeLimit: 1 },
+    d09: {
+        thermal: { conductionCoefficient: 0.25, dissipationCoefficient: 0.5 },
+        bearingSeizureGaugeLimit: 1,
+        metalGearContactAlways: false,
+        highLoadHighSpeed: { loadTorqueThresholdNm: 0.2, rpmThreshold: 3000 },
+        gearSeizureDeltaFraction: 0.15,
+        bearingSeizureDeltaFraction: 0.2,
+      },
   };
 }
 
@@ -71,6 +79,7 @@ function motorSnapshotInput(): CaptureRunSnapshotInput {
     runContext: motorRunContext(), initialMotorState: initialSimState(), initialVehicleState: null,
     track: null, courseLengthM: null, slopeRad: null, // ゲート6新規。motor文脈はnull必須
     seed: 1, initialDestructionState: createInitialDestructionState('lipo'),
+    recipeKey: 'v1|test-motor',
   };
 }
 
@@ -93,6 +102,7 @@ function vehicleTestRunSnapshotInput(): CaptureRunSnapshotInput {
     runContext: vehicleTestRunContext(), initialMotorState: vehicleState.motor, initialVehicleState: vehicleState,
     track: null, courseLengthM: 10, slopeRad: 0.3, // ゲート6新規。test-run文脈は両方非null必須
     seed: 1, initialDestructionState: createInitialDestructionState('lipo'),
+    recipeKey: 'v1|test-vehicle',
   };
 }
 
@@ -138,6 +148,8 @@ function sessionFixture(id: string): ExperimentSession {
     id, startedAt: new Date(0).toISOString(), endedAt: new Date(0).toISOString(),
     config: { coilTurns: 80, slitWidthMm: 1.5, sandingQuality: 0.9, brushPressure: 0.3, magnetStrength: 1, magnetDistanceMm: 10, batteryVoltage: 3, axisOffsetMm: 0 },
     seed: 1, steadyRpm: 0, averageCurrent: 0, maxCurrent: 0, currentRatio: 0, rpmVariation: 0, maxBatteryHeat: 0, events: [], samples: [],
+    // G6(§16.1・§16.2): 3腕とも2フィールドが必須。書き込み系actionは非legacy型のみ受理する。
+    finalDestructionState: createInitialDestructionState('lipo'), recipeKey: 'v1|fixture',
   };
 }
 
@@ -154,7 +166,18 @@ function courseRunRecordFixture(id: string) {
     seed: 1, status: 'finished' as const, elapsedTimeS: 1, positionM: 10, energyUsedJ: 1,
     energyBreakdown: { driveJ: 1, gearLossJ: 0, slipLossJ: 0, brushLossJ: 0, heatJ: 0 },
     samples: [],
+    finalDestructionState: createInitialDestructionState('lipo'), recipeKey: 'v1|fixture',
   };
+}
+
+/**
+ * G6-R2: `addCourseRunRecord`(legacy形状の直接書込み専用)へ渡すfixture。
+ * 現存する呼出し元はCourseMode手動保存の1系統のみで(retro UI置換まで存続する)、
+ * `RunOutcome`を持たないため2フィールドの出典がない。
+ */
+function legacyCourseRunRecordFixture(id: string) {
+  const { finalDestructionState: _f, recipeKey: _r, ...rest } = courseRunRecordFixture(id);
+  return rest;
 }
 
 function vehicleTestRunRecordFixture(id: string) {
@@ -164,6 +187,7 @@ function vehicleTestRunRecordFixture(id: string) {
     seed: 1, status: 'finished' as const, elapsedTimeS: 1, positionM: 10, energyUsedJ: 1,
     energyBreakdown: { driveJ: 1, gearLossJ: 0, slipLossJ: 0, brushLossJ: 0, heatJ: 0 },
     samples: [],
+    finalDestructionState: createInitialDestructionState('lipo'), recipeKey: 'v1|fixture',
   };
 }
 
@@ -630,7 +654,6 @@ describe('必須10: localStorage I/O失敗を成功扱いしない', () => {
       ['purchaseCartAction', () => useSaveStore.getState().purchaseCartAction([{ materialId: 'gear-pom', quantity: 1 }])],
       ['setEquipmentLoadout', () => useSaveStore.getState().setEquipmentLoadout(useSaveStore.getState().equipmentLoadout)],
       ['updateProgress', () => useSaveStore.getState().updateProgress({ testRunCompleted: true })],
-      ['addSessionRecord', () => useSaveStore.getState().addSessionRecord(sessionFixture('x'))],
       ['beginRunAction', () => useSaveStore.getState().beginRunAction('motor')],
     ];
     for (const [, run] of actions) {
@@ -679,7 +702,6 @@ describe('必須4: pendingApplication中は閲覧以外の全saveStore書き込�
     expect(useSaveStore.getState().salvageAction('initial-brush-01')).toMatchObject({ ok: false });
     expect(useSaveStore.getState().setEquipmentLoadout(useSaveStore.getState().equipmentLoadout)).toMatchObject({ ok: false });
     expect(useSaveStore.getState().updateProgress({ testRunCompleted: true })).toBe(false);
-    expect(useSaveStore.getState().addSessionRecord(sessionFixture('blocked'))).toMatchObject({ ok: false });
   });
 
   it('pending中でもretryPendingApplicationAction/abandonPendingApplicationActionは実行できる', () => {
@@ -698,8 +720,7 @@ describe('追補6: pending/lease未取得を全書き込みactionについてtab
     ['salvageAction', () => useSaveStore.getState().salvageAction('initial-brush-01')],
     ['setEquipmentLoadout', () => useSaveStore.getState().setEquipmentLoadout(useSaveStore.getState().equipmentLoadout)],
     ['updateProgress', () => useSaveStore.getState().updateProgress({ testRunCompleted: true })],
-    ['addSessionRecord', () => useSaveStore.getState().addSessionRecord(sessionFixture('x'))],
-    ['addCourseRunRecord', () => useSaveStore.getState().addCourseRunRecord(courseRunRecordFixture('x'))],
+    ['addCourseRunRecord', () => useSaveStore.getState().addCourseRunRecord(legacyCourseRunRecordFixture('x'))],
     ['addVehicleTestRunRecord', () => useSaveStore.getState().addVehicleTestRunRecord(vehicleTestRunRecordFixture('x'))],
     ['clearNotebook', () => useSaveStore.getState().clearNotebook()],
     ['replaceSessionsRecord', () => useSaveStore.getState().replaceSessionsRecord([])],
@@ -1126,17 +1147,9 @@ describe('abandonPendingApplicationAction(軽微条件3、14ケース表の対�
 // ---------------------------------------------------------------------------
 
 describe('実験ノート3腕の自動trim(6.4節、各腕55件投入)', () => {
-  it('sessionsは55件投入で50件にtrimされ、最新が先頭になる', () => {
-    acquireLease();
-    for (let i = 0; i < 55; i += 1) useSaveStore.getState().addSessionRecord(sessionFixture(`s${i}`));
-    const sessions = readPersisted().notebook.sessions;
-    expect(sessions).toHaveLength(50);
-    expect(sessions[0].id).toBe('s54');
-  });
-
   it('courseRunsは55件投入で50件にtrimされる', () => {
     acquireLease();
-    for (let i = 0; i < 55; i += 1) useSaveStore.getState().addCourseRunRecord(courseRunRecordFixture(`c${i}`));
+    for (let i = 0; i < 55; i += 1) useSaveStore.getState().addCourseRunRecord(legacyCourseRunRecordFixture(`c${i}`));
     expect(readPersisted().notebook.courseRuns).toHaveLength(50);
   });
 
@@ -1148,7 +1161,7 @@ describe('実験ノート3腕の自動trim(6.4節、各腕55件投入)', () => {
 
   it('clearNotebookは3腕すべてを空にする', () => {
     acquireLease();
-    useSaveStore.getState().addSessionRecord(sessionFixture('s1'));
+    useSaveStore.getState().addCourseRunRecord(legacyCourseRunRecordFixture('c1'));
     useSaveStore.getState().clearNotebook();
     const notebook: NotebookSlice = readPersisted().notebook;
     expect(notebook.sessions).toHaveLength(0);
@@ -1385,3 +1398,469 @@ describe('店の装備保護規則(1.2節)', () => {
 // motorRunContext/GEAR_TOTAL_TOOTH_COUNTは今後のvehicle文脈テスト拡張用に保持する
 void motorRunContext;
 void GEAR_TOTAL_TOOTH_COUNT;
+
+// ---------------------------------------------------------------------------
+// P3-4 G1b: beginRunActionWithPreparation(A3、arbiter追加裁定Q10 §1〜§7+§8補足裁定、
+// 人間再承認項目Q〈2026-08-18承認済み〉)。docs/phase3-p3-4-ui-plan.md v13 §6.5・§23 DoD25〜27。
+//
+// A3の核心は「config構築(prepare)の成功が確定するまでrunSequenceを消費しない」ことと、
+// 「commit後のcaptureRunSnapshot例外でruntime stateを取り残さない」ことの2点である。
+// ---------------------------------------------------------------------------
+
+/** prepareが成功する場合のcallback(motor文脈のsnapshotInputを返す)。 */
+function okPrepare(): RunPreparationCallback {
+  return () => ({ ok: true, snapshotInput: motorSnapshotInput() });
+}
+
+describe('P3-4 G1b beginRunActionWithPreparation(A3、Q10)', () => {
+  // --- DoD26: S-5の全失敗経路×4不変条件 -----------------------------------
+  // prepareの3失敗経路(resolver/compose/有限性)+gate失敗+storage書込み失敗のいずれでも、
+  // nextRunSequence不変・pendingRunEquipmentSnapshot不変・RunSnapshot不生成・
+  // gameStoreローカルruntime state不変(currentRunSequence/pendingRunSaveId)が成立する。
+  describe('DoD26: S-5の失敗経路×4不変条件', () => {
+    type PreparationFailure = Extract<RunPreparationResult, { ok: false }>;
+    const preparationFailures: readonly [string, PreparationFailure][] = [
+      ['resolver失敗(missingRoleあり)', { ok: false, reason: 'ローター個体の導線素材が特定できません', missingRole: 'rotor' }],
+      ['compose失敗(missingRoleなし)', { ok: false, reason: 'wire-copper: 未登録の導線素材IDです' }],
+      ['有限性検証失敗(missingRoleなし)', { ok: false, reason: 'motorConfig.coilTurnsが非有限値です: NaN' }],
+    ];
+
+    it.each(preparationFailures)('%s のとき、runSequenceを消費せずruntime stateも変更しない', (_label, failure) => {
+      acquireLease();
+      const beforeNext = readPersisted().saveMeta.nextRunSequence;
+
+      const result = useSaveStore.getState().beginRunActionWithPreparation('motor', () => failure);
+
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.reason).toBe(failure.reason);
+      // (1) nextRunSequence不変(永続実体・in-memoryとも)
+      expect(readPersisted().saveMeta.nextRunSequence).toBe(beforeNext);
+      expect(useSaveStore.getState().saveMeta.nextRunSequence).toBe(beforeNext);
+      // (2) pendingRunEquipmentSnapshot不変(null のまま)
+      expect(useSaveStore.getState().pendingRunEquipmentSnapshot).toBeNull();
+      // (3)(4) runtime state不変
+      expect(useSaveStore.getState().currentRunSequence).toBeNull();
+      expect(useSaveStore.getState().pendingRunSaveId).toBeNull();
+    });
+
+    it('resolver失敗腕はmissingRoleを保持し、generic腕はmissingRoleキー自体を持たない(P19、型のnarrowingを壊さない)', () => {
+      acquireLease();
+      const withRole = useSaveStore.getState().beginRunActionWithPreparation('motor', () => ({
+        ok: false, reason: '装備が見つかりません', missingRole: 'magnet',
+      }));
+      expect(withRole).toMatchObject({ ok: false, missingRole: 'magnet' });
+
+      const generic = useSaveStore.getState().beginRunActionWithPreparation('motor', () => ({
+        ok: false, reason: 'config構築に失敗しました',
+      }));
+      expect(generic.ok).toBe(false);
+      // undefinedが入っているのではなく、キー自体が存在しないこと
+      expect('missingRole' in generic).toBe(false);
+    });
+
+    it('gate失敗(lease未取得)のとき、prepareは一度も呼ばれず4不変条件も成立する', () => {
+      // acquireLeaseを呼ばない=leaseNotAcquired
+      const beforeNext = readPersisted().saveMeta.nextRunSequence;
+      const prepare = vi.fn(okPrepare());
+
+      const result = useSaveStore.getState().beginRunActionWithPreparation('motor', prepare);
+
+      expect(result).toMatchObject({ ok: false, reason: 'leaseNotAcquired' });
+      expect(prepare).not.toHaveBeenCalled(); // RunSnapshotが構築される余地すらない
+      expect(readPersisted().saveMeta.nextRunSequence).toBe(beforeNext);
+      expect(useSaveStore.getState().currentRunSequence).toBeNull();
+      expect(useSaveStore.getState().pendingRunEquipmentSnapshot).toBeNull();
+      expect(useSaveStore.getState().pendingRunSaveId).toBeNull();
+    });
+
+    it('gate失敗(runInProgress)のとき、prepareは一度も呼ばれない', () => {
+      acquireLease();
+      const first = useSaveStore.getState().beginRunActionWithPreparation('motor', okPrepare());
+      expect(first.ok).toBe(true);
+
+      const prepare = vi.fn(okPrepare());
+      const second = useSaveStore.getState().beginRunActionWithPreparation('motor', prepare);
+      expect(second).toMatchObject({ ok: false, reason: 'runInProgress' });
+      expect(prepare).not.toHaveBeenCalled();
+    });
+
+    it('storage書込み失敗のとき、runtime stateを変更せずstorageErrorを返す(RunSnapshotも作らない)', () => {
+      acquireLease();
+      const beforeNext = readPersisted().saveMeta.nextRunSequence;
+      const setItemSpy = vi.spyOn(fakeStorage, 'setItem').mockImplementation(() => {
+        throw new Error('quota exceeded');
+      });
+
+      const result = useSaveStore.getState().beginRunActionWithPreparation('motor', okPrepare());
+
+      expect(result).toMatchObject({ ok: false, reason: 'storageError' });
+      setItemSpy.mockRestore();
+      expect(readPersisted().saveMeta.nextRunSequence).toBe(beforeNext);
+      expect(useSaveStore.getState().currentRunSequence).toBeNull();
+      expect(useSaveStore.getState().pendingRunEquipmentSnapshot).toBeNull();
+      expect(useSaveStore.getState().pendingRunSaveId).toBeNull();
+    });
+  });
+
+  // --- DoD25: snapshotCaptureFailed(A3必須修正2点の検証) --------------------
+  describe('DoD25: snapshotCaptureFailed(commit後のcaptureRunSnapshot例外)', () => {
+    /** structuredCloneが投げる状況を、cloneできない値(関数)をsnapshotInputへ混ぜて再現する。 */
+    function throwingPrepare(): RunPreparationCallback {
+      return () => ({
+        ok: true,
+        snapshotInput: {
+          ...motorSnapshotInput(),
+          // structuredCloneは関数をDataCloneErrorで拒否する(captureRunSnapshotは
+          // destructionConfigをstructuredCloneするため、ここで例外が発生する)
+          destructionConfig: { ...goodDestructionConfig(), notCloneable: () => 1 } as unknown as DestructionConfig,
+        },
+      });
+    }
+
+    it('(i) 例外を未捕捉で伝播させず {ok:false, reason:"snapshotCaptureFailed"} を返す', () => {
+      acquireLease();
+      const result = useSaveStore.getState().beginRunActionWithPreparation('motor', throwingPrepare());
+      expect(result).toEqual({ ok: false, reason: 'snapshotCaptureFailed' });
+    });
+
+    it('(ii) runtime専用3フィールドがすべてnullへ明示リセットされる', () => {
+      acquireLease();
+      useSaveStore.getState().beginRunActionWithPreparation('motor', throwingPrepare());
+      expect(useSaveStore.getState().currentRunSequence).toBeNull();
+      expect(useSaveStore.getState().pendingRunEquipmentSnapshot).toBeNull();
+      expect(useSaveStore.getState().pendingRunSaveId).toBeNull();
+    });
+
+    it('(iii) 直後の再呼出しがrunInProgressで拒否されない(ソフトロックが発生しない)', () => {
+      acquireLease();
+      const failed = useSaveStore.getState().beginRunActionWithPreparation('motor', throwingPrepare());
+      expect(failed).toMatchObject({ ok: false, reason: 'snapshotCaptureFailed' });
+
+      // ページリロードなしで再挑戦できること(arbiter裁定Q10 §1の具体的負例の直接確認)
+      const retry = useSaveStore.getState().beginRunActionWithPreparation('motor', okPrepare());
+      expect(retry.ok).toBe(true);
+    });
+
+    it('(iv) nextRunSequenceはcommit済みのままロールバックされず、孤立runSequenceが1件残る', () => {
+      acquireLease();
+      const beforeNext = readPersisted().saveMeta.nextRunSequence;
+
+      useSaveStore.getState().beginRunActionWithPreparation('motor', throwingPrepare());
+
+      // 孤立runSequence1件を許容する(P3-0-Q1の高水位意味論が冪等skipとして吸収する)
+      expect(readPersisted().saveMeta.nextRunSequence).toBe(beforeNext + 1);
+      expect(useSaveStore.getState().saveMeta.nextRunSequence).toBe(beforeNext + 1);
+    });
+  });
+
+  // --- DoD27: success pathの順序と単一出典 ---------------------------------
+  describe('DoD27: success path(永続commit→captureRunSnapshotの順、同一selection/sequence)', () => {
+    it('prepareはpureBeginRunのゲート通過後・永続commit前にexact1回だけ呼ばれる', () => {
+      acquireLease();
+      const beforeNext = readPersisted().saveMeta.nextRunSequence;
+      let nextRunSequenceAtPrepareTime: number | null = null;
+      const prepare = vi.fn<RunPreparationCallback>(() => {
+        // prepare実行時点では、まだ永続側のnextRunSequenceが進んでいないこと
+        nextRunSequenceAtPrepareTime = readPersisted().saveMeta.nextRunSequence;
+        return { ok: true, snapshotInput: motorSnapshotInput() };
+      });
+
+      const result = useSaveStore.getState().beginRunActionWithPreparation('motor', prepare);
+
+      expect(prepare).toHaveBeenCalledTimes(1);
+      expect(nextRunSequenceAtPrepareTime).toBe(beforeNext); // commit前に呼ばれた
+      expect(result.ok).toBe(true);
+      expect(readPersisted().saveMeta.nextRunSequence).toBe(beforeNext + 1); // commitは後
+    });
+
+    it('prepareへ渡されるequipmentSnapshotは、成功時の戻り値equipmentSnapshotと同一実体である(単一出典、P3-1-Q9)', () => {
+      acquireLease();
+      let passedSnapshot: EquipmentIdSnapshot | null = null;
+      const result = useSaveStore.getState().beginRunActionWithPreparation('motor', (_l, _i, equipmentSnapshot) => {
+        passedSnapshot = equipmentSnapshot;
+        return { ok: true, snapshotInput: motorSnapshotInput() };
+      });
+
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(passedSnapshot).not.toBeNull();
+        expect(result.equipmentSnapshot).toBe(passedSnapshot); // 参照同一(再計算していない)
+        expect(useSaveStore.getState().pendingRunEquipmentSnapshot).toBe(result.equipmentSnapshot);
+      }
+    });
+
+    it('prepareへ渡されるloadoutはbatteryItemId非nullで、fresh実体と一致する(trusted narrowing、Q10 §2)', () => {
+      acquireLease();
+      const freshLoadout = readPersisted().equipmentLoadout;
+      let passedBatteryItemId: string | null = null;
+      useSaveStore.getState().beginRunActionWithPreparation('motor', (loadout) => {
+        passedBatteryItemId = loadout.batteryItemId;
+        return { ok: true, snapshotInput: motorSnapshotInput() };
+      });
+      expect(passedBatteryItemId).toBe(freshLoadout.batteryItemId);
+      expect(passedBatteryItemId).not.toBeNull();
+    });
+
+    it('成功時、runSequence・runtime state・RunSnapshotが整合して確定する', () => {
+      acquireLease();
+      const beforeNext = readPersisted().saveMeta.nextRunSequence;
+
+      const result = useSaveStore.getState().beginRunActionWithPreparation('motor', okPrepare());
+
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.runSequence).toBe(beforeNext);
+        expect(useSaveStore.getState().currentRunSequence).toBe(result.runSequence);
+        expect(useSaveStore.getState().pendingRunSaveId).toBe(readPersisted().saveMeta.saveId);
+        // captureRunSnapshotの戻り値(contractVersion 3・recipeKeyを含む本物のRunSnapshot)
+        expect(result.runSnapshot.contractVersion).toBe(3);
+        expect(result.runSnapshot.recipeKey).toBe(motorSnapshotInput().recipeKey);
+        expect(restoreRunSnapshot(JSON.parse(JSON.stringify(result.runSnapshot))).ok).toBe(true);
+      }
+    });
+  });
+
+  // --- P4是正: gate失敗(pendingApplicationExists)経路 -----------------------
+  it('gate失敗(pendingApplicationExists)のとき、prepareは呼ばれずS-5の4不変条件が成立する', () => {
+    acquireLease();
+    const fresh = readPersisted();
+    const envelope: RunApplicationEnvelope = {
+      runKey: { saveId: fresh.saveMeta.saveId, runSequence: 1 },
+      leaseToken: fresh.saveMeta.leaseToken,
+      outcome: nonDestructionOutcome([eventOf('D01')]),
+      equipmentSnapshot: captureEquipmentIdSnapshot(fresh.equipmentLoadout as EquipmentLoadout & { batteryItemId: string }, 'motor'),
+      notebookRecord: sessionRecord('pending-1'),
+    };
+    __testOnly.writeV16({ ...fresh, saveMeta: { ...fresh.saveMeta, pendingApplication: envelope } });
+    const beforeSeq = readPersisted().saveMeta.nextRunSequence;
+    const beforeGameRuntime = { ...useGameStore.getState() }._runAccumulator;
+    const prepare = vi.fn(okPrepare());
+
+    const result = useSaveStore.getState().beginRunActionWithPreparation('motor', prepare);
+
+    expect(result).toMatchObject({ ok: false, reason: 'pendingApplicationExists' });
+    expect(prepare).not.toHaveBeenCalled(); // RunSnapshot/RunAccumulatorとも不生成
+    expect(readPersisted().saveMeta.nextRunSequence).toBe(beforeSeq);
+    expect(useSaveStore.getState().pendingRunEquipmentSnapshot).toBeNull();
+    expect(useSaveStore.getState().currentRunSequence).toBeNull();
+    expect(useGameStore.getState()._runAccumulator).toBe(beforeGameRuntime); // gameStoreローカルruntime state不変
+  });
+
+  // --- 既存beginRunActionへの非干渉(Q10 §1の「無改修のまま並存」) -----------
+  it('既存beginRunActionは無改修のまま動作し、新regressionを生まない', () => {
+    acquireLease();
+    const beforeNext = readPersisted().saveMeta.nextRunSequence;
+    const legacy = useSaveStore.getState().beginRunAction('motor');
+    expect(legacy.ok).toBe(true);
+    expect(readPersisted().saveMeta.nextRunSequence).toBe(beforeNext + 1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P3-4 G7(項目J・K、人間承認2026-08-20): SCHEMA_VERSION 1→2 migration。
+// J(`InstrumentOwnership`追加)とK(`CodexRecordEntry`拡張)は**同一migrationへ同梱**する
+// (分割禁止、arbiter申し送り1)。失敗分類は次のとおり——
+//   旧/新validator失敗 = corrupted / I/O失敗 = storageError /
+//   書戻し失敗時にメモリ上だけ成功扱いにせず、次回起動で再試行できる冪等設計。
+// ---------------------------------------------------------------------------
+describe('P3-4 G7: SCHEMA_VERSION 1→2 migration(項目J・K同梱)', () => {
+  /** v1形状(instrumentOwnershipを持たない)のstateをSAVE_KEYへ直接書き込む。 */
+  function writeV1Save(mutate: (state: Record<string, unknown>) => void = () => {}): void {
+    const fresh = __testOnly.freshBootstrap() as unknown as Record<string, unknown>;
+    const { instrumentOwnership: _omitted, ...v1State } = fresh;
+    v1State.schemaVersion = 1;
+    mutate(v1State);
+    fakeStorage.setItem('v16:save', JSON.stringify({ state: v1State, version: 1 }));
+  }
+
+  beforeEach(() => {
+    fakeStorage = makeFakeLocalStorage();
+    // @ts-expect-error テスト用にglobalThis.localStorageを差し替える
+    globalThis.localStorage = fakeStorage;
+  });
+
+  it('v1セーブはcorruptedにならず、instrumentOwnershipが空で補完されて読める(既存データの救済)', () => {
+    writeV1Save();
+
+    const result = __testOnly.readLatestV16();
+
+    expect(result.kind).toBe('ok');
+    if (result.kind !== 'ok') throw new Error('unreachable');
+    expect(result.state.schemaVersion).toBe(2);
+    expect(result.state.instrumentOwnership).toEqual({ ownedInstrumentIds: [] });
+  });
+
+  it('migration結果はその場で書き戻される(次回起動でv2として読める=冪等に収束する)', () => {
+    writeV1Save();
+    __testOnly.readLatestV16();
+
+    // 書き戻し後の生データはversion 2になっている
+    const raw = JSON.parse(fakeStorage.getItem('v16:save')!) as { version: number; state: { schemaVersion: number } };
+    expect(raw.version).toBe(2);
+    expect(raw.state.schemaVersion).toBe(2);
+    // 2回目の読み取りはmigrationを経ずそのまま成功する
+    expect(__testOnly.readLatestV16().kind).toBe('ok');
+  });
+
+  it('既存フィールドはmigrationで書き換えられない(追加のみ)', () => {
+    writeV1Save((state) => {
+      (state.progress as Record<string, unknown>).selectedTrackId = 'hill-climb';
+    });
+
+    const result = __testOnly.readLatestV16();
+
+    expect(result.kind).toBe('ok');
+    if (result.kind !== 'ok') throw new Error('unreachable');
+    expect(result.state.progress.selectedTrackId).toBe('hill-climb');
+  });
+
+  it('v1データ自体が壊れている場合はcorrupted(migrationのせいで壊れたように見せない)', () => {
+    writeV1Save((state) => { state.inventory = { cashG: -1 }; });
+
+    expect(__testOnly.readLatestV16().kind).toBe('corrupted');
+  });
+
+  it('v1が新フィールドを持っている場合は不整合としてcorrupted', () => {
+    writeV1Save((state) => { state.instrumentOwnership = { ownedInstrumentIds: [] }; });
+
+    expect(__testOnly.readLatestV16().kind).toBe('corrupted');
+  });
+
+  it('書戻しのI/O失敗はstorageError——メモリ上だけ成功扱いにしない', () => {
+    writeV1Save();
+    const originalSetItem = fakeStorage.setItem;
+    fakeStorage.setItem = () => { throw new Error('quota exceeded'); };
+
+    const result = __testOnly.readLatestV16();
+
+    expect(result.kind).toBe('storageError');
+    fakeStorage.setItem = originalSetItem;
+    // 書けなかったのでストレージはv1のまま。次回起動で再試行され、成功すればv2へ収束する。
+    const raw = JSON.parse(fakeStorage.getItem('v16:save')!) as { version: number };
+    expect(raw.version).toBe(1);
+    expect(__testOnly.readLatestV16().kind).toBe('ok');
+  });
+
+  it('項目K: legacy codexRecord(2フィールド不在)を持つv1セーブも読める', () => {
+    writeV1Save((state) => {
+      const enc = state.encyclopedia as Record<string, unknown>;
+      enc.discoveredModes = ['D01'];
+      enc.codexRecords = [{
+        modeId: 'D01',
+        firstDiscoveredAtRunSequence: 1,
+        replaySnapshot: validReplaySnapshot(),
+      }];
+    });
+
+    const result = __testOnly.readLatestV16();
+
+    expect(result.kind).toBe('ok');
+    if (result.kind !== 'ok') throw new Error('unreachable');
+    const record = result.state.encyclopedia.codexRecords[0]!;
+    expect(record.modeId).toBe('D01');
+    expect('discoveryEvent' in record).toBe(false);
+    expect('runDegradationDiffs' in record).toBe(false);
+  });
+
+  it('項目K: 片方のフィールドだけ持つcodexRecordは交差不変条件違反としてcorrupted', () => {
+    writeV1Save((state) => {
+      const enc = state.encyclopedia as Record<string, unknown>;
+      enc.discoveredModes = ['D01'];
+      enc.codexRecords = [{
+        modeId: 'D01',
+        firstDiscoveredAtRunSequence: 1,
+        replaySnapshot: validReplaySnapshot(),
+        runDegradationDiffs: [], // discoveryEventが無いのに片方だけ存在する
+      }];
+    });
+
+    expect(__testOnly.readLatestV16().kind).toBe('corrupted');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P3-4 G7(項目L): 計測器購入action。既存のlease/pending gateを通り、
+// 買い切り・非消耗(spec §10)として二重購入を拒否する。
+// ---------------------------------------------------------------------------
+describe('P3-4 G7: purchaseInstrumentAction', () => {
+  function seedDiscoveredD07AndCash(cashG: number): void {
+    fakeStorage = makeFakeLocalStorage();
+    // @ts-expect-error テスト用
+    globalThis.localStorage = fakeStorage;
+    const fresh = __testOnly.freshBootstrap();
+    const seeded = {
+      ...fresh,
+      inventory: { ...fresh.inventory, cashG },
+      // discoveredModesとcodexRecordsのmodeId集合は一致していなければならない(既存不変条件)。
+      // 片方だけ立てるとvalidatorがcorruptedにし、gateで弾かれて購入自体に到達しない。
+      encyclopedia: {
+        discoveredModes: ['D07' as const],
+        codexRecords: [{
+          modeId: 'D07' as const,
+          firstDiscoveredAtRunSequence: 1,
+          replaySnapshot: validReplaySnapshot(),
+        }],
+      },
+    };
+    __testOnly.writeV16(seeded);
+    useSaveStore.setState({
+      ...seeded, currentRunSequence: null, leaseState: 'leaseNotAcquired',
+      pendingRunEquipmentSnapshot: null, pendingRunSaveId: null, bootstrapError: null,
+    });
+    useSaveStore.getState()._evaluateLeaseOnce(new Date(0).toISOString());
+  }
+
+  it('D07発見後・所持金十分なら購入でき、所持状態と残金が永続化される', () => {
+    seedDiscoveredD07AndCash(1000);
+
+    const result = useSaveStore.getState().purchaseInstrumentAction('gaussMeter');
+
+    expect(result.ok).toBe(true);
+    expect(useSaveStore.getState().instrumentOwnership.ownedInstrumentIds).toEqual(['gaussMeter']);
+    expect(useSaveStore.getState().inventory.cashG).toBe(200); // 1000 - 800
+    // メモリ上だけでなく永続実体にも反映されている
+    const persisted = readPersisted();
+    expect(persisted.instrumentOwnership.ownedInstrumentIds).toEqual(['gaussMeter']);
+    expect(persisted.inventory.cashG).toBe(200);
+  });
+
+  it('二重購入は拒否され、残金が二重に引かれない(買い切り・非消耗)', () => {
+    seedDiscoveredD07AndCash(2000);
+    useSaveStore.getState().purchaseInstrumentAction('gaussMeter');
+
+    const second = useSaveStore.getState().purchaseInstrumentAction('gaussMeter');
+
+    expect(second.ok).toBe(false);
+    expect(useSaveStore.getState().inventory.cashG).toBe(1200); // 1回分だけ
+    expect(useSaveStore.getState().instrumentOwnership.ownedInstrumentIds).toEqual(['gaussMeter']);
+  });
+
+  it('未解禁(D07未発見)では購入できず、所持金も減らない', () => {
+    fakeStorage = makeFakeLocalStorage();
+    // @ts-expect-error テスト用
+    globalThis.localStorage = fakeStorage;
+    const fresh = __testOnly.freshBootstrap();
+    const seeded = { ...fresh, inventory: { ...fresh.inventory, cashG: 5000 } };
+    __testOnly.writeV16(seeded);
+    useSaveStore.setState({
+      ...seeded, currentRunSequence: null, leaseState: 'leaseNotAcquired',
+      pendingRunEquipmentSnapshot: null, pendingRunSaveId: null, bootstrapError: null,
+    });
+    useSaveStore.getState()._evaluateLeaseOnce(new Date(0).toISOString());
+
+    const result = useSaveStore.getState().purchaseInstrumentAction('gaussMeter');
+
+    expect(result.ok).toBe(false);
+    expect(useSaveStore.getState().inventory.cashG).toBe(5000);
+    expect(useSaveStore.getState().instrumentOwnership.ownedInstrumentIds).toEqual([]);
+  });
+
+  it('所持金不足では購入できず、残金が負にならない', () => {
+    seedDiscoveredD07AndCash(799);
+
+    const result = useSaveStore.getState().purchaseInstrumentAction('gaussMeter');
+
+    expect(result.ok).toBe(false);
+    expect(useSaveStore.getState().inventory.cashG).toBe(799);
+  });
+});
