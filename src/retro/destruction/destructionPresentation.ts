@@ -135,7 +135,13 @@ export function deriveDestructionHudState(state: DestructionState): DestructionH
     loops.push('D01_wireLash');
     loopSes.push('D01_wireLash');
   }
-  // 炎はD04(LiPo)経路のみが継続燃焼を持つ。D02は発煙の有限尺イベント。
+  // D02のengine eventは焼損終端stepでしか出ない。発煙latch中は有限尺の煙粒子を
+  // 継続発生させ、停止前に白→灰→黒が見えるようにする。SEはoneShotのまま
+  // (`smokingOnsetOneShots`)で、ここには継続音を足さない。
+  if (state.modes.D02.smokingStarted) {
+    loops.push('D02_smoke');
+  }
+  // 炎はD04(LiPo)経路のみが継続燃焼を持つ。
   if (state.battery.profile === 'lipo' && state.battery.d04.stage === 'burning') {
     loops.push('D02_D04_flame');
     loopSes.push('D02_D04_flame');
@@ -228,6 +234,13 @@ export interface SeSchedulerInput {
   readonly events: readonly { readonly mode: string }[];
   readonly destructionState: DestructionState;
   readonly replaySnapshot: object;
+  /** engine event以外のoneShot(発煙latchの立ち上がりなど)。公開契約ではない。 */
+  readonly extraOneShotSes?: readonly DestructionSeId[];
+}
+
+/** 発煙latchの立ち上がりだけD02発煙SEを1回出す。焼損eventの有無とは独立。 */
+export function smokingOnsetOneShots(wasSmoking: boolean, isSmoking: boolean): readonly DestructionSeId[] {
+  return !wasSmoking && isSmoking ? ['D02_smoke'] : [];
 }
 
 /**
@@ -294,6 +307,7 @@ export function advanceDestructionSeScheduler(
 
   // 3) 新規イベント。D06だけはqueueへ積み、他は同時発音上限の範囲で即発音する。
   const fresh = input.events.slice(Math.max(0, base.processedEventCount));
+  const extraOneShots = input.extraOneShotSes ?? [];
   for (const event of fresh) {
     for (const id of toPresentationTrigger(event as UnstampedDestructionEvent).ses) {
       const spec = specOf(id);
@@ -307,6 +321,12 @@ export function advanceDestructionSeScheduler(
       if (countActive(nextActive, id) >= spec.maxConcurrent) continue;
       nextActive.push({ key: takeKey(), id, startedAtSec: nowSec, endsAtSec: nowSec + spec.durationSec });
     }
+  }
+  for (const id of extraOneShots) {
+    const spec = specOf(id);
+    if (spec.kind !== 'oneShot' || id === 'D06_toothChip') continue;
+    if (countActive(nextActive, id) >= spec.maxConcurrent) continue;
+    nextActive.push({ key: takeKey(), id, startedAtSec: nowSec, endsAtSec: nowSec + spec.durationSec });
   }
 
   // 4) D06は同時1本。前の1本が鳴り終わっていて待機があるときだけ次を出す。

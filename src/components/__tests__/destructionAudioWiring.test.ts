@@ -16,6 +16,8 @@ describe('SEの実再生接続', () => {
   it('schedulerが実際に呼ばれ、状態がフレーム間で持ち越される(テスト専用にしない)', () => {
     expect(audio).toContain('advanceDestructionSeScheduler(');
     expect(audio).toContain('schedulerState = result.next');
+    expect(audio).toContain('smokingOnsetOneShots(');
+    expect(audio).toContain('extraOneShotSes:');
   });
 
   it('handle同期は純関数へ委ね、起こす/追従/止めるを画面側で組み直さない', () => {
@@ -110,6 +112,7 @@ describe('HUDの実画面接続', () => {
 
   it('色だけに依存しない(非機能要件): アイコンに文言を併記する', () => {
     expect(hud).toContain('性能が落ちています');
+    expect(hud).toContain('煙が出ています');
     expect(hud).toContain('aria-hidden="true"');
   });
 });
@@ -151,8 +154,13 @@ describe('パーティクルの実画面接続(§8.2のparticle層)', () => {
   });
 
   it('時間は走行時刻由来の60fps tickで進む(rAF回数依存にしない)', () => {
-    expect(effectsCode).toContain('tickAt(state.vehicleState.elapsedTimeS)');
+    // motor-onlyは_elapsedSec、車体走行はvehicle elapsed。vehicleだけを見ると
+    // 実験室の浮かせ走行で時計が0のまま固まり、発煙粒子が進まない。
+    expect(effectsCode).toContain('presentationElapsedSeconds({');
+    expect(effectsCode).toContain('motorElapsedS: state._elapsedSec');
+    expect(effectsCode).toContain('vehicleElapsedS: state.vehicleState.elapsedTimeS');
     expect(effectsCode).toContain('ticksToAdvance(field.lastTick, currentTick)');
+    expect(effectsCode).toContain("'D02_smoke'");
   });
 
   it('run終了・run切替・非active・unmountでfieldとcursorを消す', () => {

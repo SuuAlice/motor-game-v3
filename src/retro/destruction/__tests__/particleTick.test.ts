@@ -1,7 +1,7 @@
 // P3-4 G7-D: 粒子の時間進行が**rAFの呼び出し回数に依存しない**ことを固定する。
 // 60Hz/120Hz・フレーム落ちのいずれでも、同じ走行時刻なら同じ状態になる。
 import { describe, expect, it } from 'vitest';
-import { tickAt, ticksToAdvance, LOGIC_TICKS_PER_SECOND, MAX_CATCH_UP_TICKS } from '../particleTick';
+import { presentationElapsedSeconds, tickAt, ticksToAdvance, LOGIC_TICKS_PER_SECOND, MAX_CATCH_UP_TICKS } from '../particleTick';
 import { spawnParticles, stepParticles, type Particle } from '../particleField';
 
 describe('60fps tickの導出', () => {
@@ -27,6 +27,15 @@ describe('60fps tickの導出', () => {
 
   it('飛んだtickは有限に追従する(長時間停止後に数千tickを回して固まらせない)', () => {
     expect(ticksToAdvance(0, 100000)).toBe(MAX_CATCH_UP_TICKS);
+  });
+
+  it('motor-onlyは_elapsedSec、車体はvehicle elapsedを使う。vehicle=0のままではtickが進まない', () => {
+    expect(presentationElapsedSeconds({ runContext: 'motor', motorElapsedS: 2.5, vehicleElapsedS: 0 })).toBe(2.5);
+    expect(presentationElapsedSeconds({ runContext: 'vehicle', motorElapsedS: 2.5, vehicleElapsedS: 1.2 })).toBe(1.2);
+    expect(presentationElapsedSeconds({ runContext: null, motorElapsedS: 2.5, vehicleElapsedS: 0 })).toBe(2.5);
+    expect(tickAt(0)).toBe(0);
+    expect(ticksToAdvance(0, tickAt(0))).toBe(0);
+    expect(ticksToAdvance(0, tickAt(2.5))).toBe(MAX_CATCH_UP_TICKS);
   });
 });
 

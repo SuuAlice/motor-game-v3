@@ -1349,6 +1349,37 @@ describe('G1c: production経路での6モード発火', () => {
       expect(battery.profile === 'lipo' && battery.d04.stage).toBe('none');
     });
 
+    it('motor-onlyでは発煙latchが終端より前に立ち、_elapsedSecだけが進みvehicle elapsedは動かない', () => {
+      arrangeD02();
+      useGameStore.getState().flickStart();
+      // このファイルはvehicleStateをbeforeEachで捨てない。先行テストの残骸があっても、
+      // motor-onlyのstepSimがその値を増やさないことだけを見る。
+      const vehicleElapsedAtStart = useGameStore.getState().vehicleState.elapsedTimeS;
+      let smokingStep = -1;
+      let smokingElapsedSec = -1;
+      let smokingVehicleElapsed = Number.NaN;
+      for (let i = 0; i < 600; i++) {
+        const before = useGameStore.getState();
+        if (before._runAccumulator?.destructionState.modes.D02.smokingStarted && smokingStep < 0) {
+          smokingStep = i;
+          smokingElapsedSec = before._elapsedSec;
+          smokingVehicleElapsed = before.vehicleState.elapsedTimeS;
+        }
+        useGameStore.getState().stepSim(1 / 120);
+        if (useGameStore.getState()._runAccumulator === null) {
+          expect(smokingStep, '発煙latchが終端より前に立つ').toBeGreaterThan(0);
+          expect(smokingStep).toBeLessThan(i);
+          expect(smokingElapsedSec).toBeGreaterThan(0);
+          expect(smokingVehicleElapsed).toBe(vehicleElapsedAtStart);
+          expect(before._elapsedSec).toBeGreaterThan(smokingElapsedSec);
+          expect(before.vehicleState.elapsedTimeS).toBe(vehicleElapsedAtStart);
+          expect(before._runAccumulator!.events.some((event) => event.mode === 'D02')).toBe(true);
+          break;
+        }
+      }
+      expect(useGameStore.getState()._runAccumulator).toBeNull();
+    });
+
     it('負例: 電池をアルカリ(既定)にすると同一step上限でも焼損しない', () => {
       // 正例との差分は電池だけ(LiPoを買わず初期アルカリのまま)。ブラシ・configは正例と同一
       buyAndEquip('brush-precious-metal', 'brush', 'brushItemId');

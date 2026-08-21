@@ -17,6 +17,21 @@ export function tickAt(elapsedTimeS: number): number {
 }
 
 /**
+ * 演出tickの走行時刻。motor-onlyは`_elapsedSec`、車体走行は`vehicleState.elapsedTimeS`。
+ * 公開のrun keyは増やさない。run終了後は、動いていた側の時計を残す。
+ */
+export function presentationElapsedSeconds(input: {
+  runContext: 'motor' | 'vehicle' | null;
+  motorElapsedS: number;
+  vehicleElapsedS: number;
+}): number {
+  if (input.runContext === 'motor') return input.motorElapsedS;
+  if (input.runContext === 'vehicle') return input.vehicleElapsedS;
+  if (input.vehicleElapsedS === 0 && input.motorElapsedS > 0) return input.motorElapsedS;
+  return input.vehicleElapsedS;
+}
+
+/**
  * `lastTick`から`currentTick`までに進めるべきステップ数。
  * 同じtickでは0を返す——同一tickを二度進めない(rAFが同じ論理フレーム内で
  * 複数回呼ばれても状態が余計に進まない)。
