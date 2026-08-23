@@ -1,0 +1,17 @@
+{
+  "name": "motor-game-v3",
+  "install": "npm ci",
+  "terminals": [
+    {
+      "name": "Vite",
+      "command": "npm run dev -- --host 0.0.0.0 --port 5173",
+      "description": "Vite開発サーバー。ブラウザで http://127.0.0.1:5173 を開く。"
+    }
+  ],
+  "ports": [
+    {
+      "name": "Vite",
+      "port": 5173
+    }
+  ]
+}
