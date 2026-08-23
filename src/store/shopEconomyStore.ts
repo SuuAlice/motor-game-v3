@@ -15,25 +15,34 @@ import { useSaveStore } from './saveStore';
 import type { InventoryItem } from '../materials/inventoryItem';
 import type { MaterialId } from '../materials/materials';
 import type { CartLine } from './shopEconomy';
+import { resolveBearingForGear, type EquipmentLoadout } from './runOutcomeApplication';
 
-function deriveShopEconomyState(): ShopEconomyState {
+function deriveShopEconomyView(): { state: ShopEconomyState; equipmentLoadout: EquipmentLoadout } {
   const s = useSaveStore.getState();
-  return { ...s.inventory, nextSessionIdCounter: s.idCounters.nextItemCounter };
+  return {
+    state: { ...s.inventory, nextSessionIdCounter: s.idCounters.nextItemCounter },
+    equipmentLoadout: s.equipmentLoadout,
+  };
 }
 
 interface ShopEconomyStore {
   state: ShopEconomyState;
+  equipmentLoadout: EquipmentLoadout;
   lastErrorJa: string | null;
   lastSalvageAmountG: number | null;
   purchase: (materialId: MaterialId) => void;
   /** 成功/失敗をUIへ返す。呼び出し側(ShopScreen.tsx)はtrueのときだけカートを空にする。 */
   purchaseCart: (cartLines: readonly CartLine[]) => boolean;
+  /** 選択個体を既存loadoutへ反映する。検証・永続化はsaveStoreへ委ねる。 */
+  equip: (itemId: string) => boolean;
   salvage: (itemId: string) => void;
   clearLastError: () => void;
 }
 
+const initialView = deriveShopEconomyView();
+
 export const useShopEconomyStore = create<ShopEconomyStore>()((set) => ({
-  state: deriveShopEconomyState(),
+  ...initialView,
   lastErrorJa: null,
   lastSalvageAmountG: null,
 
@@ -56,6 +65,49 @@ export const useShopEconomyStore = create<ShopEconomyStore>()((set) => ({
     return true;
   },
 
+  equip: (itemId) => {
+    const save = useSaveStore.getState();
+    const item = save.inventory.items.find((candidate) => candidate.itemId === itemId);
+    if (!item) {
+      set({ lastErrorJa: `個体(${itemId})が見つかりません`, lastSalvageAmountG: null });
+      return false;
+    }
+
+    let nextLoadout: EquipmentLoadout;
+    switch (item.family) {
+      case 'magnet':
+        nextLoadout = { ...save.equipmentLoadout, magnetItemId: item.itemId };
+        break;
+      case 'brush':
+        nextLoadout = { ...save.equipmentLoadout, brushItemId: item.itemId };
+        break;
+      case 'battery':
+        nextLoadout = { ...save.equipmentLoadout, batteryItemId: item.itemId };
+        break;
+      case 'gear': {
+        const bearing = resolveBearingForGear(item.itemId, save.inventory);
+        if (!bearing.ok) {
+          set({ lastErrorJa: bearing.reason, lastSalvageAmountG: null });
+          return false;
+        }
+        nextLoadout = {
+          ...save.equipmentLoadout,
+          gearItemId: item.itemId,
+          bearingAssemblyId: bearing.bearingAssemblyId,
+        };
+        break;
+      }
+    }
+
+    const result = save.setEquipmentLoadout(nextLoadout);
+    if (!result.ok) {
+      set({ lastErrorJa: result.reason, lastSalvageAmountG: null });
+      return false;
+    }
+    set({ lastErrorJa: null, lastSalvageAmountG: null });
+    return true;
+  },
+
   salvage: (itemId) => {
     const result = useSaveStore.getState().salvageAction(itemId);
     if (!result.ok) {
@@ -69,7 +121,7 @@ export const useShopEconomyStore = create<ShopEconomyStore>()((set) => ({
 }));
 
 useSaveStore.subscribe(() => {
-  useShopEconomyStore.setState({ state: deriveShopEconomyState() });
+  useShopEconomyStore.setState(deriveShopEconomyView());
 });
 
 /** サルベージ確認ダイアログ表示用。呼び出し側でcomputeSalvageRateのok:falseを事前に検知できる。 */

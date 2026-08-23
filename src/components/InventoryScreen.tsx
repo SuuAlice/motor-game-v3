@@ -35,8 +35,10 @@ const DIALOG_PREFERRED_HEIGHT_PX = 130;
 export function InventoryScreen() {
   const setMode = useGameStore((s) => s.setMode);
   const economy = useShopEconomyStore((s) => s.state);
+  const equipmentLoadout = useShopEconomyStore((s) => s.equipmentLoadout);
   const lastErrorJa = useShopEconomyStore((s) => s.lastErrorJa);
   const lastSalvageAmountG = useShopEconomyStore((s) => s.lastSalvageAmountG);
+  const equip = useShopEconomyStore((s) => s.equip);
   const salvage = useShopEconomyStore((s) => s.salvage);
   const clearLastError = useShopEconomyStore((s) => s.clearLastError);
 
@@ -65,7 +67,28 @@ export function InventoryScreen() {
 
   const rows = buildInventoryRows(economy);
   const selectedRow: InventoryRow | undefined = rows[selectedRowIndex];
-  const selectedSalvageable = selectedRow?.kind === 'item' && !!selectedRow.item;
+  const selectedItem = selectedRow?.kind === 'item' ? selectedRow.item : undefined;
+  const selectedSalvageable = !!selectedItem;
+  const equippedItemIds = new Set([
+    equipmentLoadout.magnetItemId,
+    equipmentLoadout.gearItemId,
+    equipmentLoadout.brushItemId,
+    equipmentLoadout.batteryItemId,
+  ]);
+  const selectedEquipped = selectedItem ? equippedItemIds.has(selectedItem.itemId) : false;
+  const equipmentButtonAriaLabel = !selectedRow
+    ? '装備対象がありません'
+    : !selectedItem
+      ? `${selectedRow.material.nameJa}は装備できません`
+      : selectedEquipped
+        ? `${selectedRow.material.nameJa}は装備中`
+        : `${selectedRow.material.nameJa}を装備`;
+  const statusMessage = lastErrorJa
+    ?? (lastSalvageAmountG !== null
+      ? `サルベージで ${lastSalvageAmountG} G を回収しました。`
+      : selectedEquipped && selectedRow
+        ? `${selectedRow.material.nameJa}は現在装備中です。`
+        : '');
 
   const salvageDialogRef = useRetroDialog({ open: isSalvageDialogOpen, onClose: closeSalvageDialog });
   const containerViewportRect = useElementViewportRect(containerRef, isSalvageDialogOpen);
@@ -275,10 +298,14 @@ export function InventoryScreen() {
           ガレージへ戻る
         </button>
       </div>
-      {!isSalvageDialogOpen && lastErrorJa && <p className="rounded-lg bg-red-100 px-3 py-2 text-sm text-red-800">{lastErrorJa}</p>}
-      {!isSalvageDialogOpen && lastSalvageAmountG !== null && !lastErrorJa && (
-        <p className="rounded-lg bg-emerald-100 px-3 py-2 text-sm text-emerald-800">サルベージで {lastSalvageAmountG} G を回収しました。</p>
-      )}
+      <p
+        role="status"
+        className={statusMessage
+          ? `rounded-lg px-3 py-2 text-sm ${lastErrorJa ? 'bg-red-100 text-red-800' : 'bg-emerald-100 text-emerald-800'}`
+          : 'sr-only'}
+      >
+        {statusMessage}
+      </p>
       <div ref={containerRef} className="relative h-[70vh] min-h-80 overflow-hidden bg-slate-800">
         {!scaleResult.fits && (
           <div className="flex h-full items-center justify-center p-4 text-center text-sm text-white">
@@ -318,7 +345,7 @@ export function InventoryScreen() {
                       ref={(el) => { rowButtonRefs.current[index] = el; }}
                       type="button"
                       tabIndex={index === selectedRowIndex ? 0 : -1}
-                      aria-label={formatInventoryRowAriaLabel(row)}
+                      aria-label={`${formatInventoryRowAriaLabel(row)}${row.item && equippedItemIds.has(row.item.itemId) ? '、現在装備中' : ''}`}
                       aria-disabled={!salvageable}
                       onFocus={() => handleRowFocus(index)}
                       onBlur={handleRowBlur}
@@ -332,6 +359,15 @@ export function InventoryScreen() {
             </div>
             {!isSalvageDialogOpen && (
               <div className="absolute bottom-2 left-2 flex gap-1">
+                <button
+                  type="button"
+                  disabled={!selectedItem || selectedEquipped}
+                  onClick={() => { if (selectedItem) equip(selectedItem.itemId); }}
+                  aria-label={equipmentButtonAriaLabel}
+                  className="min-h-[44px] min-w-[44px] touch-manipulation rounded bg-teal-700 px-3 py-2 text-xs font-bold text-white disabled:cursor-not-allowed disabled:bg-slate-500"
+                >
+                  {selectedEquipped ? '装備中' : '装備'}
+                </button>
                 <button
                   ref={salvageButtonRef}
                   type="button"

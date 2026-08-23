@@ -9,7 +9,7 @@ import type { MotorConfig, SimState } from './motorPhysics';
 import { CHATTER_BURST_FRAMES } from './constants';
 import { stepTestRun } from './vehiclePhysics';
 import type { CarConfig, FailureCode, VehicleSimState } from './vehiclePhysics';
-import { computeEnergyBudgetJ, createValidatedTrack } from './trackPhysics';
+import { computeEnergyBudgetJ, createValidatedTrack, stepTrackRun } from './trackPhysics';
 import type { TrackDefinition, ValidatedTrackDefinition } from './trackPhysics';
 import { advanceDestructionState, createInitialDestructionState, validateFireExposureProfile } from './destructionModes';
 import type {
@@ -19,6 +19,8 @@ import type {
   DestructionModeId,
   DestructionRunContext,
   DestructionState,
+  D06Progress,
+  D09Progress,
   FireExposureProfile,
   GearBreakageProfile,
   PhysicsSnapshotAtT,
@@ -72,9 +74,31 @@ export interface RunAccumulator {
 // 不一致状態(destructionStateとdestructionConfigのbattery.profileの食い違い)を構築不能にする
 // (fail-fastではなく構造的に不可能化。P3-0公開シグネチャの変更のため人間再承認対象、済)。
 export function createRunAccumulator(replaySnapshot: RunSnapshot): RunAccumulator {
+  // M-1(i)確定裁定(P3-4 G6、計画§14.3): 部分損傷ギヤを再装備した走行では、走行内の
+  // D06 toothLossCountを0からではなく**装備個体の永続損傷数**から開始しなければならない。
+  // seedingは`RunSnapshot.initialDestructionState`へ載って運ばれてくるため、liveの
+  // accumulatorもそこから起点を取る——ここで0初期化したままにすると、snapshotには
+  // seedingが載っているのにliveでは0から始まり、「走行のたびに歯数が回復する」という
+  // M-1が防ごうとした会計破綻がそのまま残る(brabit_mot3が7段配線の検証で実測・報告)。
+  //
+  // **P3-1-Q6の保証を壊さない形にしている**: battery profileは従来どおり
+  // `destructionConfig.battery.profile`から**一意に導出**し、`initialDestructionState`側の
+  // profileは採用しない——両者の不一致状態は引き続き構築不能である。snapshotから取るのは
+  // **D06のtoothLossCountだけ**であり、これは`restoreRunSnapshot`のM-1(iv)検証により
+  // 0以上`gearTotalToothCount`未満に束縛されている。
+  //
+  // seeding関数そのもの(`seedInitialDestructionStateFromWear`)は`src/materials/`にあり、
+  // engineは素材層を知らない(leaf規則)ため、ここでは同じ形の複写をインラインで行う。
+  const base = createInitialDestructionState(replaySnapshot.destructionConfig.battery.profile);
   return {
     events: [],
-    destructionState: createInitialDestructionState(replaySnapshot.destructionConfig.battery.profile),
+    destructionState: {
+      ...base,
+      modes: {
+        ...base.modes,
+        D06: { ...base.modes.D06, toothLossCount: replaySnapshot.initialDestructionState.modes.D06.toothLossCount },
+      },
+    },
     replaySnapshot,
     terminalModeCandidates: [],
   };
@@ -157,6 +181,8 @@ export function deriveDegradationDiffs(events: readonly DestructionEvent[], fina
   let rotorBurnout = false;
   let batteryConsumed = false;
   let gearToothLossCount = 0;
+  let gearSeizureDeltaFractionSum = 0;
+  let bearingSeizureDeltaFractionSum = 0;
   const diffs: DegradationDiff[] = [];
 
   for (const event of events) {
@@ -191,7 +217,13 @@ export function deriveDegradationDiffs(events: readonly DestructionEvent[], fina
         // eventはepisode演出・図鑑登録専用であり、diff換算には使わない。
         break;
       case 'D09':
-        // 連続量deltaFraction換算はP3-0-Q6裁定によりD09→P3-4で追加する。
+        // P3-4 G4(計画§7.7、R4確定〈候補A〉+E7是正): D09終端は**常に**gear seizureと
+        // bearing seizureの**両方**を発行する(v12既存契約の維持。終端瞬間のboolean 2値からは
+        // 進行全体の寄与を復元できないため、原因別の選択適用は行わない)。
+        // 値はconfigを直接参照せず**event側からのみ**読む(D07のdemagnetizationDeltaFractionと
+        // 同型の一方向契約: config→event→derive)。
+        gearSeizureDeltaFractionSum += event.gearSeizureDeltaFraction;
+        bearingSeizureDeltaFractionSum += event.bearingSeizureDeltaFraction;
         break;
     }
   }
@@ -200,6 +232,10 @@ export function deriveDegradationDiffs(events: readonly DestructionEvent[], fina
   if (rotorBurnout) diffs.push({ role: 'rotor', kind: 'burnout' });
   if (batteryConsumed) diffs.push({ role: 'battery', kind: 'consumed' });
   if (gearToothLossCount > 0) diffs.push({ role: 'gear', kind: 'toothLoss', deltaCount: gearToothLossCount });
+  // D09(P3-4 G4、§7.7)。同一run内で複数回のD09 eventは発行されない(advanceD09が発火後は
+  // eventを再発行しない)ため実際の加算は最大1回だが、他モードと同じ総和形で書く。
+  if (gearSeizureDeltaFractionSum > 0) diffs.push({ role: 'gear', kind: 'seizure', deltaFraction: gearSeizureDeltaFractionSum });
+  if (bearingSeizureDeltaFractionSum > 0) diffs.push({ role: 'bearing', kind: 'seizure', deltaFraction: bearingSeizureDeltaFractionSum });
   // 正式Fable P3-3-Q3裁定(確定候補a): cumulativeWearDeltaFractionは既にadvanceD05側で
   // 素材係数(brushWearRateRatio・highCurrentPenalty・wearPerAmpSecond)まで畳み込み済みの
   // 無次元差分量であり、ここで追加の変換係数を掛けない。MotorConfigへのアクセスは不要。
@@ -231,7 +267,7 @@ export interface DestructionConfigDraft {
     recoveryFrames: number;
     recoveryContactResistanceMultiplier: number;
   };
-  d06?: { breakage: GearBreakageProfile };
+  d06?: { breakage: GearBreakageProfile; toothFatigueExposureNmS: number };
   d07?: {
     thermal: { conductionCoefficient: number; dissipationCoefficient: number };
     irreversible:
@@ -244,7 +280,14 @@ export interface DestructionConfigDraft {
         }
       | { kind: 'nonDemagnetizing' };
   };
-  d09?: { bearingSeizureGaugeLimit: number };
+  d09?: {
+    thermal: { conductionCoefficient: number; dissipationCoefficient: number };
+    bearingSeizureGaugeLimit: number;
+    metalGearContactAlways: boolean;
+    highLoadHighSpeed: { loadTorqueThresholdNm: number; rpmThreshold: number };
+    gearSeizureDeltaFraction: number;
+    bearingSeizureDeltaFraction: number;
+  };
 }
 
 export interface InvalidConfigField {
@@ -427,6 +470,9 @@ export function validateDestructionConfig(draft: DestructionConfigDraft): Valida
     missingFields.push('d06');
   } else if (draft.d06.breakage.kind === 'breakable' && !isPositiveFinite(draft.d06.breakage.gearStrengthThresholdNm)) {
     invalidFields.push({ field: 'd06.breakage.gearStrengthThresholdNm', reason: '正の有限数である必要があります' });
+  } else if (!isPositiveFinite(draft.d06.toothFatigueExposureNmS)) {
+    // P3-4 G3(§9.1候補b): 歯1本あたりの累積曝露閾値。0以下だと1stepで歯が飛び続けるため正の有限数を要求する。
+    invalidFields.push({ field: 'd06.toothFatigueExposureNmS', reason: '正の有限数である必要があります' });
   }
 
   // 正式Fable P3-2-Q11裁定(確定): thermalは磁石の種類によらず常に必須(HUD熱ゲージのため)。
@@ -461,8 +507,32 @@ export function validateDestructionConfig(draft: DestructionConfigDraft): Valida
 
   if (draft.d09 === undefined) {
     missingFields.push('d09');
-  } else if (!isPositiveFinite(draft.d09.bearingSeizureGaugeLimit)) {
-    invalidFields.push({ field: 'd09.bearingSeizureGaugeLimit', reason: '正の有限数である必要があります' });
+  } else {
+    if (!isPositiveFinite(draft.d09.bearingSeizureGaugeLimit)) {
+      invalidFields.push({ field: 'd09.bearingSeizureGaugeLimit', reason: '正の有限数である必要があります' });
+    }
+    if (!isPositiveFinite(draft.d09.thermal.conductionCoefficient)) {
+      invalidFields.push({ field: 'd09.thermal.conductionCoefficient', reason: '正の有限数である必要があります' });
+    }
+    if (!isPositiveFinite(draft.d09.thermal.dissipationCoefficient)) {
+      invalidFields.push({ field: 'd09.thermal.dissipationCoefficient', reason: '正の有限数である必要があります' });
+    }
+    if (typeof draft.d09.metalGearContactAlways !== 'boolean') {
+      invalidFields.push({ field: 'd09.metalGearContactAlways', reason: 'booleanである必要があります' });
+    }
+    if (!isPositiveFinite(draft.d09.highLoadHighSpeed.loadTorqueThresholdNm)) {
+      invalidFields.push({ field: 'd09.highLoadHighSpeed.loadTorqueThresholdNm', reason: '正の有限数である必要があります' });
+    }
+    if (!isPositiveFinite(draft.d09.highLoadHighSpeed.rpmThreshold)) {
+      invalidFields.push({ field: 'd09.highLoadHighSpeed.rpmThreshold', reason: '正の有限数である必要があります' });
+    }
+    // D07のdemagnetizationDeltaFractionと同じ値域規律((0,1]の有限数)。
+    if (!isFractionInOpenRange01(draft.d09.gearSeizureDeltaFraction)) {
+      invalidFields.push({ field: 'd09.gearSeizureDeltaFraction', reason: '(0,1]の範囲の有限数である必要があります' });
+    }
+    if (!isFractionInOpenRange01(draft.d09.bearingSeizureDeltaFraction)) {
+      invalidFields.push({ field: 'd09.bearingSeizureDeltaFraction', reason: '(0,1]の範囲の有限数である必要があります' });
+    }
   }
 
   if (
@@ -474,6 +544,45 @@ export function validateDestructionConfig(draft: DestructionConfigDraft): Valida
   }
 
   return { ok: true, config: { battery: draft.battery, d01: draft.d01, d02: draft.d02, d04: draft.d04, d05: draft.d05, d06: draft.d06, d07: draft.d07, d09: draft.d09 } };
+}
+
+// ---------------------------------------------------------------------------
+// 正典run RNG(P3-4-Q11 Q-R3、arbiter追加裁定Q11 §Q11-3修正(ii)、人間再承認済み2026-08-18)
+// ---------------------------------------------------------------------------
+
+/**
+ * 走行(run)の正典RNGを生成する純関数(mulberry32)。`RunSnapshot.seed`から決定論的に
+ * 同一の乱数系列を再生するための唯一の実装。
+ *
+ * **なぜ必要か(Q11 §Q11-3修正(ii))**: live側のrunループは従来xorshift(`gameStore.ts`の
+ * `nextRandom`)を使っていたが、P3-1-Q9が確立したリプレイ等価テスト規約はmulberry32である。
+ * 同一seedでもアルゴリズムが異なれば系列が異なるため、seedを`RunSnapshot.seed`へ単一出典化
+ * するだけでは「同一snapshotからの正直な再生」は成立しない。正典をmulberry32と確定し、
+ * **production のlive stepとリプレイの双方がこの関数を用いる**ことで、リプレイ等価が成立する。
+ * 旧V2 RNG経路(`nextRandom`)はG9のcleanupで削除済みであり、現在この関数が唯一の正典である。
+ *
+ * **配置の根拠(engine計画v15 §20.10.2)**: 本関数が守る不変条件は「`RunSnapshot.seed`から
+ * 決定論的にrunを再生できること」であり、その`RunSnapshot`・`createRunAccumulator`・
+ * `captureRunSnapshot`・`restoreRunSnapshot`というリプレイ機構一式が本ファイルに揃っている。
+ * 「守る契約と同じ家に置く」というQ10 §8(`validateMaterialComposedBase`)と同一の判断基準。
+ * 本ファイルはPhase 3拡張であり、仕様書§2のV2凍結対象ではない。
+ *
+ * **所有境界(裁定明示の禁止事項)**: brabit所有の`src/retro/audio/prng.ts`のmulberry32とは
+ * 意図的な別実装である。audio用途とrun物理用途は変更理由が異なるため、所有境界を越えて
+ * 共有してはならない。一方、engine配下のmulberry32実装は本関数へ一元化する
+ * (A-Q11-1確定。`src/engine/__tests__/prng.ts`は本関数へ委譲する互換wrapper)。
+ *
+ * 返り値は呼び出しごとに`[0, 1)`の値を返すクロージャで、インスタンス間で状態を共有しない。
+ */
+export function createRunRng(seed: number): () => number {
+  let a = seed;
+  return () => {
+    a |= 0;
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -494,9 +603,14 @@ export interface RunSnapshot {
   // (vehiclePhysics.ts)の7番目の引数として実際に消費される(stepTestRunWithDestruction参照)
   seed: number;
   initialDestructionState: DestructionState;
+  // P3-4 G1a新規(人間再承認一覧A)。Wear反映前のbase MotorConfig/CarConfigから走行開始前に
+  // 1回計算されたopaque文字列(materials/recipeKey.ts computeRecipeKey)。物理stepは一切読まない
+  // 派生メタデータ(contractVersionと同型の既存搬送経路への相乗り、docs/phase3-p3-4-plan.md
+  // v12 §13.1)。
+  recipeKey: string;
 }
 
-const RUN_SNAPSHOT_CONTRACT_VERSION = 2; // ゲート6でcourseLengthM/slopeRad追加のため1→2(正式Fable Q6裁定)
+const RUN_SNAPSHOT_CONTRACT_VERSION = 3; // P3-4 G1aでrecipeKey追加のため2→3(人間再承認一覧A、R1・R2確定)
 
 export interface CaptureRunSnapshotInput {
   motorConfig: MotorConfig;
@@ -510,11 +624,12 @@ export interface CaptureRunSnapshotInput {
   slopeRad: number | null;
   seed: number;
   initialDestructionState: DestructionState;
+  recipeKey: string;
 }
 
-// contractVersionは呼び出し側から受け取らず、この関数が常に2を付与する。
+// contractVersionは呼び出し側から受け取らず、この関数が常に3を付与する。
 // 全フィールドを深いコピーで複写する(呼び出し後にinputを変更してもRunSnapshotへ波及しない)。
-// courseLengthM/slopeRadはプリミティブ(number|null)のためstructuredCloneは不要。
+// courseLengthM/slopeRad/recipeKeyはプリミティブ(number|null/string)のためstructuredCloneは不要。
 export function captureRunSnapshot(input: CaptureRunSnapshotInput): RunSnapshot {
   return {
     contractVersion: RUN_SNAPSHOT_CONTRACT_VERSION,
@@ -529,6 +644,7 @@ export function captureRunSnapshot(input: CaptureRunSnapshotInput): RunSnapshot 
     slopeRad: input.slopeRad,
     seed: input.seed,
     initialDestructionState: structuredClone(input.initialDestructionState),
+    recipeKey: input.recipeKey,
   };
 }
 
@@ -549,7 +665,13 @@ export interface RestoredRunSnapshot {
   slopeRad: number | null;
   seed: number;
   initialDestructionState: DestructionState;
+  recipeKey: string;
 }
+
+// P3-4 G1a(docs v12 §16.4のG3是正相当をrecipeKey自体へ先行適用)。computeRecipeKeyは常に
+// `v{n}|...`という非空のenvelope形式文字列を返す契約——raw validatorとしては「到達しないはず」
+// に頼らず明示的に拒否する。`|`以降のopaque payload自体は再parseしない(envelopeの外形のみ検証)。
+const RECIPE_KEY_ENVELOPE_PATTERN = /^v[1-9][0-9]*\|/;
 
 export type RestoreRunSnapshotResult =
   | { ok: true; snapshot: RestoredRunSnapshot }
@@ -698,7 +820,13 @@ function validateD07CauseLogShape(raw: unknown): boolean {
   return validateCauseLogCommonShape(raw) && isFiniteNumber(raw.magnetHeatGaugeRatio);
 }
 function validateD09CauseLogShape(raw: unknown): boolean {
-  return validateCauseLogCommonShape(raw) && isFiniteNumber(raw.bearingHeatGaugeRatio);
+  return (
+    validateCauseLogCommonShape(raw) &&
+    isFiniteNumber(raw.bearingHeatGaugeRatio) &&
+    // R4候補A(生値のみ・解釈済みoriginKindを持たない)。UI側が原因を解釈する。
+    typeof raw.metalGearContactActive === 'boolean' &&
+    typeof raw.highLoadHighSpeedActive === 'boolean'
+  );
 }
 
 function validateD01ProgressShape(raw: unknown): boolean {
@@ -783,6 +911,11 @@ function validateD06ProgressShape(raw: unknown): boolean {
   if (!isFiniteNumber(raw.toothLossCount)) return false;
   if (raw.firstLossAtT !== null && !isFiniteNumber(raw.firstLossAtT)) return false;
   if (raw.causeLog !== null && !validateD06CauseLogShape(raw.causeLog)) return false;
+  // P3-4 G3(§9.1候補b・§9.4 R7)で新設した2フィールド。いずれも非負の有限数。
+  // cumulativeOverloadExposureはN·m·sの累積量、meshPhaseAccumulatorは噛み合わせ位相の累積で、
+  // どちらも単調非減少(負値は状態の破損を意味する)。
+  if (!isFiniteNumber(raw.cumulativeOverloadExposure) || raw.cumulativeOverloadExposure < 0) return false;
+  if (!isFiniteNumber(raw.meshPhaseAccumulator) || raw.meshPhaseAccumulator < 0) return false;
   return true;
 }
 function validateD07ProgressShape(raw: unknown): boolean {
@@ -803,7 +936,19 @@ function validateD09ProgressShape(raw: unknown): boolean {
   return true;
 }
 
-function validateDestructionStateShape(raw: unknown): raw is DestructionState {
+/**
+ * `DestructionState`のraw形状検証(P3-4 G6 §16.3でexport化)。
+ *
+ * **唯一の出典**: `PendingNotebookRecord`/notebook履歴のvalidator(store層所有)から再利用される。
+ * store層が同等の検証を再実装すると、engine側の型が育ったときに検証集合が乖離するため、
+ * 循環依存を避ける意味でも本ファイルを唯一の出典とする。
+ *
+ * **M-1(iv)との区別**: 本関数が検証するのは形状のみである。`RunSnapshot.initialDestructionState`
+ * に対する「`modes.D06.toothLossCount`が0以上`gearTotalToothCount`未満」という交差不変条件は
+ * **走行開始時点専用**の追加チェックであり、本関数には含まれない——走行終了時点の
+ * `finalDestructionState`は全損(`toothLossCount===10`)もありうるため、同一視してはならない。
+ */
+export function validateDestructionStateShape(raw: unknown): raw is DestructionState {
   if (!isPlainObject(raw)) return false;
   if (!isPlainObject(raw.shared)) return false;
   if (!isFiniteNumber(raw.shared.shortCircuitDurationS) || !isFiniteNumber(raw.shared.elapsedTimeS)) return false;
@@ -930,6 +1075,15 @@ function validateDestructionConfigRawShape(raw: unknown): raw is DestructionConf
   if (raw.d09 !== undefined) {
     if (!isPlainObject(raw.d09)) return false;
     if (typeof raw.d09.bearingSeizureGaugeLimit !== 'number') return false;
+    if (!isPlainObject(raw.d09.thermal)) return false;
+    if (typeof raw.d09.thermal.conductionCoefficient !== 'number') return false;
+    if (typeof raw.d09.thermal.dissipationCoefficient !== 'number') return false;
+    if (typeof raw.d09.metalGearContactAlways !== 'boolean') return false;
+    if (!isPlainObject(raw.d09.highLoadHighSpeed)) return false;
+    if (typeof raw.d09.highLoadHighSpeed.loadTorqueThresholdNm !== 'number') return false;
+    if (typeof raw.d09.highLoadHighSpeed.rpmThreshold !== 'number') return false;
+    if (typeof raw.d09.gearSeizureDeltaFraction !== 'number') return false;
+    if (typeof raw.d09.bearingSeizureDeltaFraction !== 'number') return false;
   }
   return true;
 }
@@ -1033,8 +1187,36 @@ export function restoreRunSnapshot(raw: unknown): RestoreRunSnapshotResult {
   const seedRaw = raw.seed;
   if (!isFiniteNumber(seedRaw)) return { ok: false, reason: 'invalidSchema', details: 'seed' };
 
+  const recipeKeyRaw = raw.recipeKey;
+  if (typeof recipeKeyRaw !== 'string' || recipeKeyRaw.length === 0) {
+    return { ok: false, reason: 'invalidSchema', details: 'recipeKey must be a non-empty string' };
+  }
+  if (!RECIPE_KEY_ENVELOPE_PATTERN.test(recipeKeyRaw)) {
+    return { ok: false, reason: 'invalidSchema', details: 'recipeKey must be in envelope format (v{n}|...)' };
+  }
+
   const initialDestructionStateRaw = raw.initialDestructionState;
   if (!validateDestructionStateShape(initialDestructionStateRaw)) return { ok: false, reason: 'invalidSchema', details: 'initialDestructionState' };
+  // M-1(iv)確定裁定(P3-4 G6、§13.1): initialDestructionState(走行**開始**時点)の
+  // `modes.D06.toothLossCount`は0以上`gearTotalToothCount`**未満**の整数でなければならない。
+  // 全損個体(>=総歯数)は§15の装備拒否(M-1(v))により走行開始前に排除されるため、この範囲を
+  // 外れたsnapshotは常に改竄・破損として拒否してよい。§14.3のseedingが生成する値の不変条件と
+  // 対をなす検証である。
+  //
+  // **配置の判断(§16.3の重複防止規定に従う)**: 計画§13.1は「`validateD06ProgressShape`へ
+  // 追加する」と書いているが、同関数は`validateDestructionStateShape`経由で
+  // **`finalDestructionState`(走行終了時点、全損なら`toothLossCount===10`が正当)**の検証にも
+  // 共用されている(実測)。そこへ入れると正当な全損記録を誤って拒否するため、§16.3が明示的に
+  // 禁じている「両者を同一のvalidator呼び出しへ混在させる」形になる。したがって本交差不変条件は
+  // **initialDestructionState専用のこの位置**に置く。
+  const initialToothLossCount = initialDestructionStateRaw.modes.D06.toothLossCount;
+  const gearTotalToothCount = runContextRaw.gearTotalToothCount;
+  if (!Number.isInteger(initialToothLossCount) || initialToothLossCount < 0) {
+    return { ok: false, reason: 'invalidSchema', details: 'initialDestructionState.modes.D06.toothLossCount must be a non-negative integer' };
+  }
+  if (gearTotalToothCount !== null && initialToothLossCount >= gearTotalToothCount) {
+    return { ok: false, reason: 'invalidSchema', details: 'initialDestructionState.modes.D06.toothLossCount must be less than runContext.gearTotalToothCount' };
+  }
   // 正式Fable P3-3-Q7裁定に伴うcross-validator(確定): 復元されたrecoveryFramesLeftが
   // 対応するconfigの上限(recoveryFrames)を超えないことを保証する。これがないと、破損・
   // 改竄されたlocalStorageデータから任意に大きなrecoveryFramesLeftを持つsnapshotを復元でき、
@@ -1068,6 +1250,7 @@ export function restoreRunSnapshot(raw: unknown): RestoreRunSnapshotResult {
       slopeRad: slopeRadRaw,
       seed: seedRaw,
       initialDestructionState: initialDestructionStateRaw,
+      recipeKey: recipeKeyRaw,
     },
   };
 }
@@ -1142,7 +1325,7 @@ function buildMotorOnlyFrameInput(config: MotorConfig, prev: SimState, next: Sim
  * 単一出典契約を、frame組み立て式を複製せず実関数を直接importして検証するため。新設純関数の
  * 可視性追加であり、既存公開契約の変更ではない(`composeEffectiveMotorConfig`のexport化と同型)。
  */
-export function buildVehicleFrameInput(config: MotorConfig, prev: VehicleSimState, next: VehicleSimState): DestructionFrameInput {
+export function buildVehicleFrameInput(config: MotorConfig, carConfig: CarConfig, prev: VehicleSimState, next: VehicleSimState): DestructionFrameInput {
   const theoreticalCurrentA = computeElectricalState(config, prev.motor.theta, prev.motor.omega).current;
   return {
     currentA: next.motor.current,
@@ -1165,6 +1348,15 @@ export function buildVehicleFrameInput(config: MotorConfig, prev: VehicleSimStat
     isChatteringThisFrame: prev.motor.chatterFramesLeft > 0 || next.motor.chatterFramesLeft > 0,
     // 正式Fable P3-3-Q4裁定(確定、5.2節)。
     angularVelocityRadS: next.motor.omega,
+    // P3-4 G3(§7.3): 車軸角速度。CarConfigの構造を知るframe builder側で事前計算し、
+    // leaf(destructionModes.ts)へは計算済みスカラーのみを渡す。motor-onlyでは
+    // loadTorqueNmと同じくundefined(buildMotorOnlyFrameInputは本フィールドを設定しない)。
+    axleAngularVelocityRadS: next.motor.omega / carConfig.gearRatio,
+    // P3-4 G4(§7.5、R8確定裁定): ギヤ噛合散逸パワー P_loss = |loadTorqueNm×ω_motor|×(1-eta)。
+    // vehiclePhysics.tsの反射式(tResistReflected = wheelRadius/(gearRatio*eta)*resistTotal)の下で
+    // P_out = eta×P_in が恒等的に成立するため、本式は既存負荷の二重計上ではなく損失の「観測」である。
+    // 同じくCarConfig依存の値であるため、frame builder側で事前計算しleafへはスカラーのみを渡す。
+    gearFrictionLossW: Math.abs(next.loadTorqueNm * next.motor.omega) * (1 - carConfig.gearEfficiency),
   };
 }
 
@@ -1345,7 +1537,16 @@ export function stepTestRunWithDestruction(
   const baseMotorConfig = accumulator.replaySnapshot.motorConfig; // 唯一の出典(P3-1-Q9-2、不変)
   const destructionConfig = accumulator.replaySnapshot.destructionConfig; // 唯一の出典(P3-1-Q9-2、不変)
   const motorConfig = composeEffectiveMotorConfig(baseMotorConfig, accumulator.destructionState, destructionConfig); // ゲート4
-  const carConfig = accumulator.replaySnapshot.carConfig!; // vehicle文脈、正式M2検証により非null
+  // P3-4 G3(§8.2・§9.3、Suu_mot3 G3-P2): 物理step前に現D06 stateからruntime carConfigを合成する。
+  // totalToothCountはRunSnapshot.runContext.gearTotalToothCountを単一出典とする。
+  const baseCarConfig = accumulator.replaySnapshot.carConfig!; // vehicle文脈、正式M2検証により非null
+  const d06Result = composeD06RuntimeEffect(baseCarConfig, accumulator.destructionState.modes.D06, accumulator.replaySnapshot.runContext.gearTotalToothCount!);
+  if (!d06Result.ok) throw new Error(d06Result.reason); // §12のbeginRun前検証により実運用では到達不能、防御的
+  // P3-4 G4(§7.8): D06合成の結果へ続けてD09の軸摩擦増加を合成する(作用フィールドが
+  // gearEfficiency/axleFrictionと異なるため可換、順序に依存しない)。
+  const d09Result = composeD09RuntimeEffect(d06Result.carConfig, accumulator.destructionState.modes.D09);
+  if (!d09Result.ok) throw new Error(d09Result.reason); // 同上、防御的
+  const carConfig = d09Result.carConfig;
   const courseLengthM = accumulator.replaySnapshot.courseLengthM!; // ゲート6(5.2節)、vehicle+track===null文脈で非null
   const slopeRad = accumulator.replaySnapshot.slopeRad!; // ゲート6(5.2節)、M-2是正。vehicle+track===null文脈で非null
 
@@ -1361,7 +1562,7 @@ export function stepTestRunWithDestruction(
   // 保持するslopeRadが実際の物理へ反映されない「死にフィールド」になるため、M-2是正として
   // 最後の引数まで明示的に渡す。
   const rawNextPhysicsState = stepTestRun(motorConfig, carConfig, prevPhysicsState, dt, courseLengthM, rng, slopeRad);
-  const frame = buildVehicleFrameInput(motorConfig, prevPhysicsState, rawNextPhysicsState); // 5.3節、ゲート5で新設済みの実関数をそのまま使用
+  const frame = buildVehicleFrameInput(motorConfig, carConfig, prevPhysicsState, rawNextPhysicsState); // 5.3節、ゲート5で新設済みの実関数をそのまま使用
   const { state, events } = advanceDestructionState(
     accumulator.destructionState, frame, destructionConfig, accumulator.replaySnapshot.runContext, dt,
   );
@@ -1384,5 +1585,162 @@ export function stepTestRunWithDestruction(
   const termination = nonEmptyTerminalModes
     ? finalizeDestructionRun({ ...nextAccumulator, terminalModeCandidates: nonEmptyTerminalModes })
     : null;
+  return { physicsState, accumulator: nextAccumulator, termination };
+}
+
+// ---------------------------------------------------------------------------
+// D06 runtime効果(P3-4 G3、計画§9.3 M-1(vi)是正の契約2 + §9.4 R7トルクリップル)
+// ---------------------------------------------------------------------------
+
+/** リップル変調の振幅(無次元、§17数値候補)。確定はG5較正sweep+人間commit承認。 */
+export const RIPPLE_AMPLITUDE = 0.05;
+
+export type ComposeD06RuntimeEffectResult = { ok: true; carConfig: CarConfig } | { ok: false; reason: string };
+
+/**
+ * D06(歯欠け)のruntime効果を`gearEfficiency`へ合成する純関数(計画§9.3・§9.4)。
+ *
+ * **契約2(runtime effective)**: 戻り値の`gearEfficiency`は`0 < eta <= baseCarConfig.gearEfficiency`
+ * という、契約0(素材写像出力`[0.60,0.95]`)・契約1′(Wear反映後base`(0,0.95]`)より**意図的に広い**
+ * レンジを持つ。歯欠けとリップルはいずれも効率を下げる方向にのみ働くため上限はbase値である。
+ *
+ * **全損の扱い(§9.2)**: `toothLossCount===totalToothCount`(全損)は同一stepで
+ * `classifyTerminalModes`によりdestructionTerminalとなり、wrapperがそのstepで停止するため、
+ * **本関数が実際に呼ばれる時点の`toothLossCount`は常に0〜(totalToothCount-1)**である。
+ * したがって`efficiencyMultiplier > 0`が保証され、`gearEfficiency`が0になることはない。
+ *
+ * **トルクリップル(§9.4)**: `meshPhaseAccumulator`を位相源とする決定論的な変調(rng非依存)。
+ * `sin²`により`0 <= 減衰 <= RIPPLE_AMPLITUDE*toothLossRatio`となり、常に効率を下げる方向にのみ
+ * 働くためエネルギーを増やさない。`toothLossCount=0`のときは`toothLossRatio=0`で
+ * `rippleMultiplier=1`(恒等)となり、健全時の既存挙動を一切変えない。
+ * **エイリアシングの明記(R7付帯)**: 噛合周波数(最大約167Hz、§9.1)は物理タイムステップ120fpsの
+ * ナイキスト周波数(60Hz)を超えてエイリアスする。決定論的かつ有界(エネルギー非増加)であり
+ * 正しさは損なわないが、スペクトル忠実ではない。
+ */
+export function composeD06RuntimeEffect(
+  baseCarConfig: CarConfig,
+  d06Progress: D06Progress,
+  totalToothCount: number,
+): ComposeD06RuntimeEffectResult {
+  // Suu_mot3 G3-P1: totalToothCountはRunSnapshot.runContext.gearTotalToothCountを単一出典と
+  // する(engine→materialsの逆依存を避けるため引数で受ける)。0・負・非整数・非有限は
+  // 呼び出し側の契約違反であり、除算前に明示的に拒否する(0除算でInfinityを生まない)。
+  if (!Number.isFinite(totalToothCount) || totalToothCount <= 0 || !Number.isInteger(totalToothCount)) {
+    return { ok: false, reason: `totalToothCountが正の整数ではありません: ${totalToothCount}` };
+  }
+  const toothLossRatio = d06Progress.toothLossCount / totalToothCount;
+  const efficiencyMultiplier = 1 - toothLossRatio;
+  const meshPhase = d06Progress.meshPhaseAccumulator % 1; // 0〜1、1歯噛み合わせ周期内の位相
+  const sinPhase = Math.sin(2 * Math.PI * meshPhase);
+  const rippleMultiplier = 1 - RIPPLE_AMPLITUDE * toothLossRatio * sinPhase * sinPhase;
+  const gearEfficiency = baseCarConfig.gearEfficiency * efficiencyMultiplier * rippleMultiplier;
+  if (!Number.isFinite(gearEfficiency) || gearEfficiency <= 0 || gearEfficiency > baseCarConfig.gearEfficiency) {
+    // §9.2の保証(toothLossCount<=totalToothCount-1)が壊れた場合の防御的チェック。理論上到達しない。
+    return { ok: false, reason: `D06合成後のgearEfficiencyが範囲外です: ${gearEfficiency}` };
+  }
+  return { ok: true, carConfig: { ...baseCarConfig, gearEfficiency } };
+}
+
+// ---------------------------------------------------------------------------
+// D09 runtime効果(P3-4 G4、計画§7.8)
+// ---------------------------------------------------------------------------
+
+/**
+ * ゲージ満タン時に軸摩擦の「残り余地」のうち何割を消費するか(無次元、§17数値候補)。
+ * 確定はG5較正sweep+人間commit承認(Q15-1恒久規則)。
+ */
+export const D09_AXLE_FRICTION_INCREASE_PER_GAUGE = 0.1;
+
+export type ComposeD09RuntimeEffectResult = { ok: true; carConfig: CarConfig } | { ok: false; reason: string };
+
+/**
+ * D09(軸受焼付き)のruntime効果を`axleFriction`へ合成する純関数(計画§7.8)。
+ *
+ * 独立した2つの摩擦源の合成に既存パターン`1-(1-a)(1-b)`を用いる。この式は
+ * a,b∈[0,1]のとき結果も[0,1]に数学的に収まるため、値域が構造的に保証される。
+ *
+ * **no-op境界**: `bearingHeatGaugeRatio===0`のとき恒等(`axleFriction=base`)。
+ * **単調性**: `bearingHeatGaugeRatio`の増加に対し`axleFriction`は単調増加する。
+ *
+ * D06(`gearEfficiency`)とは異なるフィールドへ作用するため、両者の合成は可換であり、
+ * wrapperではD06合成の結果へ続けて本関数を適用する。
+ */
+export function composeD09RuntimeEffect(baseCarConfig: CarConfig, d09Progress: D09Progress): ComposeD09RuntimeEffectResult {
+  const additionalFrictionRatio = d09Progress.bearingHeatGaugeRatio * D09_AXLE_FRICTION_INCREASE_PER_GAUGE;
+  const axleFriction = 1 - (1 - baseCarConfig.axleFriction) * (1 - additionalFrictionRatio);
+  if (!Number.isFinite(axleFriction) || axleFriction < 0 || axleFriction > 1) {
+    // bearingHeatGaugeRatioは[0,1]へclampされ、baseのaxleFrictionもCarConfig契約上[0,1]で
+    // あるため理論上到達しない。base側が契約違反の場合の防御的チェック。
+    return { ok: false, reason: `D09合成後のaxleFrictionが範囲外です: ${axleFriction}` };
+  }
+  return { ok: true, carConfig: { ...baseCarConfig, axleFriction } };
+}
+
+// P3-4 G2(docs/phase3-p3-4-plan.md §8)。track-run文脈のwrapper。
+/**
+ * vehicle文脈のうち**track-run**(`accumulator.replaySnapshot.track !== null`)のsnapshotを持つ
+ * accumulator専用。test-run(`track === null`)またはmotor文脈のaccumulatorを渡した場合の
+ * 挙動は未定義(trusted precondition、`stepTestRunWithDestruction`と同型の契約、§8.5)。
+ *
+ * **trackの検証について**: `RunSnapshot.track`の静的型は`TrackDefinition | null`だが、本関数は
+ * それが既に検証済み(`ValidatedTrackDefinition`相当)であることを前提とする。根拠は2点——
+ * (1)liveの走行で使うtrackは`src/data/tracks.ts`の`TRACKS`であり、同ファイルが
+ * `RAW_TRACKS.map(createValidatedTrack)`で生成する`readonly ValidatedTrackDefinition[]`である。
+ * (2)復元経路の`restoreRunSnapshot`は`RestoredRunSnapshot.track`を
+ * `ValidatedTrackDefinition | null`として返す(内部で`createValidatedTrack`を通す)。
+ * `trackPhysics.ts`の設計意図(「毎フレームの再検証コストもかけない」、同ファイル1.4節)に従い、
+ * 本関数は毎stepの再検証を行わない。
+ *
+ * 責務は「1フレーム進める+destructionTerminalが成立していればRunOutcome化する」までであり、
+ * `finished`/`stalled`/`derailed`/`overheated`といった物理終端のRunOutcome化は呼び出し側
+ * (gameStore、brabit所有)の責務である(§8.3)。**同一stepで破壊終端と物理終端が同時に成立した
+ * 場合は破壊終端が優先される**——本関数が非nullの`termination`を返すため、呼び出し側が
+ * `termination`のnullチェックを先に行う実装順序で自然に成立する。
+ */
+export function stepTrackRunWithDestruction(
+  vehicleState: VehicleSimState,
+  accumulator: RunAccumulator,
+  dt: number,
+  rng?: VehicleStepRng,
+): DestructionStepResult<VehicleSimState> {
+  const baseMotorConfig = accumulator.replaySnapshot.motorConfig; // 唯一の出典(P3-1-Q9-2、不変)
+  const destructionConfig = accumulator.replaySnapshot.destructionConfig; // 唯一の出典(P3-1-Q9-2、不変)
+  const motorConfig = composeEffectiveMotorConfig(baseMotorConfig, accumulator.destructionState, destructionConfig);
+  // P3-4 G3(§8.2・§9.3、Suu_mot3 G3-P2): test-run wrapperと同一の合成をtrack-runでも行う。
+  const baseCarConfig = accumulator.replaySnapshot.carConfig!; // vehicle文脈、正式M2検証により非null
+  const d06Result = composeD06RuntimeEffect(baseCarConfig, accumulator.destructionState.modes.D06, accumulator.replaySnapshot.runContext.gearTotalToothCount!);
+  if (!d06Result.ok) throw new Error(d06Result.reason); // 同上、防御的
+  const d09Result = composeD09RuntimeEffect(d06Result.carConfig, accumulator.destructionState.modes.D09); // §7.8、test-run wrapperと同一
+  if (!d09Result.ok) throw new Error(d09Result.reason); // 同上、防御的
+  const carConfig = d09Result.carConfig;
+  // track-run文脈で非null(上記trusted precondition)。courseLengthM/slopeRadはtrack側の
+  // 曲率・勾配プロファイルが担うため、本経路では参照しない(RunSnapshotの交差検証契約により
+  // track非nullならcourseLengthM/slopeRadはnull)。
+  const track = accumulator.replaySnapshot.track! as ValidatedTrackDefinition;
+
+  // overheated保留規則(正式Fable P3-2ゲート5 Q13-1裁定)のpre面。base step内部の早期return
+  // ガード(status==='overheated'なら入力をそのまま返す)を回避するため、prev側へ適用する。
+  const prevPhysicsState = normalizeOverheatedStatusForD04Hold(vehicleState, accumulator.destructionState);
+  const rawNextPhysicsState = stepTrackRun(motorConfig, carConfig, track, prevPhysicsState, dt, rng);
+  const frame = buildVehicleFrameInput(motorConfig, carConfig, prevPhysicsState, rawNextPhysicsState);
+  const { state, events } = advanceDestructionState(
+    accumulator.destructionState, frame, destructionConfig, accumulator.replaySnapshot.runContext, dt,
+  );
+  // 同規則のpost面。next destruction stateとbase stepの生のnext physics stateへ再適用してから
+  // 返却・分類へ渡す(none→swelling同一step境界でも正しく保留される)。
+  const physicsState = normalizeOverheatedStatusForD04Hold(rawNextPhysicsState, state);
+  const snapshot: PhysicsSnapshotAtT = { context: 'vehicle', state: physicsState };
+  const stampedEvents = stampPhysicsSnapshot(events, snapshot);
+  const nextTerminalModeCandidates = [...accumulator.terminalModeCandidates, ...classifyTerminalModes(events)];
+  const nextAccumulator: RunAccumulator = {
+    ...accumulator,
+    destructionState: state,
+    events: [...accumulator.events, ...stampedEvents],
+    terminalModeCandidates: nextTerminalModeCandidates,
+  };
+  const nonEmptyTerminalModes = asNonEmpty(nextTerminalModeCandidates);
+  const termination = nonEmptyTerminalModes
+    ? finalizeDestructionRun({ ...nextAccumulator, terminalModeCandidates: nonEmptyTerminalModes })
+    : null; // destructionTerminal以外の物理終端では常にnull(§8.3、RunOutcome化は呼び出し側)
   return { physicsState, accumulator: nextAccumulator, termination };
 }

@@ -12,7 +12,7 @@ import { create } from 'zustand';
 import { createJSONStorage, persist, type StateStorage } from 'zustand/middleware';
 import type { MotorConfig } from '../engine/motorPhysics';
 import type { CarConfig, EnergyBreakdown, VehicleSimState } from '../engine/vehiclePhysics';
-import { restoreRunSnapshot } from '../engine/destructionOrchestration';
+import { captureRunSnapshot, restoreRunSnapshot, type CaptureRunSnapshotInput, type RunSnapshot } from '../engine/destructionOrchestration';
 import type { DestructionModeId } from '../engine/destructionModes';
 
 // engine/destructionModes.ts(alice所有)はDestructionModeId型のみをexportし、
@@ -26,7 +26,13 @@ import { GEAR_TOTAL_TOOTH_COUNT } from '../materials/inventoryItem';
 import { BATTERY_MATERIALS, BODY_MATERIALS, BRUSH_MATERIALS, COATING_MATERIALS, GEAR_MATERIALS, MAGNET_MATERIALS, WIRE_MATERIALS } from '../materials/materials';
 import { DEFAULT_GARAGE_SELECTION, type GarageSelection } from '../data/partPresets';
 import type { CourseProgress, CourseRunRecord } from './gameStore';
-import type { ExperimentSession, CourseRunNotebookRecord, SessionEvent } from './notebookStore';
+import type {
+  SessionEvent,
+  LegacyCourseRunNotebookRecord, StoredExperimentSession, StoredCourseRunNotebookRecord,
+} from './notebookStore';
+// G6(§16.2・§16.4、G6-R1): 永続履歴はlegacy/current両受理、pendingはcurrentのみ受理。
+import { acceptsStoredNotebookFinalFields, acceptsPendingNotebookFinalFields } from './notebookValidation';
+import { resolveInstrumentShelfState, GAUSS_METER_PRICE_G } from './instrumentShop';
 
 // 追補5(Suuレビュー2026-08-02T17:00): InventoryItem.materialId等がmaterials.tsの
 // family別ID集合に実在することまで検証する(架空materialIdの混入を防ぐ)。
@@ -54,13 +60,16 @@ import {
   touchLeaseHeartbeat,
   validateEquipmentLoadout,
   type ApplyRunOutcomeResult,
-  type CodexRecordEntry,
+  type StoredCodexRecordEntry,
+  type InstrumentOwnership,
+  type InstrumentId,
   type EquipmentIdSnapshot,
   type EquipmentLoadout,
   type PendingNotebookRecord,
   type RunApplicationEnvelope,
   type SaveEnvelopeMeta,
   type VehicleTestRunNotebookRecord,
+  type StoredVehicleTestRunNotebookRecord,
 } from './runOutcomeApplication';
 import {
   confirmSalvage,
@@ -131,19 +140,33 @@ function defaultProgress(): ProgressSlice {
   };
 }
 
+/**
+ * G6(§16.2): **読み取り(永続化された履歴)はlegacy/currentのunionを受理する**——
+ * P3-4以前に保存された記録を読めなくしないため。新規レコードの生成境界(§16.5 builder+
+ * §16.4 pending validator)側で欠落を禁止する(G6-R1、人間承認2026-08-19)。
+ */
 export interface NotebookSlice {
-  sessions: ExperimentSession[];
-  courseRuns: CourseRunNotebookRecord[];
-  vehicleTestRuns: VehicleTestRunNotebookRecord[];
+  sessions: StoredExperimentSession[];
+  courseRuns: StoredCourseRunNotebookRecord[];
+  vehicleTestRuns: StoredVehicleTestRunNotebookRecord[];
 }
 
 function defaultNotebook(): NotebookSlice {
   return { sessions: [], courseRuns: [], vehicleTestRuns: [] };
 }
 
+/**
+ * P3-4 G7(項目K): **読み取りはlegacy/currentのunionを受理する**——過去の図鑑記録を
+ * 読めなくしないため。新規書込みは`commitApplyResult`が常に2フィールドを載せる。
+ */
 export interface EncyclopediaSlice {
   discoveredModes: readonly DestructionModeId[];
-  codexRecords: readonly CodexRecordEntry[];
+  codexRecords: readonly StoredCodexRecordEntry[];
+}
+
+/** P3-4 G7(項目J): 新規セーブの初期値。何も所持していない。 */
+function defaultInstrumentOwnership(): InstrumentOwnership {
+  return { ownedInstrumentIds: [] };
 }
 
 function defaultEncyclopedia(): EncyclopediaSlice {
@@ -180,11 +203,20 @@ export interface PersistedSaveState {
   inventory: PlayerInventory;
   equipmentLoadout: EquipmentLoadout;
   encyclopedia: EncyclopediaSlice;
+  // P3-4 G7(項目J): 計測器の所持状態。encyclopediaと**同格のトップレベル**へ置く
+  // (店で買う道具であり、破壊モードの発見状態とは概念的に独立、§11.3(a))。
+  instrumentOwnership: InstrumentOwnership;
   saveMeta: SaveEnvelopeMeta;
   idCounters: IdCounters;
 }
 
-const SCHEMA_VERSION = 1;
+// P3-4 G7(項目J・K、§11.3(b)承認済み): `instrumentOwnership`追加と`CodexRecordEntry`拡張を
+// **同一migrationで**取り込むため1→2へ引き上げる。`SAVE_KEY`は変更しない——SAVE_KEYの
+// バージョン番号はv15→v16のような大規模な永続化形式変更を表す接頭辞であり、
+// フィールド追加はその粒度に当たらない。
+const SCHEMA_VERSION = 2;
+/** migration元のschemaVersion。`readLatestV16`がこの値を検出したときだけv2へ移行する。 */
+const SCHEMA_VERSION_V1 = 1;
 const SAVE_KEY = 'v16:save';
 const V15_PROGRESS_KEY = 'v15:progress';
 const V15_NOTEBOOK_KEY = 'v15:notebook';
@@ -205,6 +237,7 @@ function freshBootstrap(): PersistedSaveState {
     inventory,
     equipmentLoadout: loadout,
     encyclopedia: defaultEncyclopedia(),
+    instrumentOwnership: defaultInstrumentOwnership(),
     saveMeta: defaultSaveMeta(generateRandomId()),
     idCounters: defaultIdCounters(),
   };
@@ -647,9 +680,11 @@ function isValidVehicleRunSample(v: unknown): boolean {
   return typeof c.isSlipping === 'boolean';
 }
 
-function isValidExperimentSession(v: unknown): v is ExperimentSession {
+/** 永続履歴向け。legacy/currentの両方を受理する(§16.2、G6-R1)。 */
+function isValidExperimentSession(v: unknown): v is StoredExperimentSession {
   if (!v || typeof v !== 'object') return false;
   const c = v as Record<string, unknown>;
+  if (!acceptsStoredNotebookFinalFields(c)) return false;
   if (typeof c.id !== 'string' || !isValidIsoString(c.startedAt) || !isValidIsoString(c.endedAt)) return false;
   if (!isValidMotorConfig(c.config)) return false;
   if (!isFiniteNumber(c.seed)) return false;
@@ -660,9 +695,11 @@ function isValidExperimentSession(v: unknown): v is ExperimentSession {
   return true;
 }
 
-function isValidCourseRunNotebookRecord(v: unknown): v is CourseRunNotebookRecord {
+/** 永続履歴向け。legacy/currentの両方を受理する(§16.2、G6-R1)。 */
+function isValidCourseRunNotebookRecord(v: unknown): v is StoredCourseRunNotebookRecord {
   if (!v || typeof v !== 'object') return false;
   const c = v as Record<string, unknown>;
+  if (!acceptsStoredNotebookFinalFields(c)) return false;
   if (typeof c.id !== 'string' || !isValidIsoString(c.savedAt) || typeof c.trackId !== 'string') return false;
   if (!isValidMotorConfig(c.motorConfig) || !isValidCarConfig(c.carConfig)) return false;
   if (!isFiniteNumber(c.seed) || !VEHICLE_STATUSES.includes(c.status as string)) return false;
@@ -672,9 +709,11 @@ function isValidCourseRunNotebookRecord(v: unknown): v is CourseRunNotebookRecor
   return true;
 }
 
-function isValidVehicleTestRunNotebookRecord(v: unknown): v is VehicleTestRunNotebookRecord {
+/** 永続履歴向け。legacy/currentの両方を受理する(§16.2、G6-R1)。 */
+function isValidVehicleTestRunNotebookRecord(v: unknown): v is StoredVehicleTestRunNotebookRecord {
   if (!v || typeof v !== 'object') return false;
   const c = v as Record<string, unknown>;
+  if (!acceptsStoredNotebookFinalFields(c)) return false;
   if (typeof c.id !== 'string' || !isValidIsoString(c.savedAt)) return false;
   if (!isValidMotorConfig(c.motorConfig) || !isValidCarConfig(c.carConfig)) return false;
   if (!isFiniteNumber(c.seed) || !VEHICLE_STATUSES.includes(c.status as string)) return false;
@@ -684,22 +723,45 @@ function isValidVehicleTestRunNotebookRecord(v: unknown): v is VehicleTestRunNot
   return true;
 }
 
+/**
+ * G6(§16.4): pendingは**currentのみ**を受理する。pendingは常にP3-4以降のコードパスで
+ * 生成されるため、legacyな中間状態は本来存在しえない。その期待をvalidatorレベルでも
+ * 強制し、2フィールドが静かに欠落したまま適用へ進むことを防ぐ。
+ */
 function isValidPendingNotebookRecord(v: unknown): v is PendingNotebookRecord {
   if (!v || typeof v !== 'object') return false;
   const c = v as Record<string, unknown>;
-  if (c.kind === 'session') return isValidExperimentSession(c.record);
-  if (c.kind === 'vehicleTestRun') return isValidVehicleTestRunNotebookRecord(c.record);
-  if (c.kind === 'courseRun') return isValidCourseRunNotebookRecord(c.record);
+  const record = c.record;
+  if (!record || typeof record !== 'object') return false;
+  if (!acceptsPendingNotebookFinalFields(record as Record<string, unknown>)) return false;
+  if (c.kind === 'session') return isValidExperimentSession(record);
+  if (c.kind === 'vehicleTestRun') return isValidVehicleTestRunNotebookRecord(record);
+  if (c.kind === 'courseRun') return isValidCourseRunNotebookRecord(record);
   return false;
 }
 
-function isValidCodexRecordEntry(v: unknown): v is CodexRecordEntry {
+/**
+ * P3-4 G7(項目K): 永続履歴向け。legacy(2フィールドとも不在)/current(2フィールドとも存在)の
+ * **両方**を受理する——過去の図鑑記録を読めなくしないため。
+ * 「片方だけ存在する」半状態は、どちらの経路から来ても壊れたデータであり明示的に拒否する
+ * (notebook 3腕の`finalDestructionState`/`recipeKey`と同型の交差不変条件)。
+ */
+function isValidCodexRecordEntry(v: unknown): v is StoredCodexRecordEntry {
   if (!v || typeof v !== 'object') return false;
   const c = v as Record<string, unknown>;
   if (typeof c.modeId !== 'string' || !DESTRUCTION_MODE_ID_SET.has(c.modeId)) return false;
   // 追補2 必須修正4: runSequenceは1始まり(4.4節、saveMeta.nextRunSequenceの初期値も1)。
   if (!isNonNegativeInteger(c.firstDiscoveredAtRunSequence) || (c.firstDiscoveredAtRunSequence as number) < 1) return false;
   if (restoreRunSnapshot(c.replaySnapshot).ok !== true) return false;
+
+  const hasDiscoveryEvent = 'discoveryEvent' in c;
+  const hasRunDegradationDiffs = 'runDegradationDiffs' in c;
+  if (hasDiscoveryEvent !== hasRunDegradationDiffs) return false; // 交差不変条件
+  if (!hasDiscoveryEvent) return true; // legacy: 2フィールドとも不在
+  // 既存isValidRunOutcomeと同じ規律で、検証済みreplaySnapshotをtemplateとして流用する。
+  const template = c.replaySnapshot as Record<string, unknown>;
+  if (!isValidDestructionEventShape(c.discoveryEvent, template)) return false;
+  if (!Array.isArray(c.runDegradationDiffs) || !c.runDegradationDiffs.every(isValidDegradationDiff)) return false;
   return true;
 }
 
@@ -757,8 +819,8 @@ function migrateProgressFromV15(raw: unknown): ProgressSlice {
  * 有効(=配列であり、かつ全要素が有効)である場合のみ採用し、1件でも不正要素があれば
  * フィールド全体を既定値(空配列)へ戻す(6.2節手順4の文言どおり)。
  */
-function migrateNotebookFromV15(raw: unknown): { sessions: ExperimentSession[]; courseRuns: CourseRunNotebookRecord[] } {
-  const fallback = { sessions: [] as ExperimentSession[], courseRuns: [] as CourseRunNotebookRecord[] };
+function migrateNotebookFromV15(raw: unknown): { sessions: StoredExperimentSession[]; courseRuns: StoredCourseRunNotebookRecord[] } {
+  const fallback = { sessions: [] as StoredExperimentSession[], courseRuns: [] as StoredCourseRunNotebookRecord[] };
   if (!raw || typeof raw !== 'object') return fallback;
   const c = raw as Record<string, unknown>;
   return {
@@ -798,7 +860,7 @@ function isValidPersistedSaveState(v: unknown): v is PersistedSaveState {
   if (!Array.isArray(enc.discoveredModes) || !enc.discoveredModes.every((m) => typeof m === 'string' && DESTRUCTION_MODE_ID_SET.has(m))) return false;
   if (!Array.isArray(enc.codexRecords) || !enc.codexRecords.every(isValidCodexRecordEntry)) return false;
   // modeId一意性(5.2節)
-  const modeIds = enc.codexRecords.map((r: CodexRecordEntry) => r.modeId);
+  const modeIds = enc.codexRecords.map((r: StoredCodexRecordEntry) => r.modeId);
   if (new Set(modeIds).size !== modeIds.length) return false;
   if (enc.codexRecords.length > DESTRUCTION_MODE_IDS.length) return false;
   // 追補5: discoveredModesとcodexRecordsのmodeId集合は常に一致する(commitApplyResultが
@@ -828,12 +890,65 @@ export type ReadLatestResult =
   | { kind: 'corrupted' }
   | { kind: 'storageError' };
 
+/**
+ * P3-4 G7(項目J・K、§11.3(c)承認済み): schemaVersion 1のstateを検証する**旧版validator**。
+ * v1は`instrumentOwnership`を持たないため、新validatorをそのまま当てると既存セーブが
+ * すべて`corrupted`になる(§11.3のJ2是正が指摘した点)。旧形状はここでだけ受理する。
+ *
+ * 判定は「`instrumentOwnership`を除いた全フィールドが有効か」であり、
+ * `instrumentOwnership: []`を補ってから新validatorへ通すことで表現する——**検証ロジックを
+ * 二重に書かない**(同じ不変条件を2箇所に書くと、片方だけ更新されて乖離する)。
+ */
+function isValidPersistedSaveStateV1(v: unknown): boolean {
+  if (!v || typeof v !== 'object') return false;
+  const c = v as Record<string, unknown>;
+  if (c.instrumentOwnership !== undefined) return false; // v1が新フィールドを持つのは不整合
+  // v1 stateのschemaVersionは1である。新validatorは`schemaVersion === SCHEMA_VERSION`(=2)を
+  // 要求するため、**移行後の姿**(schemaVersion=2+instrumentOwnership補完)を作って委譲する。
+  if (c.schemaVersion !== SCHEMA_VERSION_V1) return false;
+  return isValidPersistedSaveState({
+    ...c,
+    schemaVersion: SCHEMA_VERSION,
+    instrumentOwnership: defaultInstrumentOwnership(),
+  });
+}
+
+/**
+ * v1 state → v2 stateへの移行(§11.3(c))。**追加のみで既存フィールドは書き換えない**。
+ * `codexRecords`のlegacyエントリは2フィールドを持たないまま残る——読み取り側(union)が
+ * 受理するため、過去に発見済みのモード記録を失わない。
+ */
+function migratePersistedSaveStateV1ToV2(state: Record<string, unknown>): PersistedSaveState {
+  return {
+    ...(state as unknown as PersistedSaveState),
+    schemaVersion: SCHEMA_VERSION,
+    instrumentOwnership: defaultInstrumentOwnership(),
+  };
+}
+
 function readLatestV16(): ReadLatestResult {
   const r = readRaw(SAVE_KEY);
   if (r.kind === 'ioError') return { kind: 'storageError' };
   if (r.kind === 'unavailableEnvironment' || r.kind === 'absent') return { kind: 'absent' };
   const parsed = parseWrapper(r.raw);
   if (!parsed.ok) return { kind: 'corrupted' };
+
+  // P3-4 G7(§11.3(c)(d)、arbiter申し送り1): schemaVersion 1は**その場でv2へ移行する**。
+  // 手順は migrate → 新validator → write の一方向で、失敗の分類は次のとおり:
+  //  - 旧validator失敗(=v1データ自体が壊れている) → `corrupted`
+  //    (migrationのせいで新たに壊れて見えるようにしない。元々壊れていたケースと同一に扱う)
+  //  - 新validator失敗(=migration手順自体のロジック不整合) → `corrupted`
+  //  - 書戻しのI/O失敗 → `storageError`。**メモリ上だけ成功扱いにしない**——
+  //    書けなかった事実を隠すと、次回起動でまたv1として読まれるのに今回だけv2として
+  //    振る舞う不整合が生じる。storageErrorを返せば次回起動で再試行され、冪等に収束する。
+  if (parsed.wrapper.version === SCHEMA_VERSION_V1) {
+    if (!isValidPersistedSaveStateV1(parsed.wrapper.state)) return { kind: 'corrupted' };
+    const migrated = migratePersistedSaveStateV1ToV2(parsed.wrapper.state as Record<string, unknown>);
+    if (!isValidPersistedSaveState(migrated)) return { kind: 'corrupted' };
+    if (writeV16(migrated) === 'ioError') return { kind: 'storageError' };
+    return { kind: 'ok', state: migrated };
+  }
+
   // 追補5: parseWrapperはversionが数値であることしか見ないため、ここでSCHEMA_VERSION
   // との一致まで確認する(v15移行用の別バージョン番号の混入を拒否する)。
   if (parsed.wrapper.version !== SCHEMA_VERSION) return { kind: 'corrupted' };
@@ -928,6 +1043,7 @@ function snapshotFromMemory(s: SaveStore): PersistedSaveState {
     inventory: s.inventory,
     equipmentLoadout: s.equipmentLoadout,
     encyclopedia: s.encyclopedia,
+    instrumentOwnership: s.instrumentOwnership,
     saveMeta: s.saveMeta,
     idCounters: s.idCounters,
   };
@@ -1093,6 +1209,48 @@ export function applyOutcomeErrorReasonJa(kind: string): string {
 export type CommitApplyOutcome = ApplyRunOutcomeResult | { ok: false; error: { kind: 'storageError' } };
 
 // ---------------------------------------------------------------------------
+// P3-4 G1b: gameStore↔saveStoreクロスストア原子的境界(A3、arbiter追加裁定Q10+§8補足裁定、
+// 人間再承認項目Q〈2026-08-18承認済み〉)。docs/phase3-p3-4-ui-plan.md v13 §6.5。
+//
+// 型をsaveStore.ts側が所有する理由: 既存の依存方向はgameStore.ts→saveStore.tsの一方向で
+// あり(gameStore.tsが本ファイルからuseSaveStore/ProgressSliceをimportしている)、これらの型を
+// gameStore.ts側へ置くと新規actionのシグネチャがそれを必要とするため、saveStore.ts→
+// gameStore.tsという逆方向の型依存(循環)が生じる。本ファイルが所有すれば新しい依存方向は
+// 発生しない(UI計画v13 §6.5.2)。
+// ---------------------------------------------------------------------------
+
+/**
+ * config構築(§6.2の8段順のうちG1b対象分)の結果。gameStore.ts側のprepareDestructionRunが返す。
+ *
+ * 失敗腕は2種を構造的に区別する(Q10 §9〈P19是正〉): resolver失敗はmissingRoleを持ち、
+ * compose失敗・有限性検証失敗はmissingRoleキー自体を持たない。後者はUI計画v13 §6.4.1の
+ * 「config構築失敗」generic行へmissingRoleなしで合流する。
+ *
+ * 成功腕がRunSnapshotそのものではなくCaptureRunSnapshotInputを返すのはA3の核心である
+ * (Q10 §1・P10是正): captureRunSnapshotの実呼出しを永続commit成功後まで遅延させることで、
+ * commit前の全失敗経路(gate/resolver/compose/有限性/storage書込み失敗)においてRunSnapshotが
+ * 一度も構築されず、UI計画§6.4.1の既承認契約(a)「失敗時RunSnapshot/RunAccumulatorは作られない」を
+ * 完全に満たす。
+ */
+export type RunPreparationResult =
+  | { ok: true; snapshotInput: CaptureRunSnapshotInput }
+  | { ok: false; reason: string; missingRole: EquipmentRole }
+  | { ok: false; reason: string };
+
+/**
+ * beginRunActionWithPreparationがpureBeginRun成功後・永続commit前に1回だけ呼ぶcallback。
+ * equipmentSnapshotはpureBeginRunが返した権威値をそのまま渡す(P3-1-Q9の単一出典、
+ * prepare側でcaptureEquipmentIdSnapshotを再計算しない、Q10 §9〈P15是正〉)。
+ */
+export type RunPreparationCallback = (
+  loadout: EquipmentLoadout & { batteryItemId: string },
+  inventory: PlayerInventory,
+  equipmentSnapshot: EquipmentIdSnapshot,
+) => RunPreparationResult;
+
+
+
+// ---------------------------------------------------------------------------
 // store本体
 // ---------------------------------------------------------------------------
 
@@ -1104,6 +1262,7 @@ export interface SaveStore {
   inventory: PlayerInventory;
   equipmentLoadout: EquipmentLoadout;
   encyclopedia: EncyclopediaSlice;
+  instrumentOwnership: InstrumentOwnership;
   saveMeta: SaveEnvelopeMeta;
   idCounters: IdCounters;
 
@@ -1134,14 +1293,45 @@ export interface SaveStore {
   updateProgress: (partial: Partial<ProgressSlice>) => boolean;
 
   // 実験ノート(6.4節、3腕自動trim)
-  addSessionRecord: (session: ExperimentSession) => { ok: true } | { ok: false; reason: string };
-  addCourseRunRecord: (record: CourseRunNotebookRecord) => { ok: true } | { ok: false; reason: string };
+  /**
+   * G6-R2(人間承認2026-08-19、G6-R1 taxonomyの訂正): **legacy形状の直接書込み専用**。
+   *
+   * 呼出し経路は**1本の委譲チェーンのみ**である(2026-08-19 rg実測、Suu_mot3照合済み)——
+   * `modes/CourseMode.tsx`の手動「A/B比較用に実験ノートへ保存」→`store/notebookStore.ts`の
+   * `addCourseRun`→本action。**`gameStore`から本actionを呼ぶ経路は存在しない**
+   * (session腕の`addSessionRecord`はG9で旧経路ごと削除済み)。
+   *
+   * この手動保存経路はV2 CourseModeのretro UI置換まで存続するが、production UIでは
+   * ボタンを**常時disabled**にしている(同一走行はPhase 3の原子経路が自動記録するため、
+   * 二重記録を防ぐ)。`RunOutcome`を持たないため`finalDestructionState`/`recipeKey`の
+   * 出典がない。
+   *
+   * 新規のproductionレコードは`performApplyRunOutcome`のenvelope原子経路のみを通り、
+   * 生成境界(§16.5 builder)で2フィールドが型により必須化される。
+   * **削除期限はV2 CourseModeのretro UI置換**(G6-R1の「G9」から訂正)。
+   */
+  addCourseRunRecord: (record: LegacyCourseRunNotebookRecord) => { ok: true } | { ok: false; reason: string };
   addVehicleTestRunRecord: (record: VehicleTestRunNotebookRecord) => { ok: true } | { ok: false; reason: string };
   clearNotebook: () => { ok: true } | { ok: false; reason: string };
-  replaceSessionsRecord: (sessions: ExperimentSession[]) => { ok: true } | { ok: false; reason: string };
+  /** G6-R1: import(JSON読み込み)経路。過去の記録を読めなくしないためStored unionを受理する。 */
+  replaceSessionsRecord: (sessions: StoredExperimentSession[]) => { ok: true } | { ok: false; reason: string };
 
   // 4.4節: runSequence発行。追補2: storage失敗/破損をleaseNotAcquiredへ偽変換しない。
   beginRunAction: (context: 'motor' | 'vehicle') => ReturnType<typeof pureBeginRun> | { ok: false; reason: 'storageError' } | { ok: false; reason: 'corrupted' };
+
+  // P3-4 G1b(A3、Q10+§8補足裁定、項目Q承認済み): config構築をrunSequence発行より前に
+  // 完了させるクロスストア原子的境界。既存beginRunActionは無改修のまま並存する
+  // (呼び出し元・既存テストへの影響ゼロ)。UI計画v13 §6.5.3・§6.5.4。
+  beginRunActionWithPreparation: (context: 'motor' | 'vehicle', prepare: RunPreparationCallback) =>
+    | { ok: true; runSequence: number; equipmentSnapshot: EquipmentIdSnapshot; runSnapshot: RunSnapshot }
+    | { ok: false; reason: 'leaseNotAcquired' }
+    | { ok: false; reason: 'runInProgress' }
+    | { ok: false; reason: 'pendingApplicationExists' }
+    | { ok: false; reason: 'storageError' }
+    | { ok: false; reason: 'corrupted' }
+    | { ok: false; reason: 'snapshotCaptureFailed' }
+    | { ok: false; reason: string; missingRole: EquipmentRole }
+    | { ok: false; reason: string };
 
   // 5節: 原子的適用
   performApplyRunOutcome: (outcome: RunOutcome, notebookRecord: PendingNotebookRecord) => CommitApplyOutcome | { ok: false; error: { kind: 'leaseNotAcquired' } } | { ok: false; error: { kind: 'noActiveRun' } } | { ok: false; error: { kind: 'corrupted' } };
@@ -1149,10 +1339,28 @@ export interface SaveStore {
   abandonPendingApplicationAction: () => { ok: true } | { ok: false; reason: string };
 
   // 1節: 装備
-  setEquipmentLoadout: (loadout: EquipmentLoadout) => { ok: true } | { ok: false; reason: string; missingRole?: EquipmentRole };
+  /**
+   * P3-4 G6(§15.2): 失敗腕を潰さずそのまま伝える。
+   * `missingRole`(個体が実在しない)と`destroyedRole`(実在するが破壊済みで装備できない)は
+   * 失敗の意味が異なり、UI側の提示も変わる(前者は装備の選び直し、後者は個体の入れ替え)。
+   * 旧宣言は`missingRole?`のみを持っていたため、`validateEquipmentLoadout`が返す
+   * `destroyedRole`腕が**呼出し側の型から落ちて**判別できなかった。
+   */
+  setEquipmentLoadout: (loadout: EquipmentLoadout) =>
+    | { ok: true }
+    | { ok: false; reason: string; missingRole?: EquipmentRole }
+    | { ok: false; reason: string; destroyedRole: EquipmentRole };
 
   // 1.4節/店(brabit実装、alice提供ロジックを呼ぶ)
   purchaseMaterialAction: (materialId: MaterialId) => PurchaseResult;
+  /**
+   * P3-4 G7(項目L): 計測器の購入。既存のlease/pending gate(`readGatedFreshState`)を
+   * 通し、素材購入と同じ規律で永続化する。**買い切り・非消耗**(spec §10)のため
+   * 二重購入は`alreadyOwned`で拒否する。
+   */
+  purchaseInstrumentAction: (instrumentId: InstrumentId) =>
+    | { ok: true }
+    | { ok: false; reason: string };
   purchaseCartAction: (cartLines: readonly CartLine[]) => PurchaseResult;
   salvageAction: (itemId: string) => SalvageConfirmResult;
 }
@@ -1187,6 +1395,9 @@ function applyFreshStateToStore(set: (partial: Partial<SaveStore>) => void, next
     inventory: next.inventory,
     equipmentLoadout: next.equipmentLoadout,
     encyclopedia: next.encyclopedia,
+    // G7-A追加。ここに列挙し忘れると永続実体だけが更新されメモリ上のstoreが古いままになる
+    // (購入直後に所持状態が画面へ反映されない)。PersistedSaveStateへfieldを足したら必ず追記する。
+    instrumentOwnership: next.instrumentOwnership,
     saveMeta: next.saveMeta,
     idCounters: next.idCounters,
     ...extra,
@@ -1233,6 +1444,7 @@ export const useSaveStore = create<SaveStore>()(
       inventory: bootstrap.kind === 'ok' ? bootstrap.state.inventory : createInitialPlayerInventoryAndLoadout().inventory,
       equipmentLoadout: bootstrap.kind === 'ok' ? bootstrap.state.equipmentLoadout : createInitialPlayerInventoryAndLoadout().loadout,
       encyclopedia: bootstrap.kind === 'ok' ? bootstrap.state.encyclopedia : defaultEncyclopedia(),
+      instrumentOwnership: bootstrap.kind === 'ok' ? bootstrap.state.instrumentOwnership : defaultInstrumentOwnership(),
       saveMeta: bootstrap.kind === 'ok' ? bootstrap.state.saveMeta : defaultSaveMeta(generateRandomId()),
       idCounters: bootstrap.kind === 'ok' ? bootstrap.state.idCounters : defaultIdCounters(),
 
@@ -1345,14 +1557,6 @@ export const useSaveStore = create<SaveStore>()(
       // ---------------------------------------------------------------------
       // 6.4節: 実験ノート3腕、自動trim(確認UIなし)
       // ---------------------------------------------------------------------
-      addSessionRecord: (session) => {
-        const gate = readGatedFreshState(set, get, true);
-        if (!gate.ok) return { ok: false, reason: gateErrorToReasonJa(gate.error) };
-        const nextState: PersistedSaveState = { ...gate.fresh, notebook: { ...gate.fresh.notebook, sessions: [session, ...gate.fresh.notebook.sessions].slice(0, NOTEBOOK_LIMIT) } };
-        if (!writeOrFail(set, nextState)) return { ok: false, reason: gateErrorToReasonJa({ kind: 'storageError' }) };
-        applyFreshStateToStore(set, nextState);
-        return { ok: true };
-      },
       addCourseRunRecord: (record) => {
         const gate = readGatedFreshState(set, get, true);
         if (!gate.ok) return { ok: false, reason: gateErrorToReasonJa(gate.error) };
@@ -1407,6 +1611,73 @@ export const useSaveStore = create<SaveStore>()(
           applyFreshStateToStore(set, nextState, { currentRunSequence: result.runSequence, pendingRunEquipmentSnapshot: result.equipmentSnapshot, pendingRunSaveId: fresh.saveMeta.saveId });
         }
         return result;
+      },
+
+      // ---------------------------------------------------------------------
+      // P3-4 G1b(A3、arbiter追加裁定Q10 §1〜§7+§8補足裁定、人間再承認項目Q承認済み)。
+      // docs/phase3-p3-4-ui-plan.md v13 §6.5.4のpseudocodeどおりに実装する。
+      //
+      // A3の順序(この順序自体が契約): fresh読取り1回 → pureBeginRunのゲート判定 →
+      // prepare(config構築、副作用なし) → 永続commit → captureRunSnapshot。
+      // prepareが失敗した時点ではrunSequenceをまだ消費していないため、S-5の4不変条件
+      // (nextRunSequence不変・pendingRunEquipmentSnapshot不変・RunSnapshot/RunAccumulator
+      // 不生成・gameStoreローカルruntime state不変)がすべて構造的に成立する。
+      // ---------------------------------------------------------------------
+      beginRunActionWithPreparation: (context, prepare) => {
+        // 既存beginRunActionと同一のゲート(fresh読取りはこの1回のみ)。
+        const gate = readGatedFreshState(set, get, false);
+        if (!gate.ok) {
+          if (gate.error.kind === 'storageError') return { ok: false, reason: 'storageError' };
+          if (gate.error.kind === 'corrupted') return { ok: false, reason: 'corrupted' };
+          return { ok: false, reason: 'leaseNotAcquired' };
+        }
+        const fresh = gate.fresh;
+
+        // lease/runInProgress/pendingApplicationExists/装備検証。ここで失敗した場合、
+        // prepareは一度も呼ばれない(RunSnapshotが構築されないことが構造的に保証される)。
+        const candidate = pureBeginRun(fresh.equipmentLoadout, fresh.inventory, context, fresh.saveMeta, get().currentRunSequence, true);
+        if (!candidate.ok) return candidate;
+
+        // trusted narrowing(Q10 §2、案(i)承認済み): candidate.ok===trueは、この同一のfresh
+        // 読取り由来のfresh.equipmentLoadoutに対してpureBeginRun内部のvalidateEquipmentLoadoutが
+        // 成功したこと——すなわちbatteryItemId!==nullであること——をランタイムで保証する事実である
+        // (TypeScriptの制御フロー解析は関数呼び出し境界を越えないため型上は素通りできない)。
+        // validateEquipmentLoadoutの再呼出し・検証ロジックの再実装ではない(S-1適合)。
+        const narrowedLoadout = fresh.equipmentLoadout as EquipmentLoadout & { batteryItemId: string };
+
+        // equipmentSnapshotはpureBeginRunが返した権威値をそのまま渡す(P3-1-Q9の単一出典)。
+        const prepared = prepare(narrowedLoadout, fresh.inventory, candidate.equipmentSnapshot);
+        if (!prepared.ok) {
+          // resolver失敗腕(missingRoleあり)とgeneric腕(missingRoleキー自体を持たない)を
+          // 実体レベルで区別する——generic側でmissingRole:undefinedを生成しない(Q10 §9・P19)。
+          if ('missingRole' in prepared) return { ok: false, reason: prepared.reason, missingRole: prepared.missingRole };
+          return { ok: false, reason: prepared.reason };
+        }
+
+        // 永続commit。ここまでのどの失敗経路でもRunSnapshotは構築されていない。
+        const nextState: PersistedSaveState = { ...fresh, saveMeta: candidate.nextSaveMeta };
+        if (!writeOrFail(set, nextState)) return { ok: false, reason: 'storageError' };
+        applyFreshStateToStore(set, nextState, {
+          currentRunSequence: candidate.runSequence,
+          pendingRunEquipmentSnapshot: candidate.equipmentSnapshot,
+          pendingRunSaveId: fresh.saveMeta.saveId,
+        });
+
+        // A3必須修正1・2(Q10 §1): captureRunSnapshotはtotal関数(Result腕を持たない)だが、
+        // 内部のstructuredCloneはJS仕様上DataCloneError等を投げうるため、未捕捉例外を
+        // beginRun経路へ伝播させない。
+        try {
+          const runSnapshot = captureRunSnapshot(prepared.snapshotInput);
+          return { ok: true, runSequence: candidate.runSequence, equipmentSnapshot: candidate.equipmentSnapshot, runSnapshot };
+        } catch {
+          // 永続側(saveMeta.nextRunSequence)はcommit済みのままロールバックしない——孤立
+          // runSequenceを1件許容する(P3-0-Q1の高水位意味論が冪等skipとして吸収する。プレイヤーが
+          // run開始直後にタブを閉じた場合と構造的に同一)。一方、runtime専用フィールドを
+          // 「run進行中」のまま残すと、pureBeginRunのrunInProgressガードによりページリロード
+          // なしでは再挑戦できないソフトロックになるため、ここで明示的にnullへ戻す。
+          set({ currentRunSequence: null, pendingRunEquipmentSnapshot: null, pendingRunSaveId: null });
+          return { ok: false, reason: 'snapshotCaptureFailed' };
+        }
       },
 
       // ---------------------------------------------------------------------
@@ -1495,6 +1766,32 @@ export const useSaveStore = create<SaveStore>()(
         return { ok: true, state: toShopEconomyState(nextInventory, nextIdCounters.nextItemCounter) };
       },
 
+      purchaseInstrumentAction: (instrumentId) => {
+        const gate = readGatedFreshState(set, get, true);
+        if (!gate.ok) return { ok: false, reason: gateErrorToReasonJa(gate.error) };
+        const fresh = gate.fresh;
+        const shelf = resolveInstrumentShelfState({
+          instrumentId,
+          discoveredModes: fresh.encyclopedia.discoveredModes,
+          ownership: fresh.instrumentOwnership,
+          cashG: fresh.inventory.cashG,
+        });
+        // 陳列状態の判定を購入側で再実装しない——同じ条件を2箇所に書くと乖離する。
+        if (shelf === 'owned') return { ok: false, reason: 'すでに所持しています' };
+        if (shelf === 'silhouette') return { ok: false, reason: 'まだ解禁されていません' };
+        if (shelf === 'insufficientFunds') return { ok: false, reason: '所持金が足りません' };
+        const nextState: PersistedSaveState = {
+          ...fresh,
+          inventory: { ...fresh.inventory, cashG: fresh.inventory.cashG - GAUSS_METER_PRICE_G },
+          instrumentOwnership: {
+            ownedInstrumentIds: [...fresh.instrumentOwnership.ownedInstrumentIds, instrumentId],
+          },
+        };
+        if (!writeOrFail(set, nextState)) return { ok: false, reason: gateErrorToReasonJa({ kind: 'storageError' }) };
+        applyFreshStateToStore(set, nextState);
+        return { ok: true };
+      },
+
       purchaseCartAction: (cartLines) => {
         const gate = readGatedFreshState(set, get, true);
         if (!gate.ok) return { ok: false, reason: gateErrorToReasonJa(gate.error) };
@@ -1564,6 +1861,7 @@ export const useSaveStore = create<SaveStore>()(
         progress: s.progress,
         notebook: s.notebook,
         inventory: s.inventory,
+        instrumentOwnership: s.instrumentOwnership,
         equipmentLoadout: s.equipmentLoadout,
         encyclopedia: s.encyclopedia,
         saveMeta: s.saveMeta,
@@ -1602,13 +1900,30 @@ function commitApplyResult(
 ): CommitApplyOutcome {
   if (result.ok) {
     if (result.result.applied) {
-      const nextCodexRecords: CodexRecordEntry[] = [
+      // 新規書込みは常にcurrent形状(2フィールド込み)。既存分はStored unionのまま持ち越す。
+      const nextCodexRecords: StoredCodexRecordEntry[] = [
         ...fresh.encyclopedia.codexRecords,
-        ...result.result.newlyDiscoveredModes.map((modeId) => ({
-          modeId,
-          firstDiscoveredAtRunSequence: envelope.runKey.runSequence,
-          replaySnapshot: envelope.outcome.replaySnapshot,
-        })),
+        // G7(項目K): 初回登録イベントと走行単位の劣化差分を同時に記録する。
+        // `discoveryEvent`は当該modeの初回イベント(physicsSnapshotAtT+causeLog込み)。
+        // `runDegradationDiffs`は**走行単位の事実**であり、mode別に切り分けて帰属させない
+        // ——1走行で複数モードが発火した場合、どのdiffがどのmode由来かは一般に決定できない。
+        ...result.result.newlyDiscoveredModes.flatMap((modeId) => {
+          const discoveryEvent = envelope.outcome.events.find((event) => event.mode === modeId);
+          // **契約上到達不能**: `newlyDiscoveredModes`は`computeNewlyDiscoveredModes`が
+          // `events`から導出するため、対応eventを持たないmodeは含まれない。
+          // 万一欠落した場合、ここで当該記録だけがflatMapから落ちるが、その結果
+          // `discoveredModes`と`codexRecords`のmodeId集合が不一致になり
+          // `isValidPersistedSaveState`が拒否する——`writeOrFail`がfalseを返して
+          // **全書込みが失敗する(部分保存はしない)**。新たな回復分岐は設けない。
+          if (discoveryEvent === undefined) return [];
+          return [{
+            modeId,
+            firstDiscoveredAtRunSequence: envelope.runKey.runSequence,
+            replaySnapshot: envelope.outcome.replaySnapshot,
+            discoveryEvent,
+            runDegradationDiffs: envelope.outcome.degradationDiffs,
+          }];
+        }),
       ];
       const batteryConsumed = result.result.consumedEquipmentIds.some(
         (c) => c.role === 'battery' && c.id === fresh.equipmentLoadout.batteryItemId,

@@ -7,9 +7,10 @@
 // computeSaveGateMode(純関数、テスト対象)に委譲する。
 // 音量等の設定操作(MotorAudioControl)はApp.tsx側でこのコンポーネントの外(常時表示の
 // ヘッダー)に置かれているため、この画面が表示中でも操作できる(6-D-1節3「設定は例外」)。
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useSaveStore, applyOutcomeErrorReasonJa } from '../store/saveStore';
 import { computeSaveGateMode, pendingAbandonMessage, pendingRetryMessage } from './saveGateMode';
+import { useRetroDialog } from './useRetroDialog';
 
 function WaitingScreen() {
   return (
@@ -35,6 +36,23 @@ function PendingScreen() {
   const pendingApplication = useSaveStore((s) => s.saveMeta.pendingApplication);
   const [confirmingAbandon, setConfirmingAbandon] = useState(false);
   const [errorJa, setErrorJa] = useState<string | null>(null);
+  // P3-4 G7-E(a11y項目3): 放棄確認は本物のモーダルにする。native <dialog>+showModal()の
+  // ライフサイクル(inertによる背面無効化・Escape・Tab循環)は既存hookへ委ね、
+  // 新しいモーダル機構を作らない。
+  const abandonDialogRef = useRetroDialog({ open: confirmingAbandon, onClose: () => setConfirmingAbandon(false) });
+  const abandonTriggerRef = useRef<HTMLButtonElement>(null);
+  const abandonCancelRef = useRef<HTMLButtonElement>(null);
+
+  // open時は先頭のフォーカス可能要素(「やめる」)へ移す。破棄側を初期フォーカスにしない
+  // ——誤ってEnterを続けて押したときに取り返しのつかない操作が確定してしまう。
+  const wasConfirmingAbandon = useRef(false);
+  useEffect(() => {
+    if (confirmingAbandon) abandonCancelRef.current?.focus();
+    // 閉じたらトリガー要素へフォーカスを戻す(§13-3)。ブラウザの復帰任せにすると、
+    // 復帰先が失われた場合にフォーカスがbodyへ落ちる。
+    else if (wasConfirmingAbandon.current) abandonTriggerRef.current?.focus();
+    wasConfirmingAbandon.current = confirmingAbandon;
+  }, [confirmingAbandon]);
 
   if (!pendingApplication) return null;
 
@@ -53,28 +71,39 @@ function PendingScreen() {
     <div className="mx-auto flex max-w-md flex-col gap-4 p-8">
       <h2 className="text-lg font-bold text-slate-800">前回の走行結果を保存できませんでした</h2>
       <p className="text-sm text-slate-600">走行終了理由: {pendingApplication.outcome.endReason}</p>
-      {errorJa && <p role="alert" className="rounded bg-red-50 p-2 text-sm text-red-700">{errorJa}</p>}
+      {/* a11y項目6(J7): ノードを常設し文言だけを差し替える。再試行の失敗は緊急エラーでは
+          なく操作の拒否理由なので、role="alert"ではなくrole="status"を使う。 */}
+      <p role="status" className="min-h-[1.5rem] rounded bg-red-50 p-2 text-sm text-red-700" style={{ visibility: errorJa ? 'visible' : 'hidden' }}>{errorJa ?? ''}</p>
       <div className="flex flex-col gap-2">
-        <button type="button" onClick={handleRetry} className="rounded bg-sky-700 px-4 py-3 font-bold text-white">
+        <button type="button" onClick={handleRetry} className="min-h-[44px] rounded bg-sky-700 px-4 py-3 font-bold text-white">
           もう一度保存を試す
         </button>
-        <button type="button" onClick={() => setConfirmingAbandon(true)} className="text-sm text-slate-500 underline">
+        <button
+          ref={abandonTriggerRef}
+          type="button"
+          onClick={() => setConfirmingAbandon(true)}
+          className="min-h-[44px] text-sm text-slate-500 underline"
+        >
           この記録を破棄する
         </button>
       </div>
-      {confirmingAbandon && (
-        <div role="alertdialog" aria-modal="true" className="rounded border border-amber-300 bg-amber-50 p-4 text-sm">
-          <p>破棄すると当該走行の劣化・発見記録・報酬は永久に失われます。元に戻せません。</p>
-          <div className="mt-3 flex gap-2">
-            <button type="button" onClick={handleAbandonConfirmed} className="rounded bg-amber-600 px-3 py-2 font-bold text-white">
-              破棄する
-            </button>
-            <button type="button" onClick={() => setConfirmingAbandon(false)} className="underline">
-              やめる
-            </button>
-          </div>
+      <dialog ref={abandonDialogRef} aria-labelledby="abandon-dialog-heading" className="rounded border border-amber-300 bg-amber-50 p-4 text-sm">
+        <h3 id="abandon-dialog-heading" className="font-bold">この記録を破棄しますか</h3>
+        <p className="mt-2">破棄すると当該走行の劣化・発見記録・報酬は永久に失われます。元に戻せません。</p>
+        <div className="mt-3 flex gap-2">
+          <button type="button" onClick={handleAbandonConfirmed} className="min-h-[44px] rounded bg-amber-600 px-3 py-2 font-bold text-white">
+            破棄する
+          </button>
+          <button
+            ref={abandonCancelRef}
+            type="button"
+            onClick={() => setConfirmingAbandon(false)}
+            className="min-h-[44px] px-3 underline"
+          >
+            やめる
+          </button>
         </div>
-      )}
+      </dialog>
     </div>
   );
 }

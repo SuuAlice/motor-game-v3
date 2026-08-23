@@ -5,11 +5,20 @@ import {
   stringifyNotebook,
   useNotebookStore,
   type CourseRunNotebookRecord,
-  type ExperimentSession,
+  type StoredExperimentSession,
 } from '../store/notebookStore';
 import type { MotorConfig, SimState } from '../engine/motorPhysics';
 import { drawMotor } from '../render/drawMotor';
 import { TRACK_BY_ID } from '../data/tracks';
+import { describeD04Stage, formatRegressionReport } from './encyclopediaView';
+import { computeRegressionReport, type NotebookRecordForRegression } from '../store/regressionReport';
+import { useSaveStore } from '../store/saveStore';
+import type { RegressionComparisonResult } from '../materials/regressionDiff';
+
+/** §10.4: D04段階の日本語表示。'none'は「観測して膨張なし」であり、legacyの「記録なし」とは別物。 */
+const D04_STAGE_LABEL: Record<'none' | 'swelling' | 'smoking' | 'burning', string> = {
+  none: '膨張なし', swelling: '膨張', smoking: '発煙', burning: '炎上',
+};
 
 interface ExperimentNotebookProps {
   onClose: () => void;
@@ -42,7 +51,7 @@ function displayConfigValue(config: MotorConfig, key: keyof MotorConfig): string
   return String(value ?? (key === 'wireGaugeMm' ? 0.4 : key === 'parallelStrands' ? 1 : '—'));
 }
 
-function SessionMetrics({ session }: { session: ExperimentSession }) {
+function SessionMetrics({ session }: { session: StoredExperimentSession }) {
   return (
     <dl className="grid grid-cols-2 gap-2 text-sm">
       <div><dt className="text-slate-500">定常回転数</dt><dd>{session.steadyRpm.toFixed(0)} RPM</dd></div>
@@ -55,7 +64,7 @@ function SessionMetrics({ session }: { session: ExperimentSession }) {
   );
 }
 
-function SessionMotorReplay({ session }: { session: ExperimentSession }) {
+function SessionMotorReplay({ session }: { session: StoredExperimentSession }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   useEffect(() => {
@@ -113,9 +122,21 @@ function ConfigTable({ config }: { config: MotorConfig }) {
   );
 }
 
-function SessionDetail({ session }: { session: ExperimentSession }) {
+function SessionDetail({ session }: { session: StoredExperimentSession }) {
+  // P3-4 G7(§10.4): D04段階は**当該セッションの記録としてのみ**表示する。
+  // legacy record(finalDestructionStateを持たない)は「膨張なし」と断定せず中立文言にする
+  // ——記録していないことと、観測して膨張が無かったことは別の事実である。
+  const d04 = describeD04Stage(session.finalDestructionState);
   return (
     <div className="grid gap-4">
+      <div className="rounded-lg bg-slate-50 p-3 text-sm">
+        <span className="font-bold">電池の状態(この走行の記録)</span>{' '}
+        {d04.kind === 'unrecorded' ? (
+          <span className="text-slate-500">{d04.note}</span>
+        ) : (
+          <span>{D04_STAGE_LABEL[d04.value]}</span>
+        )}
+      </div>
       <div className="grid gap-4 sm:grid-cols-2">
         <SessionMotorReplay session={session} />
         <div>
@@ -150,7 +171,7 @@ function SessionDetail({ session }: { session: ExperimentSession }) {
   );
 }
 
-function Comparison({ first, second }: { first: ExperimentSession; second: ExperimentSession }) {
+function Comparison({ first, second }: { first: StoredExperimentSession; second: StoredExperimentSession }) {
   const chartData = useMemo(() => {
     const length = Math.max(first.samples.length, second.samples.length);
     return Array.from({ length }, (_, index) => ({
@@ -213,16 +234,40 @@ function CourseComparison({ first, second }: { first: CourseRunNotebookRecord; s
   </section>;
 }
 
+/**
+ * 同一構成の過去記録との比較を1行で示す(§11.2)。3腕で同じ規律を使うため共通化する。
+ * `null`は「比較できなかった」であり「悪化なし」ではない——言い換えは
+ * `formatRegressionReport`側に閉じており、ここで三項演算子により潰さないこと。
+ */
+function RegressionLine({ report }: { report: RegressionComparisonResult | null }) {
+  return <p className="mt-1 text-xs text-slate-600">{formatRegressionReport(report)}</p>;
+}
+
 export function ExperimentNotebook({ onClose }: ExperimentNotebookProps) {
   const sessions = useNotebookStore((s) => s.sessions);
   const courseRuns = useNotebookStore((s) => s.courseRuns);
+  // 車体テスト走行はnotebookStoreの鏡像対象外のため、保持元のsaveStoreから直接読む
+  // (読み取り専用。新規actionや新規契約は追加していない)。
+  const vehicleTestRuns = useSaveStore((s) => s.notebook.vehicleTestRuns);
   const replaceSessions = useNotebookStore((s) => s.replaceSessions);
   const [detailId, setDetailId] = useState<string | null>(null);
   const [compareIds, setCompareIds] = useState<string[]>([]);
   const [courseCompareIds, setCourseCompareIds] = useState<string[]>([]);
   const [importError, setImportError] = useState<string | null>(null);
   const detail = sessions.find((session) => session.id === detailId) ?? null;
-  const comparison = compareIds.map((id) => sessions.find((session) => session.id === id)).filter(Boolean) as ExperimentSession[];
+  // §11.2(三段開示 段階2): 同一構成の過去記録と比べた低下を**事実だけ**提示する。
+  // 全件をそのまま渡してよい——当該run自身の除外はcomputeRegressionReport側がrecord idで行う。
+  //
+  // **3腕すべてで呼ぶ**(§11.2・G6追加裁定の3腕×metric契約)。腕ごとのmetricと成立条件
+  // (session=steadyRpm全件 / courseRun=lapTimeS・finishedのみ / vehicleTestRun=topSpeedMps・
+  // finishedかつsamples非空)は`regressionObservation.ts`が持つ。ここで条件を再実装しない。
+  const sessionRecords = sessions.map((session): NotebookRecordForRegression => ({ kind: 'session', record: session }));
+  const courseRunRecords = courseRuns.map((record): NotebookRecordForRegression => ({ kind: 'courseRun', record }));
+  const vehicleTestRunRecords = vehicleTestRuns.map((record): NotebookRecordForRegression => ({ kind: 'vehicleTestRun', record }));
+  const regressionReport = detail === null
+    ? null
+    : computeRegressionReport({ kind: 'session', record: detail }, sessionRecords);
+  const comparison = compareIds.map((id) => sessions.find((session) => session.id === id)).filter(Boolean) as StoredExperimentSession[];
   const courseComparison = courseCompareIds.map((id) => courseRuns.find((record) => record.id === id)).filter(Boolean) as CourseRunNotebookRecord[];
 
   function exportJson() {
@@ -258,11 +303,27 @@ export function ExperimentNotebook({ onClose }: ExperimentNotebookProps) {
         {courseRuns.map((record) => {
           const selected = courseCompareIds.includes(record.id);
           const trackName = TRACK_BY_ID.get(record.trackId)?.name ?? record.trackId;
-          return <article key={record.id} className="rounded-lg border border-sky-100 bg-white p-3 shadow-sm"><div className="flex items-start justify-between gap-3"><div><h4 className="font-bold">{trackName}</h4><p className="text-sm text-slate-600">{record.elapsedTimeS.toFixed(2)} 秒 / {record.energyUsedJ.toFixed(2)} J / {record.positionM.toFixed(2)} m</p><p className="text-xs text-slate-400">{new Date(record.savedAt).toLocaleString('ja-JP')} / seed {record.seed}</p></div><label className="text-sm"><input type="checkbox" checked={selected} onChange={() => setCourseCompareIds((ids) => selected ? ids.filter((id) => id !== record.id) : ids.length < 2 ? [...ids, record.id] : [ids[1], record.id])} /> 比較</label></div></article>;
+          return <article key={record.id} className="rounded-lg border border-sky-100 bg-white p-3 shadow-sm"><div className="flex items-start justify-between gap-3"><div><h4 className="font-bold">{trackName}</h4><p className="text-sm text-slate-600">{record.elapsedTimeS.toFixed(2)} 秒 / {record.energyUsedJ.toFixed(2)} J / {record.positionM.toFixed(2)} m</p><p className="text-xs text-slate-400">{new Date(record.savedAt).toLocaleString('ja-JP')} / seed {record.seed}</p></div><label className="text-sm"><input type="checkbox" checked={selected} onChange={() => setCourseCompareIds((ids) => selected ? ids.filter((id) => id !== record.id) : ids.length < 2 ? [...ids, record.id] : [ids[1], record.id])} /> 比較</label></div>
+            <RegressionLine report={computeRegressionReport({ kind: 'courseRun', record }, courseRunRecords)} />
+          </article>;
         })}
       </section>
+      <section className="grid gap-2">
+        <h3 className="font-bold text-slate-900">車体テスト走行</h3>
+        {vehicleTestRuns.length === 0 && <p className="rounded bg-white p-4 text-sm text-slate-500">車体テスト走行の保存記録はまだありません。</p>}
+        {vehicleTestRuns.map((record) => (
+          <article key={record.id} className="rounded-lg border border-emerald-100 bg-white p-3 shadow-sm">
+            <p className="text-sm text-slate-600">{record.elapsedTimeS.toFixed(2)} 秒 / {record.positionM.toFixed(2)} m / {record.energyUsedJ.toFixed(2)} J</p>
+            <p className="text-xs text-slate-400">{new Date(record.savedAt).toLocaleString('ja-JP')} / seed {record.seed}</p>
+            <RegressionLine report={computeRegressionReport({ kind: 'vehicleTestRun', record }, vehicleTestRunRecords)} />
+          </article>
+        ))}
+      </section>
       {comparison.length === 2 && <Comparison first={comparison[0]} second={comparison[1]} />}
-      {detail && <section className="rounded-lg bg-white p-4 shadow-sm"><div className="mb-3 flex justify-between"><h3 className="font-bold">詳細: {new Date(detail.startedAt).toLocaleString('ja-JP')}</h3><button onClick={() => setDetailId(null)} className="text-sm underline">閉じる</button></div><SessionDetail session={detail} /></section>}
+      {detail && <section className="rounded-lg bg-white p-4 shadow-sm"><div className="mb-3 flex justify-between"><h3 className="font-bold">詳細: {new Date(detail.startedAt).toLocaleString('ja-JP')}</h3><button onClick={() => setDetailId(null)} className="text-sm underline">閉じる</button></div><SessionDetail session={detail} />
+        <h4 className="mt-3 text-sm font-bold text-slate-700">同じ構成の過去記録との比較</h4>
+        <RegressionLine report={regressionReport} />
+      </section>}
       <div className="grid gap-2">
         {sessions.length === 0 && <p className="rounded bg-white p-4 text-sm text-slate-500">まだ記録がありません。モーターを始動し、リセットすると保存されます。</p>}
         {sessions.map((session) => {

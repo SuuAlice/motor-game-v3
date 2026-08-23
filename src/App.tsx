@@ -14,6 +14,7 @@ import { ExperimentNotebook } from './components/ExperimentNotebook'
 import { MotorAudioControl } from './components/MotorAudioControl'
 import { ShopScreen } from './components/ShopScreen'
 import { InventoryScreen } from './components/InventoryScreen'
+import { EncyclopediaScreen } from './components/EncyclopediaScreen'
 
 // spec docs/spec.md §4: 「[タイトル] → [モード選択]」
 function TitleScreen({ onOpenGlossary, onOpenNotebook }: { onOpenGlossary: () => void; onOpenNotebook: () => void }) {
@@ -146,6 +147,7 @@ function App() {
             {mode === 'course' && <CourseMode />}
             {mode === 'shop' && <ShopScreen />}
             {mode === 'inventory' && <InventoryScreen />}
+            {mode === 'encyclopedia' && <EncyclopediaScreen onOpenNotebook={() => setUtilityPage('notebook')} />}
           </>
         )}
       </SaveGate>

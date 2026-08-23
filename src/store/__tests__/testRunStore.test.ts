@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { TEST_RUN_COURSE_LENGTH_M, useGameStore } from '../gameStore';
-import { useSaveStore } from '../saveStore';
+import { useSaveStore, __testOnly } from '../saveStore';
 import { DEFAULT_GARAGE_SELECTION } from '../../data/partPresets';
 import { decodeRecipe, encodeRecipe } from '../../engine/recipeCode';
 import { BROKEN_CARS } from '../../data/brokenCars';
@@ -21,6 +21,66 @@ function encodeLegacyRecipe(config: ReturnType<typeof useGameStore.getState>['co
     hash = Math.imul(hash, 0x01000193);
   }
   return `M15-${payload}.${(hash >>> 0).toString(36).padStart(7, '0')}`;
+}
+
+// ---------------------------------------------------------------------------
+// G統合後の検証追随(人間承認2026-08-20): 完走を検証する3件を、承認済みの
+// production-valid完走fixtureへ**入力だけ**切り替える。finished系assertは維持する。
+//
+// G統合後のproduction経路では素材写像が効くため、初期装備(フェライト磁石、
+// magnetStrength比0.2)のままでは10 mを走り切れない(実測: 179 stepでfailureToStart、
+// 到達0.032 m)。これは配線の不具合ではなく写像が仕様どおり効いた結果である。
+// ---------------------------------------------------------------------------
+
+/**
+ * saveStore側の永続sliceをfresh化する。**購入原資・在庫・装備の順序依存を断つ**——
+ * このファイルのbeforeEachはprogress/course状態しか戻さないため、素材を買うテストが
+ * 複数あると2件目以降が所持金不足になり、在庫・装備も累積する。
+ *
+ * このファイルはfake localStorageを設置していない(Node縮退経路)。saveStoreは
+ * storageが無いためwriteV16や外部lease fixtureは不要だが、runtime lease tokenは_evaluateLeaseOnceで再同期する。
+ */
+function resetSaveFixture(): void {
+  const fresh = __testOnly.freshBootstrap();
+  useSaveStore.setState({
+    ...fresh, currentRunSequence: null, pendingRunEquipmentSnapshot: null,
+    pendingRunSaveId: null, bootstrapError: null,
+  });
+  useSaveStore.getState()._evaluateLeaseOnce(new Date(0).toISOString());
+}
+
+function buyAndEquipForFinish(
+  materialId: string,
+  family: 'battery' | 'magnet',
+  key: 'batteryItemId' | 'magnetItemId',
+): void {
+  const purchased = useSaveStore.getState().purchaseMaterialAction(materialId as never);
+  expect(purchased.ok, `${materialId}の購入に失敗しました`).toBe(true);
+  const item = useSaveStore.getState().inventory.items
+    .filter((i) => i.family === family && i.materialId === materialId).at(-1);
+  expect(item, `${materialId}がinventoryに見つかりません`).toBeDefined();
+  const equipped = useSaveStore.getState().setEquipmentLoadout({
+    ...useSaveStore.getState().equipmentLoadout, [key]: item!.itemId,
+  });
+  expect(equipped.ok, `${materialId}の装備に失敗しました`).toBe(true);
+}
+
+/** 必ず購入・装備の後に呼ぶ(saveStore.progressへの反応同期で巻き戻るため)。 */
+function setConfigForFinish(partial: Record<string, unknown>): void {
+  const next = { ...useGameStore.getState().config, ...partial };
+  expect(useSaveStore.getState().updateProgress({ config: next as never }), 'updateProgressに失敗').toBe(true);
+  useGameStore.setState({ config: next as never });
+}
+
+/**
+ * 承認済みのproduction-valid完走fixture(G-R2と同一の素材・config)。
+ * 4操作をここへまとめ、呼び出し側ごとに並びがずれないようにする。
+ */
+function arrangeFinishFixture(): void {
+  resetSaveFixture();
+  buyAndEquipForFinish('magnet-samarium-cobalt', 'magnet', 'magnetItemId');
+  buyAndEquipForFinish('battery-nickel-metal-hydride', 'battery', 'batteryItemId');
+  setConfigForFinish({ coilTurns: 35, magnetDistanceMm: 5, brushPressure: 0.2 });
 }
 
 describe('テスト走行store', () => {
@@ -61,6 +121,7 @@ describe('テスト走行store', () => {
   });
 
   it('10 m完走後にcompleteとなり、それ以上stepしても状態が変わらない', () => {
+    arrangeFinishFixture();
     useGameStore.getState().startTestRun();
     let steps = 0;
     while (useGameStore.getState().testRunPhase === 'running' && steps < 120 * 30) {
@@ -80,6 +141,8 @@ describe('テスト走行store', () => {
   });
 
   it('追補7(Suuレビュー2026-08-02T17:00): updateProgress失敗時は物理phaseはcompleteになるがtestRunCompletedは旧値を維持する', () => {
+    // fixtureはsetConfigForFinish内でupdateProgressを使うため、**spy設置より前**に置く。
+    arrangeFinishFixture();
     const updateProgressSpy = vi.spyOn(useSaveStore.getState(), 'updateProgress').mockReturnValue(false);
     try {
       useGameStore.getState().startTestRun();
@@ -243,6 +306,7 @@ describe('テスト走行store', () => {
   it('完走記録・前回記録・ベストをコース別に保存する', () => {
     useGameStore.getState().setMode('course');
     useGameStore.getState().selectTrack('straight-10m');
+    arrangeFinishFixture();
     for (let run = 0; run < 2; run += 1) {
       useGameStore.getState().startCourseRun();
       let steps = 0;
