@@ -18,6 +18,7 @@ const SCREENS = {
   instrumentShop: read('../InstrumentShopPanel.tsx'),
   destructionHud: read('../DestructionHud.tsx'),
   saveGate: read('../SaveGate.tsx'),
+  inventory: read('../InventoryScreen.tsx'),
   raceEffects: read('../../render/RaceEffects.tsx'),
 };
 
@@ -95,6 +96,11 @@ describe('項目5: 色以外の状態表示', () => {
   it('計測器の陳列状態は色ではなく文言で区別する', () => {
     expect(SCREENS.instrumentShop).toContain('{view.note}');
   });
+
+  it('棚の装備状態は色ではなく「装備中」の文言で区別する', () => {
+    expect(SCREENS.inventory).toContain("selectedEquipped ? '装備中' : '装備'");
+    expect(SCREENS.inventory).toContain('現在装備中です。');
+  });
 });
 
 describe('項目6・7: role区分とノード安定性(J7)', () => {
@@ -103,10 +109,12 @@ describe('項目6・7: role区分とノード安定性(J7)', () => {
     expect(stripComments(SCREENS.instrumentShop)).not.toContain('role="alert"');
     // 保留中画面の再試行失敗も拒否理由なのでstatus。
     expect(stripComments(SCREENS.saveGate)).toContain('role="status"');
+    // 装備成功・装備拒否も通常操作の結果なのでstatus。
+    expect(stripComments(SCREENS.inventory)).toContain('role="status"');
   });
 
   it('statusノードは常設し、条件でノードごと出し入れしない', () => {
-    for (const name of ['instrumentShop', 'destructionHud', 'saveGate'] as const) {
+    for (const name of ['instrumentShop', 'destructionHud', 'saveGate', 'inventory'] as const) {
       const code = stripComments(SCREENS[name]);
       // `{x && <p role="status">}` のようなノード自体の条件描画が無いこと。
       expect(code, name).not.toMatch(/&&\s*<p role="status"/);
@@ -129,6 +137,17 @@ describe('項目9: タッチ/クリックターゲット', () => {
       expect(buttons, name).toBeGreaterThan(0); // 空虚な一致(ボタン0件)を排除
       expect(minHeights, name).toBe(buttons);
     }
+  });
+
+  it('棚へ追加する装備操作はnative buttonかつ44px相当で、自然なTab順に置く', () => {
+    const code = stripComments(SCREENS.inventory);
+    const equipButton = code.match(/<button\s+type="button"\s+disabled=\{!selectedItem \|\| selectedEquipped\}[\s\S]*?<\/button>/)?.[0];
+    expect(equipButton).toBeDefined();
+    expect(equipButton).toContain('aria-label={equipmentButtonAriaLabel}');
+    expect(equipButton).toContain('min-h-[44px]');
+    expect(equipButton).toContain('min-w-[44px]');
+    expect(equipButton).not.toContain('tabIndex');
+    expect(equipButton).not.toContain('role=');
   });
 });
 
