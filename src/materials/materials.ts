@@ -294,14 +294,26 @@ const CANDIDATE_CIT_SILVER_PLATED_COPPER: Citation = {
   accessedOn: '2026-07-22',
 };
 
-const CANDIDATE_CIT_POM_DENSITY: Citation = {
-  literatureName:
-    'Celanese Hostaform(POM)製品ファミリーの密度候補(ISO 1183準拠)。Celanese公式ドメイン(materials.celanese.com)にHostaform製品データシート群は確認したが、JSレンダリング制約で個別グレードの数値ページは今回未直接確認',
-  publisher: 'Celanese Corporation(公式ドメインの存在は確認、個別数値ページ未直接確認)',
-  sourceKind: 'メーカー製品データシート候補値(未直接確認)',
-  url: 'https://materials.celanese.com/',
-  accessedOn: '2026-07-22',
+// P3-4 G3(R14(c)一次資料検証、2026-08-19): Suu_mot3が取得可能な公式配布ホストを提示し、
+// alice_mot3がPDFを取得して本文を直接抽出・確認した——原文「Hostaform(R) POM basic grades
+// cover melt-volume-flow rate range from 0.9 to 39 cm3/10 min and have a density of 1.41 g/cm3.」。
+// Celanese(POM原材料メーカー)の公式製品マニュアルであり、旧pending理由(個別グレードの数値
+// ページへ到達できなかった)は解消した。原文g/cm³表記のためkg/m³へ換算する(×1000)。
+const CIT_POM_DENSITY_CELANESE: Citation = {
+  literatureName: 'Hostaform POM Product Manual(原文: Hostaform(R) POM basic grades … have a density of 1.41 g/cm3)',
+  publisher: 'Celanese Corporation(POM原材料メーカー)',
+  sourceKind: 'メーカー公式製品マニュアル(PDF本文を直接確認)',
+  documentIdOrGrade: 'Hostaform POM basic grades(未充填。ガラス/エラストマー添加グレードは密度が異なると同文に明記)',
+  url: 'https://explore.celanese.com/rs/139-DBZ-834/images/POM-Hostaform-Product-Manual.pdf?version=0',
+  accessedOn: '2026-08-19',
 };
+
+// 旧候補出典(pending時代の手がかり。R14(c)によりCelanese公式製品マニュアルへ置き換えたため
+// 定義は削除したが、経緯を失わないよう内容を記録として残す):
+//   literatureName: 'Celanese Hostaform(POM)製品ファミリーの密度候補(ISO 1183準拠)。公式ドメイン
+//                    (materials.celanese.com)は確認したが、JSレンダリング制約で個別グレードの
+//                    数値ページは未直接確認'
+//   url: 'https://materials.celanese.com/'(accessedOn 2026-07-22)
 
 const CANDIDATE_CIT_PA6_DENSITY: Citation = {
   literatureName: '未充填PA6の複数樹脂物性データベースで報告される密度候補。メーカー公式データシート個別ページは今回未直接確認',
@@ -330,14 +342,28 @@ const CIT_PEEK_DENSITY: Citation = {
 // 販売代理店資料のみを物理写像に使うverified根拠としないことが決定済み(docs/phase2-plan.md
 // §13、Suu指摘6)。原材料メーカー/ミル・学術標準資料・公的資料・本文を直接確認できる規格
 // 資料が見つかるまでpendingのまま維持する(Step 2以降で必要になる前に別途探索する)。
-const CANDIDATE_CIT_TITANIUM_ALLOY_DENSITY: Citation = {
-  literatureName:
-    'TMS Titanium(チタン販売代理店)技術資料に記載のTi-6Al-4V(Grade 5)密度参考値。同資料はASTM B265本文がこの値を規定するとは明記していない。原材料メーカー/ミルの公式文書には今回到達できなかった',
-  publisher: 'TMS Titanium(販売代理店。原材料メーカー/ミルではない)',
-  sourceKind: '販売代理店の技術資料(メーカー公式データシートではない、規格本文未確認)',
-  url: 'https://tmstitanium.com/page/grade-5-titanium',
-  accessedOn: '2026-07-22',
+// P3-4 G3(R14(c)一次資料検証、2026-08-18): Suu_mot3が独立検索でTIMET公式技術資料を発見し、
+// alice_mot3がPDF本文を直接取得して該当文を確認した——原文「The density of TIMETAL 6-4 is
+// 0.160 lbs/cu. in. (4.43 gm/cc). This density is only 56 percent that of steel.」。
+// TIMET(TIMET/Titanium Metals Corporation)はチタン原材料メーカー/ミルであり、販売代理店資料
+// のみをverified根拠としない既存決定(docs/phase2-plan.md §13、Suu指摘6)の制約を満たす。
+// 原文g/cc(=g/cm³)表記のためkg/m³へ換算する(×1000)。換算後の値はmaterials.test.tsで固定する。
+const CIT_TITANIUM_ALLOY_DENSITY_TIMET: Citation = {
+  literatureName: 'TIMETAL 6-4 Properties(原文: The density of TIMETAL 6-4 is 0.160 lbs/cu. in. (4.43 gm/cc))',
+  publisher: 'TIMET(Titanium Metals Corporation、チタン原材料メーカー/ミル)',
+  sourceKind: 'メーカー公式技術資料(PDF本文を直接確認)',
+  documentIdOrGrade: 'TIMETAL 6-4(Ti-6Al-4V、Grade 5相当)',
+  url: 'https://www.timet.com/assets/local/documents/technicalmanuals/TIMETAL_6-4_Properties.pdf',
+  accessedOn: '2026-08-19',
 };
+
+// 旧候補出典(pending時代の手がかり。R14(c)によりTIMET公式へ置き換えたため定義は削除したが、
+// 「販売代理店資料のみをverified根拠にしない」という判断の経緯を失わないよう内容を記録として残す):
+//   literatureName: 'TMS Titanium(チタン販売代理店)技術資料に記載のTi-6Al-4V(Grade 5)密度参考値。
+//                    同資料はASTM B265本文がこの値を規定するとは明記していない'
+//   publisher: 'TMS Titanium(販売代理店。原材料メーカー/ミルではない)'
+//   url: 'https://tmstitanium.com/page/grade-5-titanium'(accessedOn 2026-07-22)
+// この資料は docs/phase2-plan.md §13(Suu指摘6)により物理写像のverified根拠から除外されていた。
 
 const CANDIDATE_CIT_CARDBOARD_DENSITY: Citation = {
   literatureName:
@@ -527,9 +553,15 @@ export const GEAR_MATERIALS = [
     nameJa: 'POM(ポリアセタール)',
     descriptionJa: '軽量・自己潤滑・安価。標準',
     // spec表に「V2互換基準」の明示ラベルなし。anchorはStep 2(assumedGeometry.ts)で個別確定する。
-    isBaselineAnchor: false,
+    // P3-4 G3 G-R1(人間再承認済み2026-08-19): ギヤ族のbaseline anchor。V2の標準シャーシ110gは
+    // 標準ギヤを暗黙に包含しており(partPresets.tsのGEAR_PRESETSに質量項が無く、massGは
+    // chassis.baseMassG + battery.massGのみで合成される実装事実)、その「名目ギヤ」に相当するのが
+    // 初期装備のPOMである。massG合成はこのanchorとの差分方式を採るため、POM装備時はmassG不変。
+    isBaselineAnchor: true,
     priceProvisionalG: 80,
-    density: pending('メーカー公式ドメイン(materials.celanese.com)は確認したが、個別グレードの数値ページを直接確認できなかった', CANDIDATE_CIT_POM_DENSITY),
+    // P3-4 G3(R14(c)): Celanese公式製品マニュアル本文を直接確認できたためverifiedへ昇格した。
+    // 1.41 g/cm³ × 1000 = 1410 kg/m³。旧候補出典CANDIDATE_CIT_POM_DENSITYは経緯として定義を残す。
+    density: verified(1410, 'manufacturerDatasheet', CIT_POM_DENSITY_CELANESE),
   },
   {
     id: 'gear-nylon-pa6',
@@ -560,10 +592,10 @@ export const GEAR_MATERIALS = [
     descriptionJa: '砕けない代わりに重い(J増で加速鈍化)。金属同士は無潤滑でかじる',
     isBaselineAnchor: false,
     priceProvisionalG: 1200,
-    density: pending(
-      '販売代理店(TMS Titanium)の技術資料には到達したが、原材料メーカー/ミルの公式文書ではなく、規格発行元(ASTM International)の規格文書本文(有償)も未確認。販売代理店資料のみのためverified化せず、一次性の高い資料確認までpendingを維持する',
-      CANDIDATE_CIT_TITANIUM_ALLOY_DENSITY,
-    ),
+    // P3-4 G3(R14(c)): TIMET公式技術資料の本文を直接確認できたためverifiedへ昇格した
+    // (旧pending理由と旧候補出典CANDIDATE_CIT_TITANIUM_ALLOY_DENSITYは上記コメント・定義として
+    // 履歴を保持している)。4.43 g/cm³ × 1000 = 4430 kg/m³。
+    density: verified(4430, 'manufacturerDatasheet', CIT_TITANIUM_ALLOY_DENSITY_TIMET),
   },
 ] as const satisfies readonly GearMaterial[];
 

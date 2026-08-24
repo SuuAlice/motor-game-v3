@@ -116,7 +116,9 @@ export interface DestructionConfig {
     recoveryFrames: number;
     recoveryContactResistanceMultiplier: number;
   };
-  d06: { breakage: GearBreakageProfile };
+  // P3-4 G3(計画§9.1 R6確定裁定): toothFatigueExposureNmSは歯1本を失うのに必要な累積曝露
+  // (N·m·s)。この単一の較正閾値で崩壊速度を直接制御する(候補b採用の理由そのもの)。
+  d06: { breakage: GearBreakageProfile; toothFatigueExposureNmS: number };
   // 正式Fable P3-2-Q11裁定(確定): 熱蓄積(thermal、磁石の種類によらず常に計算する)+
   // 不可逆到達条件(irreversible、判別union)の2部構成。候補(i)の閾値ハック(0-1ゲージ規約違反)は
   // 不採用。人間再承認バンドル対象。
@@ -132,7 +134,19 @@ export interface DestructionConfig {
         }
       | { kind: 'nonDemagnetizing' };
   };
-  d09: { bearingSeizureGaugeLimit: number };
+  // P3-4 G4(計画§7.2、E7是正でdeltaFraction2件を追加)。
+  d09: {
+    thermal: { conductionCoefficient: number; dissipationCoefficient: number };
+    bearingSeizureGaugeLimit: number;
+    // gear素材由来のconfig profile値。**engineは素材IDを一切読まない**(leaf規則)——
+    // advanceD09はこのbooleanをconfig経由で受け取るのみで、gearIdそのものを見ない。
+    metalGearContactAlways: boolean;
+    highLoadHighSpeed: { loadTorqueThresholdNm: number; rpmThreshold: number };
+    // D07のdemagnetizationDeltaFractionと同型のパターン(E7是正): config→event→
+    // deriveDegradationDiffsという一方向契約の起点。deriveDegradationDiffsはevent側のみ読む。
+    gearSeizureDeltaFraction: number;
+    bearingSeizureDeltaFraction: number;
+  };
 }
 
 export interface DestructionSharedSignals {
@@ -209,6 +223,15 @@ export interface D06Progress {
   toothLossCount: number;
   firstLossAtT: number | null;
   causeLog: D06CauseLog | null;
+  // P3-4 G3(計画§9.1 R6確定裁定、候補b「累積曝露」)。過負荷トルクの超過分を時間積分した
+  // 曝露量(N·m·s)。D05のcumulativeSparkExposureと同型。config.d06.toothFatigueExposureNmSを
+  // 超えるたびに歯を1本失い、この値を0へリセットする。
+  cumulativeOverloadExposure: number;
+  // P3-4 G3(計画§9.4 R7確定裁定)。トルクリップル変調の位相源。車軸1回転で歯数ぶんの
+  // 噛み合わせが起きるという幾何関係から、|axleAngularVelocityRadS|*歯数*dt/(2π)を積算する。
+  // **トリガ判定(候補b)とは完全に独立**であり、D06の発火可否・崩壊速度には一切影響しない
+  // (純粋にリップル変調の位相源としてのみ機能する)。rngを使わないため決定論的。
+  meshPhaseAccumulator: number;
 }
 
 export interface D07Progress {
@@ -250,7 +273,7 @@ export function createInitialDestructionState(batteryProfile: 'lipo' | 'nonLipo'
       D01: { triggered: false, triggeredAtT: null, causeLog: null, decayExposureRad: 0 },
       D02: { triggered: false, triggeredAtT: null, coilHeatGaugeRatio: 0, causeLog: null, smokingStarted: false, smokingStartedAtT: null },
       D05: { sparkDurationS: 0, episodeTriggered: false, episodeCount: 0, cumulativeSparkExposure: 0, firstEpisodeAtT: null, causeLog: null, cumulativeWearDeltaFraction: 0, recoveryFramesLeft: 0 },
-      D06: { toothLossCount: 0, firstLossAtT: null, causeLog: null },
+      D06: { toothLossCount: 0, firstLossAtT: null, causeLog: null, cumulativeOverloadExposure: 0, meshPhaseAccumulator: 0 },
       D07: { magnetHeatGaugeRatio: 0, reversibleDroopActive: false, irreversibleTriggered: false, irreversibleTriggeredAtT: null, causeLog: null },
       D09: { triggered: false, triggeredAtT: null, bearingHeatGaugeRatio: 0, causeLog: null },
     },
@@ -278,6 +301,19 @@ export interface DestructionFrameInput {
   // 正式Fable P3-3-Q4裁定(確定): 平滑化前の生角速度(rad/s、`next.omega`)。表示用移動平均の
   // `rpm`とは単位・時定数が異なるため、D01進行量の駆動には本フィールドを使う(5.2節)。
   angularVelocityRadS: number;
+  // P3-4 G4(計画§7.3、候補b「wrapperでの事前計算」)。ギヤ噛合の散逸パワー(W)。
+  // motor-onlyではundefined。wrapper側で `|loadTorqueNm × ω| × (1 - carConfig.gearEfficiency)` として
+  // 事前計算する——R8確定裁定により、これは既存反射式(vehiclePhysics.tsのtResistReflected)の下での
+  // ギヤ噛合散逸パワーそのものであることが代数的に証明されている(P_out = eta×P_in が恒等的に
+  // 成立するため P_loss = P_in − P_out = |loadTorqueNm×ω|×(1−eta))。二重計上ではない。
+  // leafはCarConfigの構造を知らずにこの数値だけを受け取る。D09のゲージ入力(§7.5)が消費する。
+  gearFrictionLossW?: number;
+  // P3-4 G3(計画§7.3、候補b「wrapperでの事前計算」)。車軸(ギヤ・軸受)の角速度(rad/s)。
+  // motor-onlyではundefined(loadTorqueNm/energyUsedRatioと同じ規約)。**値の計算は
+  // destructionModes.ts内では行わない**——CarConfigの構造を知るのはframe builder
+  // (destructionOrchestration.tsのbuildVehicleFrameInput)側の責務であり、leaf規則
+  // 「他engineモジュールへの逆依存を持たない」を維持する。D06のリップル位相(§9.4)が消費する。
+  axleAngularVelocityRadS?: number;
 }
 
 export type TemperatureReading = { kind: 'measured'; temperatureC: number } | { kind: 'uncalibratedGauge'; ratio: number } | { kind: 'unavailable' };
@@ -328,6 +364,12 @@ export interface D07CauseLog extends CauseLogCommon {
 }
 export interface D09CauseLog extends CauseLogCommon {
   bearingHeatGaugeRatio: number;
+  // P3-4 G4(R4確定、候補A): 終端瞬間の**生の入力値**をそのまま記録する。`originKind`のような
+  // 解釈済みラベルは追加しない——終端瞬間の値だけでは進行全体の寄与(途中で原因が入れ替わった
+  // 場合等)を復元できず、「主に〜が原因」という断定は嘘になりうるため。UIは事実の提示
+  // (「終端の瞬間、金属接触状態: あり/なし」)としてのみ表示してよい(spec §1.2)。
+  metalGearContactActive: boolean;
+  highLoadHighSpeedActive: boolean;
 }
 
 export type PhysicsSnapshotAtT = { context: 'motor'; state: SimState } | { context: 'vehicle'; state: VehicleSimState };
@@ -358,7 +400,15 @@ export type UnstampedDestructionEvent =
       // (kind==='demagnetizing'のときのみ発火するため、常に非0。人間再承認バンドル対象)。
       demagnetizationDeltaFraction: number;
     }
-  | { mode: 'D09'; causeLog: D09CauseLog; isFirstThisSession: true };
+  | {
+      mode: 'D09';
+      causeLog: D09CauseLog;
+      isFirstThisSession: true;
+      // P3-4 G4(E7是正): configから複写する単一出典値。deriveDegradationDiffsはevent側のみ読む
+      // (D07のdemagnetizationDeltaFractionと同一パターン)。ここで新しい値を発明しない。
+      gearSeizureDeltaFraction: number;
+      bearingSeizureDeltaFraction: number;
+    };
 
 // ---------------------------------------------------------------------------
 // advanceDestructionState本体(P3-1、docs/phase3-p3-1-plan.md v7 §2.1。P3-2ゲート3で
@@ -691,6 +741,169 @@ function advanceD05(
 // D07本体(計画v9 §2.5、正式Fable P3-2-Q2・Q3・Q11裁定確定)。熱ゲージ(thermal)は
 // irreversible.kindによらず常に更新する(v12凍結契約「熱ゲージは常時更新」「不可逆到達後も
 // 走行は継続する」)。止めてよいのはevent/causeLogの再発行だけである。
+/** 金属接触時の摩擦損失増倍(無次元、§17.3数値候補)。確定はG5較正sweep+人間commit承認。 */
+const METAL_CONTACT_MULTIPLIER = 1.5;
+
+/**
+ * D09のゲージ入力パワー(W)を計算する(計画§7.5、R8確定裁定により物理的妥当性を代数的に証明済み)。
+ *
+ * **CarConfigの構造を一切知らない**——frame経由で事前計算済みスカラーのみを使う(leaf規則)。
+ * motor-onlyでは`gearFrictionLossW`・`loadTorqueNm`・`axleAngularVelocityRadS`がいずれもundefinedの
+ * ため入力0となり、D09は構造的に発火しない(ギヤ・軸受が存在しない文脈であるため正しい)。
+ *
+ * 2経路の和(spec §7.1「無潤滑相当=金属ギヤ接触**または**高負荷軸受×高速継続の簡約判定」):
+ * - 金属接触経路: ギヤ噛合散逸を`METAL_CONTACT_MULTIPLIER`倍して常時計上(金属ギヤ装備時のみ)
+ * - 高負荷高速経路: 車軸が高速回転している間、閾値超過分の力学的パワー(固定値ではない実量)
+ *
+ * `Math.abs`・`Math.max(0,...)`により前進/後退いずれの符号でも非負。
+ */
+function computeD09GaugeInputW(frame: DestructionFrameInput, config: DestructionConfig['d09']): number {
+  const frictionLossW = frame.gearFrictionLossW ?? 0;
+  const metalContactInputW = config.metalGearContactAlways ? frictionLossW * METAL_CONTACT_MULTIPLIER : 0;
+  const loadTorqueNm = frame.loadTorqueNm ?? 0;
+  const excessTorqueNm = Math.max(0, Math.abs(loadTorqueNm) - config.highLoadHighSpeed.loadTorqueThresholdNm);
+  const axleOmega = frame.axleAngularVelocityRadS ?? 0;
+  const isHighSpeed = Math.abs(axleOmega) > (config.highLoadHighSpeed.rpmThreshold * 2 * Math.PI) / 60; // rpm→rad/s
+  const highLoadInputW = isHighSpeed ? excessTorqueNm * Math.abs(axleOmega) : 0;
+  return metalContactInputW + highLoadInputW;
+}
+
+/**
+ * D09の熱ゲージ更新(計画§7.6)。D07の`advanceD07`と同型のconduction/dissipation積分で、0-1へclampする。
+ * 閾値到達判定は瞬時の数値比較で足りるため、D05のような時間比較epsilonは不要(D02/D07と同型)。
+ */
+function computeNextBearingHeatGaugeRatio(
+  prevRatio: number,
+  gaugeInputW: number,
+  config: DestructionConfig['d09'],
+  dt: number,
+): number {
+  const next = prevRatio + (gaugeInputW * config.thermal.conductionCoefficient - prevRatio * config.thermal.dissipationCoefficient) * dt;
+  return Math.min(1, Math.max(0, next));
+}
+
+// D09本体(P3-4 G4、計画§7)。spec §7.1「軸受焼付き/高速×無潤滑(金属ギヤかじり含む)/急減速+異音」、
+// §7.1.1「進行(摩擦増)→終端(焼付き)」。bearingはギヤと同じ車軸側にある軸受として確定(§7.4、R15)。
+function advanceD09(
+  prev: D09Progress,
+  frame: DestructionFrameInput,
+  config: DestructionConfig['d09'],
+  elapsedTimeS: number,
+  dt: number,
+): { next: D09Progress; event: UnstampedDestructionEvent | null } {
+  const gaugeInputW = computeD09GaugeInputW(frame, config);
+  const bearingHeatGaugeRatio = computeNextBearingHeatGaugeRatio(prev.bearingHeatGaugeRatio, gaugeInputW, config, dt);
+
+  // 発火済みならゲージのみ更新し、eventは再発行しない(D07の不可逆到達後と同型)。
+  if (prev.triggered) {
+    return { next: { ...prev, bearingHeatGaugeRatio }, event: null };
+  }
+
+  if (bearingHeatGaugeRatio >= config.bearingSeizureGaugeLimit) {
+    // R4確定(候補A): 終端瞬間の生の入力値のみを記録する(解釈済みラベルは持たない)。
+    const loadTorqueNm = frame.loadTorqueNm ?? 0;
+    const axleOmega = frame.axleAngularVelocityRadS ?? 0;
+    const isHighSpeed = Math.abs(axleOmega) > (config.highLoadHighSpeed.rpmThreshold * 2 * Math.PI) / 60;
+    const causeLog: D09CauseLog = {
+      currentA: frame.currentA,
+      rpm: frame.rpm,
+      atT: elapsedTimeS,
+      // 軸受専用の温度計は持たない(D02/D07と同じ規律——捏造しない。ゲージの生値を出す)。
+      temperature: { kind: 'uncalibratedGauge', ratio: bearingHeatGaugeRatio },
+      bearingHeatGaugeRatio,
+      metalGearContactActive: config.metalGearContactAlways,
+      highLoadHighSpeedActive: isHighSpeed && Math.abs(loadTorqueNm) > config.highLoadHighSpeed.loadTorqueThresholdNm,
+    };
+    return {
+      next: { triggered: true, triggeredAtT: elapsedTimeS, bearingHeatGaugeRatio, causeLog },
+      event: {
+        mode: 'D09',
+        causeLog,
+        isFirstThisSession: true,
+        // configの単一出典値をそのまま複写する(E7是正、D07と同一パターン。ここで発明しない)。
+        gearSeizureDeltaFraction: config.gearSeizureDeltaFraction,
+        bearingSeizureDeltaFraction: config.bearingSeizureDeltaFraction,
+      },
+    };
+  }
+  return { next: { ...prev, bearingHeatGaugeRatio }, event: null };
+}
+
+// D06本体(P3-4 G3、計画§9.1 R6確定裁定「候補b: 累積曝露」+§9.4 R7「専用meshPhaseAccumulator」)。
+// spec §7.1.1「反復イベント(歯単位)/歯欠けごとに伝達効率低下・トルクリップル増/全損で空転
+// =走行不能/チタンは発火しない」。
+//
+// 二つの独立した状態を進める:
+//  (1) cumulativeOverloadExposure: 過負荷トルクの超過分の時間積分。閾値超過ごとに歯を1本失い
+//      リセットする。**発火判定はこちらのみが担う**。
+//  (2) meshPhaseAccumulator: 噛み合わせ位相。リップル変調(composeD06RuntimeEffect)の位相源で
+//      あり、**発火可否・崩壊速度には一切影響しない**。nonBreakable(チタン)でも進行する
+//      ——リップル自体はtoothLossRatio=0で恒等(1倍)になるため健全時の挙動は変わらない。
+function advanceD06(
+  prev: D06Progress,
+  frame: DestructionFrameInput,
+  config: DestructionConfig['d06'],
+  runContext: DestructionRunContext,
+  elapsedTimeS: number,
+  dt: number,
+): { next: D06Progress; event: UnstampedDestructionEvent | null } {
+  // 噛み合わせ位相(トリガと独立、決定論的)。motor-onlyではaxleAngularVelocityRadSが
+  // undefinedのため位相は進まない(ギヤが存在しない文脈であり、車軸の回転が定義できない)。
+  const axleOmega = frame.axleAngularVelocityRadS;
+  const totalToothCount = runContext.gearTotalToothCount;
+  const meshPhaseAccumulator =
+    axleOmega !== undefined && totalToothCount !== null
+      ? prev.meshPhaseAccumulator + (Math.abs(axleOmega) * totalToothCount * dt) / (2 * Math.PI)
+      : prev.meshPhaseAccumulator;
+
+  // チタン(nonBreakable)は歯欠けが発火しない(spec §7.1.1)。位相のみ更新して返す。
+  if (config.breakage.kind === 'nonBreakable') {
+    return { next: { ...prev, meshPhaseAccumulator }, event: null };
+  }
+  // 全損済みなら以降の進行はない(全損eventは同一stepでdestructionTerminalとなり、
+  // wrapperのループがそのstepで停止するため、実運用ではこの分岐へ到達しない防御的コード)。
+  if (totalToothCount !== null && prev.toothLossCount >= totalToothCount) {
+    return { next: { ...prev, meshPhaseAccumulator }, event: null };
+  }
+
+  // motor-onlyではloadTorqueNmがundefined(ギヤ負荷が存在しない)。曝露は進まない。
+  const loadTorqueNm = frame.loadTorqueNm;
+  if (loadTorqueNm === undefined || totalToothCount === null) {
+    return { next: { ...prev, meshPhaseAccumulator }, event: null };
+  }
+
+  const excessNm = Math.max(0, Math.abs(loadTorqueNm) - config.breakage.gearStrengthThresholdNm);
+  const cumulativeOverloadExposure = prev.cumulativeOverloadExposure + excessNm * dt;
+  if (cumulativeOverloadExposure < config.toothFatigueExposureNmS) {
+    return { next: { ...prev, cumulativeOverloadExposure, meshPhaseAccumulator }, event: null };
+  }
+
+  // 歯を1本失う。曝露カウンタは0へリセットする(D05のepisode成立と同型)。
+  // 1stepで失うのは常に1本まで——advanceD06は1物理stepに1回しか呼ばれないため、
+  // 「同一frameで複数歯を失う」経路は構造的に存在しない。
+  const toothLossCount = prev.toothLossCount + 1;
+  const isTotalLoss = toothLossCount >= totalToothCount;
+  const causeLog: D06CauseLog = {
+    currentA: frame.currentA,
+    rpm: frame.rpm,
+    atT: elapsedTimeS,
+    // D06は専用の温度計を持たない(D01/D05と同じ規律——捏造しない)。
+    temperature: { kind: 'unavailable' },
+    loadTorqueNm,
+    toothLossCount,
+  };
+  return {
+    next: {
+      toothLossCount,
+      firstLossAtT: prev.firstLossAtT ?? elapsedTimeS,
+      causeLog,
+      cumulativeOverloadExposure: 0,
+      meshPhaseAccumulator,
+    },
+    event: { mode: 'D06', causeLog, isFirstThisSession: prev.toothLossCount === 0, isTotalLoss },
+  };
+}
+
 function advanceD07(
   prev: D07Progress,
   frame: DestructionFrameInput,
@@ -764,7 +977,9 @@ export function advanceDestructionState(
   const d01Result = advanceD01(prev.modes.D01, frame, nextShared.elapsedTimeS, dt);
   const d02Result = advanceD02(prev.modes.D02, frame, config.d02, nextShared.elapsedTimeS, dt);
   const d05Result = advanceD05(prev.modes.D05, frame, config.d05, nextShared.elapsedTimeS, dt);
+  const d06Result = advanceD06(prev.modes.D06, frame, config.d06, runContext, nextShared.elapsedTimeS, dt);
   const d07Result = advanceD07(prev.modes.D07, frame, config.d07, nextShared.elapsedTimeS, dt);
+  const d09Result = advanceD09(prev.modes.D09, frame, config.d09, nextShared.elapsedTimeS, dt);
 
   // 公開eventsは判定順ではなく、v12 2.1節が定める固定順序(D01→D02→[D03またはD04]→
   // D05→D06→D07→D09)に厳密に従って組み立てる。P3-3時点で実際に発火しうるのは
@@ -774,13 +989,15 @@ export function advanceDestructionState(
   if (d02Result.event) events.push(d02Result.event);
   if (batteryEvent) events.push(batteryEvent);
   if (d05Result.event) events.push(d05Result.event);
+  if (d06Result.event) events.push(d06Result.event);
   if (d07Result.event) events.push(d07Result.event);
+  if (d09Result.event) events.push(d09Result.event);
 
   return {
     state: {
       shared: nextShared,
       battery: nextBattery,
-      modes: { ...prev.modes, D01: d01Result.next, D02: d02Result.next, D05: d05Result.next, D07: d07Result.next },
+      modes: { ...prev.modes, D01: d01Result.next, D02: d02Result.next, D05: d05Result.next, D06: d06Result.next, D07: d07Result.next, D09: d09Result.next },
     },
     events,
   };

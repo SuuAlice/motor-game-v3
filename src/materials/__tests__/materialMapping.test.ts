@@ -9,16 +9,21 @@ import {
   computeWireDensityRatio,
   computeWireResistivityRatio,
   assembleD05Config,
+  assembleDestructionConfig,
   mapBatteryDestructionProfile,
   mapBodyScorchDeltaFraction,
   mapBrushRatios,
   mapD03DestructionConfig,
   mapD04BatteryDestructionConfig,
   mapD05BrushWearConfig,
+  mapD06DestructionConfig,
   mapD07DestructionConfig,
+  mapD09DestructionConfig,
   mapMagnetScorchDeltaFraction,
   type BodyMaterialId,
   type BrushMaterialId,
+  type EquipmentDestructionContext,
+  type GearMaterialId,
   type MaterialCompositionBaseline,
   type MaterialSelection,
   type WireMaterialId,
@@ -983,9 +988,16 @@ describe('P3-2ゲート2: D04/D07較正値の写像(物理到達sweepを含ま�
           recoveryFrames: 6,
           recoveryContactResistanceMultiplier: 1.2,
         },
-        d06: { breakage: { kind: 'nonBreakable' } },
+        d06: { breakage: { kind: 'nonBreakable' }, toothFatigueExposureNmS: 0.5 },
         d07: mapD07DestructionConfig(magnetId),
-        d09: { bearingSeizureGaugeLimit: 1 },
+        d09: {
+        thermal: { conductionCoefficient: 0.25, dissipationCoefficient: 0.5 },
+        bearingSeizureGaugeLimit: 1,
+        metalGearContactAlways: false,
+        highLoadHighSpeed: { loadTorqueThresholdNm: 0.2, rpmThreshold: 3000 },
+        gearSeizureDeltaFraction: 0.15,
+        bearingSeizureDeltaFraction: 0.2,
+      },
       };
       const result = validateDestructionConfig(draft);
       expect(result.ok, `${magnetId}: ${result.ok ? '' : JSON.stringify(result.invalidFields)}`).toBe(true);
@@ -1077,9 +1089,16 @@ describe('P3-2ゲート5(是正版): M4到達可能性・D07 Q11・Q2独立sweep
         recoveryFrames: 6,
         recoveryContactResistanceMultiplier: 1.2,
       },
-      d06: { breakage: { kind: 'nonBreakable' } },
+      d06: { breakage: { kind: 'nonBreakable' }, toothFatigueExposureNmS: 0.5 },
       d07: mapD07DestructionConfig('magnet-neodymium'),
-      d09: { bearingSeizureGaugeLimit: 1 },
+      d09: {
+        thermal: { conductionCoefficient: 0.25, dissipationCoefficient: 0.5 },
+        bearingSeizureGaugeLimit: 1,
+        metalGearContactAlways: false,
+        highLoadHighSpeed: { loadTorqueThresholdNm: 0.2, rpmThreshold: 3000 },
+        gearSeizureDeltaFraction: 0.15,
+        bearingSeizureDeltaFraction: 0.2,
+      },
     };
   }
 
@@ -1098,9 +1117,16 @@ describe('P3-2ゲート5(是正版): M4到達可能性・D07 Q11・Q2独立sweep
         recoveryFrames: 6,
         recoveryContactResistanceMultiplier: 1.2,
       },
-      d06: { breakage: { kind: 'nonBreakable' } },
+      d06: { breakage: { kind: 'nonBreakable' }, toothFatigueExposureNmS: 0.5 },
       d07: mapD07DestructionConfig(magnetId),
-      d09: { bearingSeizureGaugeLimit: 1 },
+      d09: {
+        thermal: { conductionCoefficient: 0.25, dissipationCoefficient: 0.5 },
+        bearingSeizureGaugeLimit: 1,
+        metalGearContactAlways: false,
+        highLoadHighSpeed: { loadTorqueThresholdNm: 0.2, rpmThreshold: 3000 },
+        gearSeizureDeltaFraction: 0.15,
+        bearingSeizureDeltaFraction: 0.2,
+      },
     };
   }
 
@@ -1152,7 +1178,7 @@ describe('P3-2ゲート5(是正版): M4到達可能性・D07 Q11・Q2独立sweep
       const effectiveConfig = composeEffectiveMotorConfig(baseMotorConfig, destructionState, destructionConfig); // 単一出典
       const rawNextVehicleState = stepTrackRun(effectiveConfig, carConfig, track, prevVehicleState, DT_G5, NO_NOISE_RNG_G5); // 実効configを使用
       vehicleState = rawNextVehicleState;
-      const frame = buildVehicleFrameInput(effectiveConfig, prevVehicleState, vehicleState); // 同じ実効configを使用、実関数をそのまま使用
+      const frame = buildVehicleFrameInput(effectiveConfig, carConfig, prevVehicleState, vehicleState); // 同じ実効configを使用、実関数をそのまま使用
       if (destructionConfig.battery.profile === 'lipo' && runawayAtStep === null && frame.batteryHeat >= destructionConfig.battery.runawayHeatThreshold) {
         runawayAtStep = i;
       }
@@ -1247,6 +1273,7 @@ describe('P3-2ゲート5(是正版): M4到達可能性・D07 Q11・Q2独立sweep
       slopeRad: null,
       seed: 1,
       initialDestructionState: createInitialDestructionState(batteryProfile),
+      recipeKey: 'v1|test-vehicle',
     });
     let accumulator: RunAccumulator = createRunAccumulator(snapshot);
     let vehicleState = snapshot.initialVehicleState!;
@@ -1256,7 +1283,7 @@ describe('P3-2ゲート5(是正版): M4到達可能性・D07 Q11・Q2独立sweep
       const prevVehicleState = normalizeOverheatedStatusForD04Hold(vehicleState, accumulator.destructionState);
       const effectiveConfig = composeEffectiveMotorConfig(snapshot.motorConfig, accumulator.destructionState, snapshot.destructionConfig);
       const rawNextVehicleState = stepTrackRun(effectiveConfig, snapshot.carConfig!, track, prevVehicleState, DT_G5, NO_NOISE_RNG_G5);
-      const frame = buildVehicleFrameInput(effectiveConfig, prevVehicleState, rawNextVehicleState);
+      const frame = buildVehicleFrameInput(effectiveConfig, carConfig, prevVehicleState, rawNextVehicleState);
       const { state, events } = advanceDestructionState(accumulator.destructionState, frame, snapshot.destructionConfig, snapshot.runContext, DT_G5);
       vehicleState = normalizeOverheatedStatusForD04Hold(rawNextVehicleState, state);
       if (firstHeldOverheatedAtStep === null && rawNextVehicleState.status === 'overheated' && vehicleState.status === 'running') {
@@ -1324,6 +1351,7 @@ describe('P3-2ゲート5(是正版): M4到達可能性・D07 Q11・Q2独立sweep
       initialMotorState: { theta: Math.PI / 4, omega: 0, current: 0, backEmf: 0, shorted: false, running: true, rpm: 0, chatterFramesLeft: 0, batteryHeat: 0, coilCollapsed: false, highSpeedFrameCount: 0 },
       initialVehicleState: null, track: null, courseLengthM: null, slopeRad: null, seed: 1,
       initialDestructionState: createInitialDestructionState('nonLipo'),
+      recipeKey: 'v1|test-motor',
     });
     let accumulator: RunAccumulator = createRunAccumulator(snapshot);
     let motorState: SimState = snapshot.initialMotorState;
@@ -1385,7 +1413,7 @@ describe('P3-2ゲート5(是正版): M4到達可能性・D07 Q11・Q2独立sweep
         const prevVehicleState = normalizeOverheatedStatusForD04Hold(vehicleState, destructionState);
         const effectiveConfig = composeEffectiveMotorConfig(motorConfig, destructionState, destructionConfig);
         const rawNextVehicleState = stepTrackRun(effectiveConfig, carConfig, track, prevVehicleState, DT_G5, NO_NOISE_RNG_G5);
-        const frame = buildVehicleFrameInput(effectiveConfig, prevVehicleState, rawNextVehicleState);
+        const frame = buildVehicleFrameInput(effectiveConfig, carConfig, prevVehicleState, rawNextVehicleState);
         const result = advanceDestructionState(destructionState, frame, destructionConfig, runContext, DT_G5);
         destructionState = result.state;
         vehicleState = normalizeOverheatedStatusForD04Hold(rawNextVehicleState, destructionState);
@@ -1426,7 +1454,7 @@ describe('P3-2ゲート5(是正版): M4到達可能性・D07 Q11・Q2独立sweep
     //   burning時energyUsedRatio(=maxEnergyUsedRatio)≈0.9677(段階が長くなった分、
     //   burning到達までの走行距離が伸び、電力消費が進んだ結果。旧≈0.9127から変化)、
     //   finalStatus='running'(energyExhausted未到達)、finalD04Stage='burning'。
-    //   burningInitiatingCause={shortCircuitDurationS:0, overDischargeRatio≈0.9011}
+    //   burningInitiatingCause={shortCircuitDurationS:0, overDischargeRatio≈0.9003}(G-R1後の再基準化値)
     //   (overDischargeRatioはswelling突入時に一度だけ凍結される値〈initiatingCauseLog〉のため、
     //   段階時間の変更による影響を受けず不変。短絡は一切発生させていない構成のため、
     //   開始原因が過放電であり短絡由来でないことを直接確認する)。shortThresholdAtStep/
@@ -1453,20 +1481,27 @@ describe('P3-2ゲート5(是正版): M4到達可能性・D07 Q11・Q2独立sweep
       // 開始原因がoverDischargeであり短絡由来ではないことを直接確認する(短絡を一切発生させていない構成)
       expect(result.burningInitiatingCause).toEqual({ shortCircuitDurationS: 0, overDischargeRatio: expect.any(Number) });
       expect(result.burningInitiatingCause!.overDischargeRatio).toBeGreaterThanOrEqual(0.9);
-      expect(result.burningInitiatingCause!.overDischargeRatio, 'overDischargeRatio(回帰、burning時energyUsedRatioとは別値)').toBeCloseTo(0.9011, 3);
+      // P3-4 G3のG-R1(ギヤ実質量のmassG追加、2026-08-19人間再承認)による再基準化。承認された意味assertは不変。
+      // 旧値0.9011 → 0.9003181256670577(P3-2数値回帰3件の再基準化、2026-08-19人間承認)。
+      expect(result.burningInitiatingCause!.overDischargeRatio, 'overDischargeRatio(回帰、burning時energyUsedRatioとは別値)').toBeCloseTo(0.9003181256670577, 3);
       // 設計較正時点(2026-08-09)の実測値を数値回帰として固定する。
       expect(motorConfig.magnetStrength, 'neodymiumのmagnetStrength(写像実測上限)').toBe(0.9);
       expect(motorConfig.batteryCapacityRatio, 'LiPoのbatteryCapacityRatio(写像固定値)').toBe(1.3);
-      expect(result.swellingAtStep, 'swelling到達step(回帰)').toBe(897);
-      expect(result.smokingAtStep, 'smoking到達step(回帰、Q13-1裁定のstageDurations=0.35/0.25秒により旧903から更新)').toBe(939);
-      expect(result.burningAtStep, 'burning到達step(回帰、同上により旧909から更新)').toBe(969);
+      // P3-4 G3のG-R1(ギヤ実質量のmassG追加)由来、2026-08-19人間承認済みの再基準化。 旧897 → 912(質量増で加速が鈍り+15step遅延)。
+      expect(result.swellingAtStep, 'swelling到達step(回帰)').toBe(912);
+      // P3-4 G3のG-R1(ギヤ実質量のmassG追加)由来、2026-08-19人間承認済みの再基準化。 旧939 → 954(同+15step。swellingとの間隔42stepは不変)。
+      expect(result.smokingAtStep, 'smoking到達step(回帰、Q13-1裁定のstageDurations=0.35/0.25秒により旧903から更新)').toBe(954);
+      // P3-4 G3のG-R1(ギヤ実質量のmassG追加)由来、2026-08-19人間承認済みの再基準化。 旧969 → 984(同+15step。smokingとの間隔30stepは不変)。
+      expect(result.burningAtStep, 'burning到達step(回帰、同上により旧909から更新)').toBe(984);
       // 必須追補3是正(2026-08-09、appendix全文化): finalStep/maxEnergyUsedRatio/finalD04Stage
       // /shortThresholdAtStep/runawayAtStepも省略せず数値回帰として固定する。この構成は
       // 短絡を一切発生させていないため、shortThresholdAtStep/runawayAtStepはnullのままで
       // 正しい(burningInitiatingCauseがshortCircuitDurationS:0であることと整合する)。
-      expect(result.finalStep, 'finalStep(回帰、burning到達stepと一致、Q13-1裁定のstageDurations変更により旧909から更新)').toBe(969);
+      // P3-4 G3のG-R1(ギヤ実質量のmassG追加)由来、2026-08-19人間承認済みの再基準化。 旧969 → 984(burning到達stepと一致する契約は不変)。
+      expect(result.finalStep, 'finalStep(回帰、burning到達stepと一致、Q13-1裁定のstageDurations変更により旧909から更新)').toBe(984);
       expect(result.finalD04Stage, 'finalD04Stage(回帰)').toBe('burning');
-      expect(result.maxEnergyUsedRatio, 'maxEnergyUsedRatio(回帰、Q13-1裁定のstageDurations変更により旧0.9127から更新)').toBeCloseTo(0.9677, 3);
+      // P3-4 G3のG-R1(ギヤ実質量のmassG追加)由来、2026-08-19人間承認済みの再基準化。 旧0.9677 → 0.9778579632118439(質量増で消費が増加。意味assertの<1.0は維持)。
+      expect(result.maxEnergyUsedRatio, 'maxEnergyUsedRatio(回帰、Q13-1裁定のstageDurations変更により旧0.9127から更新)').toBeCloseTo(0.9778579632118439, 3);
       expect(result.shortThresholdAtStep, '短絡を発生させていないためnull').toBeNull();
       expect(result.runawayAtStep, '短絡を発生させていないためnull').toBeNull();
     });
@@ -1592,7 +1627,7 @@ describe('P3-2ゲート5(是正版): M4到達可能性・D07 Q11・Q2独立sweep
         const prevVehicleState = normalizeOverheatedStatusForD04Hold(vehicleState, destructionState);
         const effectiveConfig = composeEffectiveMotorConfig(motorConfig, destructionState, destructionConfig);
         const rawNextVehicleState = stepTrackRun(effectiveConfig, carConfig, track, prevVehicleState, DT_G5, NO_NOISE_RNG_G5);
-        const frame = buildVehicleFrameInput(effectiveConfig, prevVehicleState, rawNextVehicleState);
+        const frame = buildVehicleFrameInput(effectiveConfig, carConfig, prevVehicleState, rawNextVehicleState);
         const result = advanceDestructionState(destructionState, frame, destructionConfig, runContext, DT_G5);
         destructionState = result.state;
         vehicleState = normalizeOverheatedStatusForD04Hold(rawNextVehicleState, destructionState);
@@ -1697,9 +1732,16 @@ describe('P3-2ゲート5(是正版): M4到達可能性・D07 Q11・Q2独立sweep
           recoveryFrames: 6,
           recoveryContactResistanceMultiplier: 1.2,
         },
-        d06: { breakage: { kind: 'nonBreakable' } },
+        d06: { breakage: { kind: 'nonBreakable' }, toothFatigueExposureNmS: 0.5 },
         d07: mapD07DestructionConfig('magnet-neodymium'),
-        d09: { bearingSeizureGaugeLimit: 1 },
+        d09: {
+        thermal: { conductionCoefficient: 0.25, dissipationCoefficient: 0.5 },
+        bearingSeizureGaugeLimit: 1,
+        metalGearContactAlways: false,
+        highLoadHighSpeed: { loadTorqueThresholdNm: 0.2, rpmThreshold: 3000 },
+        gearSeizureDeltaFraction: 0.15,
+        bearingSeizureDeltaFraction: 0.2,
+      },
       };
     }
 
@@ -1724,7 +1766,7 @@ describe('P3-2ゲート5(是正版): M4到達可能性・D07 Q11・Q2独立sweep
         const prevVehicleState = normalizeOverheatedStatusForD04Hold(vehicleState, destructionState);
         const effectiveConfig = composeEffectiveMotorConfig(motorConfig, destructionState, destructionConfig);
         const rawNextVehicleState = stepTrackRun(effectiveConfig, carConfig, track, prevVehicleState, DT_G5, NO_NOISE_RNG_G5);
-        const frame = buildVehicleFrameInput(effectiveConfig, prevVehicleState, rawNextVehicleState);
+        const frame = buildVehicleFrameInput(effectiveConfig, carConfig, prevVehicleState, rawNextVehicleState);
         const result = advanceDestructionState(destructionState, frame, destructionConfig, runContext, DT_G5);
         destructionState = result.state;
         vehicleState = normalizeOverheatedStatusForD04Hold(rawNextVehicleState, destructionState);
@@ -1824,7 +1866,7 @@ describe('P3-2ゲート5(是正版): M4到達可能性・D07 Q11・Q2独立sweep
         const prevVehicleState = vehicleState;
         const effectiveConfig = composeEffectiveMotorConfig(baseMotorConfig, destructionState, destructionConfig);
         vehicleState = stepTrackRun(effectiveConfig, carConfig, track, prevVehicleState, DT_G5, NO_NOISE_RNG_G5);
-        const frame = buildVehicleFrameInput(effectiveConfig, prevVehicleState, vehicleState);
+        const frame = buildVehicleFrameInput(effectiveConfig, carConfig, prevVehicleState, vehicleState);
         const result = advanceDestructionState(destructionState, frame, destructionConfig, runContext, DT_G5);
         destructionState = result.state;
         const gauge = destructionState.modes.D07.magnetHeatGaugeRatio;
@@ -1852,7 +1894,7 @@ describe('P3-2ゲート5(是正版): M4到達可能性・D07 Q11・Q2独立sweep
     //   irreversibleAtStep=null、overheatedAtStep=null、
     //   minGauge≈0.00325(是正: 初回記載の「minGauge=0」は誤り。初期値1から単調減少せず
     //   最初のstepで既に低い値へ動くため、真の最小値は0ちょうどにはならない)、
-    //   maxGauge≈0.3271(droopThreshold 0.5未到達)、finalGauge≈0.3184。
+    //   maxGauge≈0.3254(droopThreshold 0.5未到達、G-R1後の再基準化値)、finalGauge≈0.3184。
     //
     // 必須是正P1(Suu_mot3レビュー、2026-08-09、Q13-2平衡型第2条件・14.3節「平衡到達の実証」)。
     // 末尾240step(2秒間、30秒間中の最後)窓のgauge系列全文(2026-08-09計測):
@@ -1879,9 +1921,12 @@ describe('P3-2ゲート5(是正版): M4到達可能性・D07 Q11・Q2独立sweep
       expect(result.maxGauge).toBeGreaterThan(0); // 空虚な一致を禁止する: 熱ゲージ自体は実際に動いていること
       expect(result.maxGauge).toBeLessThan(0.5);
       // 設計較正時点(2026-08-09)の実測値を数値回帰として固定する。
-      expect(result.maxGauge, 'maxGauge(回帰)').toBeCloseTo(0.3271, 3);
+      // P3-4 G3のG-R1(ギヤ実質量のmassG追加、2026-08-19人間再承認)による再基準化。承認された意味assertは不変。
+      // 旧値0.3271 → 0.3253827969698614。**下がっており**、ダレ閾値0.5未到達のマージンは広がった(安全側)。
+      expect(result.maxGauge, 'maxGauge(回帰)').toBeCloseTo(0.3253827969698614, 3);
       expect(result.minGauge, 'minGauge(回帰、0ちょうどではない)').toBeCloseTo(0.00325, 4);
-      expect(result.finalGauge, 'finalGauge(回帰)').toBeCloseTo(0.3184, 3);
+      // P3-4 G3のG-R1(ギヤ実質量のmassG追加)由来、2026-08-19人間承認済みの再基準化。 旧0.3184 → 0.3124172702168319(熱ゲージ低下=ダレ閾値0.5へのマージン拡大、安全側)。
+      expect(result.finalGauge, 'finalGauge(回帰)').toBeCloseTo(0.3124172702168319, 3);
       // 必須是正P1(Suu_mot3レビュー、2026-08-09、Q13-2平衡型第2条件、14.3節): 「時間窓の長さ
       // ではなく平衡到達の実証」——末尾240step(2秒間)窓でゲージ増加トレンドが止まっている
       // (前半/後半平均の差が小さい)ことと、平衡値(窓平均)が閾値(0.5)未満であることを
@@ -1894,12 +1939,18 @@ describe('P3-2ゲート5(是正版): M4到達可能性・D07 Q11・Q2独立sweep
       // 実測値(2026-08-09計測)を数値回帰として固定する: 窓長240step(2秒間)、
       // mean/min/max・前半/後半mean・diffRatio全文。
       expect(tw.windowSteps, '窓長(回帰)').toBe(240);
-      expect(tw.mean, '窓平均(回帰)').toBeCloseTo(0.3155, 3);
-      expect(tw.min, '窓内最小値(回帰)').toBeCloseTo(0.3111, 3);
-      expect(tw.max, '窓内最大値(回帰)').toBeCloseTo(0.3198, 3);
-      expect(tw.meanFirst, '窓前半平均(回帰)').toBeCloseTo(0.3158, 3);
-      expect(tw.meanSecond, '窓後半平均(回帰)').toBeCloseTo(0.3151, 3);
-      expect(tw.diffRatio, 'diffRatio(回帰)').toBeCloseTo(0.00218, 4);
+      // P3-4 G3のG-R1(ギヤ実質量のmassG追加)由来、2026-08-19人間承認済みの再基準化。 旧0.3155 → 0.31229070070068193(熱ゲージ低下に伴う末尾窓統計の低下)。
+      expect(tw.mean, '窓平均(回帰)').toBeCloseTo(0.31229070070068193, 3);
+      // P3-4 G3のG-R1(ギヤ実質量のmassG追加)由来、2026-08-19人間承認済みの再基準化。 旧0.3111 → 0.30713260348682186(熱ゲージ低下に伴う末尾窓統計の低下)。
+      expect(tw.min, '窓内最小値(回帰)').toBeCloseTo(0.30713260348682186, 3);
+      // P3-4 G3のG-R1(ギヤ実質量のmassG追加)由来、2026-08-19人間承認済みの再基準化。 旧0.3198 → 0.3163036257786291(熱ゲージ低下に伴う末尾窓統計の低下)。
+      expect(tw.max, '窓内最大値(回帰)').toBeCloseTo(0.3163036257786291, 3);
+      // P3-4 G3のG-R1(ギヤ実質量のmassG追加)由来、2026-08-19人間承認済みの再基準化。 旧0.3158 → 0.3119871788229032(熱ゲージ低下に伴う末尾窓統計の低下)。
+      expect(tw.meanFirst, '窓前半平均(回帰)').toBeCloseTo(0.3119871788229032, 3);
+      // P3-4 G3のG-R1(ギヤ実質量のmassG追加)由来、2026-08-19人間承認済みの再基準化。 旧0.3151 → 0.31259422257846037(熱ゲージ低下に伴う末尾窓統計の低下)。
+      expect(tw.meanSecond, '窓後半平均(回帰)').toBeCloseTo(0.31259422257846037, 3);
+      // P3-4 G3のG-R1(ギヤ実質量のmassG追加)由来、2026-08-19人間承認済みの再基準化。 旧0.00218 → 0.0019438419209894219(熱ゲージ低下に伴う末尾窓統計の低下)。
+      expect(tw.diffRatio, 'diffRatio(回帰)').toBeCloseTo(0.0019438419209894219, 4);
     });
 
     // P1是正: magnetStrengthを直接上書きせず、production-valid選択(wire-silver・
@@ -1962,9 +2013,13 @@ describe('P3-2ゲート5(是正版): M4到達可能性・D07 Q11・Q2独立sweep
       expect(result.irreversibleAtStep!).toBeLessThan(result.overheatedAtStep!);
       // 設計較正時点(2026-08-09)の実測値を数値回帰として固定する(P4是正: 終了状態も含む)。
       expect(result.droopAtStep, 'ダレ到達step(回帰)').toBe(17);
-      expect(result.irreversibleAtStep, '不可逆到達step(回帰)').toBe(28);
-      expect(result.overheatedAtStep, 'overheated到達step(回帰)').toBe(72);
-      expect(result.terminatedAtStep, '最終的な終了step(回帰)').toBe(72);
+      // P3-4 G3のG-R1(ギヤ実質量のmassG追加、2026-08-19人間再承認)による再基準化。承認された意味assertは不変。
+      // 旧値28 → 27。質量増により負荷が増え不可逆到達が1step早まった(変化の方向として整合)。
+      expect(result.irreversibleAtStep, '不可逆到達step(回帰)').toBe(27);
+      // P3-4 G3のG-R1(ギヤ実質量のmassG追加)由来、2026-08-19人間承認済みの再基準化。 旧72 → 70(質量増で負荷が増えoverheated到達が2step早まった)。
+      expect(result.overheatedAtStep, 'overheated到達step(回帰)').toBe(70);
+      // P3-4 G3のG-R1(ギヤ実質量のmassG追加)由来、2026-08-19人間承認済みの再基準化。 旧72 → 70(overheated到達stepと一致する契約は不変)。
+      expect(result.terminatedAtStep, '最終的な終了step(回帰)').toBe(70);
       expect(result.finalStatus, '最終状態(回帰)').toBe('overheated');
       expect(result.maxGauge, 'maxGauge(回帰、上限到達)').toBe(1);
       expect(result.finalGauge, 'finalGauge(回帰)').toBe(1);
@@ -1999,6 +2054,7 @@ describe('P3-2ゲート5(是正版): M4到達可能性・D07 Q11・Q2独立sweep
         slopeRad: null,
         seed: 1,
         initialDestructionState: createInitialDestructionState('nonLipo'),
+        recipeKey: 'v1|test-motor',
       } satisfies CaptureRunSnapshotInput);
       let accumulator = createRunAccumulator(snapshot);
       let motorState: SimState = snapshot.initialMotorState;
@@ -2063,6 +2119,7 @@ describe('P3-2ゲート5(是正版): M4到達可能性・D07 Q11・Q2独立sweep
         slopeRad: null,
         seed: 1,
         initialDestructionState: createInitialDestructionState('nonLipo'),
+        recipeKey: 'v1|test-motor',
         ...overrides,
       };
     }
@@ -2250,6 +2307,7 @@ describe('P3-2ゲート5(是正版): M4到達可能性・D07 Q11・Q2独立sweep
         initialMotorState: { theta: Math.PI / 4, omega: 0, current: 0, backEmf: 0, shorted: false, running: true, rpm: 0, chatterFramesLeft: 0, batteryHeat: 0, coilCollapsed: false, highSpeedFrameCount: 0 },
         initialVehicleState: null, track: null, courseLengthM: null, slopeRad: null, seed: 1,
         initialDestructionState: createInitialDestructionState('lipo'),
+        recipeKey: 'v1|test-motor',
       });
       let accumulator: RunAccumulator = createRunAccumulator(snapshot);
       let motorState: SimState = snapshot.initialMotorState;
@@ -2332,7 +2390,7 @@ describe('P3-2ゲート5(是正版): M4到達可能性・D07 Q11・Q2独立sweep
         const prevVehicleState = normalizeOverheatedStatusForD04Hold(vehicleState, destructionState);
         const effectiveConfig = composeEffectiveMotorConfig(motorConfig, destructionState, destructionConfig);
         const rawNextVehicleState = stepTrackRun(effectiveConfig, carConfig, track, prevVehicleState, DT_G5, NO_NOISE_RNG_G5);
-        const frame = buildVehicleFrameInput(effectiveConfig, prevVehicleState, rawNextVehicleState);
+        const frame = buildVehicleFrameInput(effectiveConfig, carConfig, prevVehicleState, rawNextVehicleState);
         const result = advanceDestructionState(destructionState, frame, destructionConfig, runContext, DT_G5);
         destructionState = result.state;
         vehicleState = normalizeOverheatedStatusForD04Hold(rawNextVehicleState, destructionState);
@@ -2364,6 +2422,7 @@ describe('P3-2ゲート5(是正版): M4到達可能性・D07 Q11・Q2独立sweep
         initialMotorState: { theta: Math.PI / 4, omega: 0, current: 0, backEmf: 0, shorted: false, running: true, rpm: 0, chatterFramesLeft: 0, batteryHeat: 0, coilCollapsed: false, highSpeedFrameCount: 0 },
         initialVehicleState: null, track: null, courseLengthM: null, slopeRad: null, seed: 1,
         initialDestructionState: createInitialDestructionState('nonLipo'),
+        recipeKey: 'v1|test-motor',
       });
     }
 
@@ -2456,6 +2515,7 @@ describe('P3-2ゲート5(是正版): M4到達可能性・D07 Q11・Q2独立sweep
         initialMotorState: { theta: Math.PI / 4, omega: 0, current: 0, backEmf: 0, shorted: false, running: true, rpm: 0, chatterFramesLeft: 0, batteryHeat: 0, coilCollapsed: false, highSpeedFrameCount: 0 },
         initialVehicleState: null, track: null, courseLengthM: null, slopeRad: null, seed: 1,
         initialDestructionState: createInitialDestructionState('lipo'),
+        recipeKey: 'v1|test-motor',
       });
       let accumulator: RunAccumulator = createRunAccumulator(snapshot);
       let motorState: SimState = snapshot.initialMotorState;
@@ -2610,6 +2670,7 @@ describe('P3-2ゲート5(是正版): M4到達可能性・D07 Q11・Q2独立sweep
         initialMotorState: { theta: Math.PI / 4, omega: 0, current: 0, backEmf: 0, shorted: false, running: true, rpm: 0, chatterFramesLeft: 0, batteryHeat: 0, coilCollapsed: false, highSpeedFrameCount: 0 },
         initialVehicleState: null, track: null, courseLengthM: null, slopeRad: null, seed: 1,
         initialDestructionState: createInitialDestructionState('lipo'),
+        recipeKey: 'v1|test-motor',
       });
       let accumulator: RunAccumulator = createRunAccumulator(snapshot);
       let motorState: SimState = snapshot.initialMotorState;
@@ -2771,9 +2832,16 @@ describe('P3-3ゲート2: ブラシ素材の写像(mapBrushRatios/mapD05BrushWea
         d02: { smokeGaugeThreshold: 0.6, coilOverheatGaugeLimit: 1, conductionScale: 0.04, dissipationCoefficient: 0.5, smokeResistanceMultiplier: 1.2 },
         d04: { bodyScorchDeltaFraction: mapBodyScorchDeltaFraction('body-ps-cowl'), magnetScorchDeltaFraction: mapMagnetScorchDeltaFraction('magnet-neodymium') },
         d05: assembleD05Config(mapD05BrushWearConfig(brush.id), BRUSH_D05_COMMON_PART),
-        d06: { breakage: { kind: 'nonBreakable' } },
+        d06: { breakage: { kind: 'nonBreakable' }, toothFatigueExposureNmS: 0.5 },
         d07: mapD07DestructionConfig('magnet-neodymium'),
-        d09: { bearingSeizureGaugeLimit: 1 },
+        d09: {
+        thermal: { conductionCoefficient: 0.25, dissipationCoefficient: 0.5 },
+        bearingSeizureGaugeLimit: 1,
+        metalGearContactAlways: false,
+        highLoadHighSpeed: { loadTorqueThresholdNm: 0.2, rpmThreshold: 3000 },
+        gearSeizureDeltaFraction: 0.15,
+        bearingSeizureDeltaFraction: 0.2,
+      },
       };
       const result = validateDestructionConfig(config);
       expect(result.ok, `${brush.id}: ${result.ok ? '' : JSON.stringify(result.invalidFields)}`).toBe(true);
@@ -2794,5 +2862,243 @@ describe('P3-3ゲート2: ブラシ素材の写像(mapBrushRatios/mapD05BrushWea
     const result = composeConfigFromMaterials(baseMotor, baseCar, baseline, badSelection);
     expect(result.ok).toBe(false);
     expect((result as { motorConfig?: unknown }).motorConfig).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P3-4 G1a: production DestructionConfig assembler(docs/phase3-p3-4-plan.md v12 §4)
+// ---------------------------------------------------------------------------
+describe('materialMapping.ts: P3-4 G1a assembleDestructionConfig', () => {
+  function selection(overrides: Partial<MaterialSelection> = {}): MaterialSelection {
+    return {
+      wireId: 'wire-copper-standard',
+      magnetId: 'magnet-ferrite',
+      gearId: 'gear-pom',
+      batteryId: 'battery-alkaline',
+      brushId: 'brush-carbon',
+      ...overrides,
+    };
+  }
+
+  function equipmentContext(overrides: Partial<EquipmentDestructionContext> = {}): EquipmentDestructionContext {
+    return { bodyId: 'body-none', ...overrides };
+  }
+
+  it('nonLipo電池選択でbattery.profileがnonLipoになり、validateDestructionConfigがok:trueを返す完全なDestructionConfigを生成する', () => {
+    const config = assembleDestructionConfig(selection({ batteryId: 'battery-alkaline' }), equipmentContext());
+    expect(config.battery.profile).toBe('nonLipo');
+    const result = validateDestructionConfig(config as unknown as DestructionConfigDraft);
+    expect(result.ok, result.ok ? '' : JSON.stringify(result)).toBe(true);
+  });
+
+  it('lipo電池選択でbattery.profileがlipoになり、validateDestructionConfigがok:trueを返す完全なDestructionConfigを生成する', () => {
+    const config = assembleDestructionConfig(selection({ batteryId: 'battery-lithium-polymer' }), equipmentContext());
+    expect(config.battery.profile).toBe('lipo');
+    const result = validateDestructionConfig(config as unknown as DestructionConfigDraft);
+    expect(result.ok, result.ok ? '' : JSON.stringify(result)).toBe(true);
+  });
+
+  it('d01/d02/d05はdestructionCalibration.ts/mapD05BrushWearConfig由来の値をそのまま反映する', () => {
+    const config = assembleDestructionConfig(selection(), equipmentContext());
+    expect(config.d01).toEqual({ decayExposureScaleRad: 1000, minEffectiveTurnsRatio: 0.5 });
+    expect(config.d02.conductionScale).toBeCloseTo(0.04);
+    expect(config.d05.brushWearRateRatio).toBe(1); // brush-carbon anchor
+  });
+
+  it('d04.bodyScorchDeltaFractionはEquipmentDestructionContext.bodyIdに応じて変わる(body-none=0、他body>0)', () => {
+    const none = assembleDestructionConfig(selection(), equipmentContext({ bodyId: 'body-none' }));
+    const cowl = assembleDestructionConfig(selection(), equipmentContext({ bodyId: 'body-cardboard-cowl' }));
+    expect(none.d04.bodyScorchDeltaFraction).toBe(0);
+    expect(cowl.d04.bodyScorchDeltaFraction).toBeGreaterThan(0);
+  });
+
+  it('d07はselection.magnetIdに応じて変わる(neodymium=demagnetizing、ferrite=nonDemagnetizing)', () => {
+    const ferrite = assembleDestructionConfig(selection({ magnetId: 'magnet-ferrite' }), equipmentContext());
+    const neodymium = assembleDestructionConfig(selection({ magnetId: 'magnet-neodymium' }), equipmentContext());
+    expect(ferrite.d07.irreversible.kind).toBe('nonDemagnetizing');
+    expect(neodymium.d07.irreversible.kind).toBe('demagnetizing');
+  });
+
+  it('全gear素材(pom/nylon-pa6/peek/titanium)×代表selectionで完全なDestructionConfigを生成しvalidateDestructionConfigを通す', () => {
+    const gearIds: GearMaterialId[] = ['gear-pom', 'gear-nylon-pa6', 'gear-peek', 'gear-titanium'];
+    for (const gearId of gearIds) {
+      const config = assembleDestructionConfig(selection({ gearId }), equipmentContext());
+      const result = validateDestructionConfig(config as unknown as DestructionConfigDraft);
+      expect(result.ok, `${gearId}: ${result.ok ? '' : JSON.stringify(result)}`).toBe(true);
+    }
+  });
+});
+
+describe('materialMapping.ts: P3-4 G1a mapD06DestructionConfig(§6.3)', () => {
+  it('gear-titaniumはnonBreakableを返す(gearStrengthThresholdNmを持たない)', () => {
+    // P3-4 G3: toothFatigueExposureNmS(§9.1候補b)が追加された。nonBreakableでも型の全域性の
+    // ため値は持つが、advanceD06はnonBreakableの時点で発火判定へ進まないため消費されない。
+    // G-R3(2026-08-19人間再承認): toothFatigueExposureNmSを0.5→0.0100へ再較正した。
+    expect(mapD06DestructionConfig('gear-titanium')).toEqual({ breakage: { kind: 'nonBreakable' }, toothFatigueExposureNmS: 0.01 });
+  });
+
+  it('gear-pom/gear-nylon-pa6/gear-peekはbreakableで正の有限なgearStrengthThresholdNmを持つ', () => {
+    const gearIds: Exclude<GearMaterialId, 'gear-titanium'>[] = ['gear-pom', 'gear-nylon-pa6', 'gear-peek'];
+    for (const gearId of gearIds) {
+      const result = mapD06DestructionConfig(gearId);
+      expect(result.breakage.kind).toBe('breakable');
+      if (result.breakage.kind === 'breakable') {
+        expect(Number.isFinite(result.breakage.gearStrengthThresholdNm)).toBe(true);
+        expect(result.breakage.gearStrengthThresholdNm).toBeGreaterThan(0);
+      }
+    }
+  });
+
+  it('POM<PA6<PEEKのティア順序を維持する(§17.3較正候補)', () => {
+    const pom = mapD06DestructionConfig('gear-pom');
+    const pa6 = mapD06DestructionConfig('gear-nylon-pa6');
+    const peek = mapD06DestructionConfig('gear-peek');
+    if (pom.breakage.kind === 'breakable' && pa6.breakage.kind === 'breakable' && peek.breakage.kind === 'breakable') {
+      expect(pom.breakage.gearStrengthThresholdNm).toBeLessThan(pa6.breakage.gearStrengthThresholdNm);
+      expect(pa6.breakage.gearStrengthThresholdNm).toBeLessThan(peek.breakage.gearStrengthThresholdNm);
+    }
+  });
+});
+
+describe('materialMapping.ts: P3-4 G4 mapD09DestructionConfig(§7.2の最終形)', () => {
+  const ALL_GEARS: GearMaterialId[] = ['gear-pom', 'gear-nylon-pa6', 'gear-peek', 'gear-titanium'];
+
+  it('全gear素材で全フィールドが有限・正の値域を満たす', () => {
+    for (const gearId of ALL_GEARS) {
+      const result = mapD09DestructionConfig(gearId);
+      expect(result.bearingSeizureGaugeLimit).toBeGreaterThan(0);
+      expect(result.thermal.conductionCoefficient).toBeGreaterThan(0);
+      expect(result.thermal.dissipationCoefficient).toBeGreaterThan(0);
+      expect(result.highLoadHighSpeed.loadTorqueThresholdNm).toBeGreaterThan(0);
+      expect(result.highLoadHighSpeed.rpmThreshold).toBeGreaterThan(0);
+      // deltaFractionはD07のdemagnetizationDeltaFractionと同じ(0,1]の値域規律。
+      expect(result.gearSeizureDeltaFraction).toBeGreaterThan(0);
+      expect(result.gearSeizureDeltaFraction).toBeLessThanOrEqual(1);
+      expect(result.bearingSeizureDeltaFraction).toBeGreaterThan(0);
+      expect(result.bearingSeizureDeltaFraction).toBeLessThanOrEqual(1);
+      for (const v of Object.values(result.thermal)) expect(Number.isFinite(v)).toBe(true);
+    }
+  });
+
+  it('metalGearContactAlwaysは金属ギヤ(チタン)のみtrue、樹脂3種はfalse(G4でgearIdを実際に消費)', () => {
+    // **engineは素材IDを知らない**(leaf規則)ため、金属/樹脂の判別は本写像層が担い、
+    // engineへはbooleanのみが渡る。spec §7.1「金属ギヤかじり含む」の実装位置。
+    expect(mapD09DestructionConfig('gear-titanium').metalGearContactAlways).toBe(true);
+    for (const gearId of ['gear-pom', 'gear-nylon-pa6', 'gear-peek'] as GearMaterialId[]) {
+      expect(mapD09DestructionConfig(gearId).metalGearContactAlways).toBe(false);
+    }
+  });
+
+  it('metalGearContactAlways以外のフィールドはgearId非依存である(全素材共通の較正値)', () => {
+    const results = ALL_GEARS.map((gearId) => {
+      const { metalGearContactAlways: _ignored, ...rest } = mapD09DestructionConfig(gearId);
+      return rest;
+    });
+    for (const r of results) expect(r).toEqual(results[0]);
+  });
+
+  it('G4再較正(2026-08-19人間承認)のexact値をpinする: 0.005 N·m / 400 rpm(車軸) / limit 0.15', () => {
+    // 旧候補値(0.2 N·m / 3000 rpm / limit 1.0)は両側拘束sweepで構造的に到達不能と実測された。
+    // 本pinはG4暫定較正の固定であり、G5最終較正(Q15-1恒久規則)を先取りするものではない。
+    const result = mapD09DestructionConfig('gear-pom');
+    expect(result.highLoadHighSpeed.loadTorqueThresholdNm).toBe(0.005);
+    expect(result.highLoadHighSpeed.rpmThreshold).toBe(400);
+    expect(result.bearingSeizureGaugeLimit).toBe(0.15);
+    // 承認範囲外の値が同時に動いていないことも同じpinで押さえる(熱係数・deltaFractionは不変)。
+    expect(result.thermal).toEqual({ conductionCoefficient: 0.25, dissipationCoefficient: 0.5 });
+    expect(result.gearSeizureDeltaFraction).toBe(0.15);
+    expect(result.bearingSeizureDeltaFraction).toBe(0.2);
+  });
+
+  it('純関数: 同一gearIdの2回呼び出しが等価な値を返す', () => {
+    for (const gearId of ALL_GEARS) {
+      expect(mapD09DestructionConfig(gearId)).toEqual(mapD09DestructionConfig(gearId));
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// G-R3(D06閾値の再較正、2026-08-19人間再承認済み)
+// ---------------------------------------------------------------------------
+
+describe('materialMapping.ts: G-R3 D06閾値の再較正', () => {
+  const LOWER_BOUND = 0.003080; // NORMAL_OPERATION 15組合せの max|loadTorqueNm| 最大(実測)
+  const UPPER_BOUND = 0.013544; // production-valid攻め構成の max|loadTorqueNm|(実測)
+  const EXPOSURE = 0.01;
+
+  function threshold(gearId: 'gear-pom' | 'gear-nylon-pa6' | 'gear-peek'): number {
+    const cfg = mapD06DestructionConfig(gearId);
+    if (cfg.breakage.kind !== 'breakable') throw new Error(`${gearId}はbreakableであること`);
+    return cfg.breakage.gearStrengthThresholdNm;
+  }
+
+  it.each([
+    ['gear-pom', 0.005],
+    ['gear-nylon-pa6', 0.00726],
+    ['gear-peek', 0.0079],
+  ])('%sの閾値が承認済み確定値である', (id, expected) => {
+    expect(threshold(id as 'gear-pom')).toBe(expected);
+  });
+
+  it('toothFatigueExposureNmSが承認済み確定値0.0100である(全素材共通)', () => {
+    for (const id of ['gear-pom', 'gear-nylon-pa6', 'gear-peek', 'gear-titanium'] as const) {
+      expect(mapD06DestructionConfig(id).toothFatigueExposureNmS).toBe(EXPOSURE);
+    }
+  });
+
+  // 両側拘束(裁定■2): 通常運用では発火せず、攻めた構成では有限到達できること。
+  it.each([['gear-pom'], ['gear-nylon-pa6'], ['gear-peek']])(
+    '%sの閾値がNORMAL_OPERATION下限より上・production攻め上限より下にある(両側拘束)',
+    (id) => {
+      const t = threshold(id as 'gear-pom');
+      expect(t, `${id}: 通常運用(最大${LOWER_BOUND})では発火しないこと`).toBeGreaterThan(LOWER_BOUND);
+      expect(t, `${id}: 攻め構成(上限${UPPER_BOUND})では到達可能であること`).toBeLessThan(UPPER_BOUND);
+    },
+  );
+
+  // 相対比のアンカー(裁定■1条件1): 引張降伏応力 POM 62 / PA6 90 / PEEK 98.0 MPa の比。
+  it('閾値の相対比が実素材の引張降伏応力比(62:90:98)と0.1%以内で一致する', () => {
+    const pom = threshold('gear-pom');
+    expect(threshold('gear-nylon-pa6') / pom).toBeCloseTo(90 / 62, 2);
+    expect(threshold('gear-peek') / pom).toBeCloseTo(98.0 / 62, 2);
+    // 誤差が0.1%以内であることを直接固定する(比率は教育的価値の担い手のため)
+    expect(Math.abs(threshold('gear-nylon-pa6') / pom / (90 / 62) - 1)).toBeLessThan(0.001);
+    expect(Math.abs(threshold('gear-peek') / pom / (98.0 / 62) - 1)).toBeLessThan(0.001);
+  });
+
+  it('素材の強弱順序が保たれる(POM < PA6 < PEEK、強い素材ほど壊れにくい)', () => {
+    expect(threshold('gear-pom')).toBeLessThan(threshold('gear-nylon-pa6'));
+    expect(threshold('gear-nylon-pa6')).toBeLessThan(threshold('gear-peek'));
+  });
+
+  // 理論1本目時間(計画§9(2)「0.5〜10秒」)。上限を持続した場合の下限側の時間。
+  it.each([
+    ['gear-pom', 1.170],
+    ['gear-nylon-pa6', 1.591],
+    ['gear-peek', 1.772],
+  ])('%sの理論1本目時間が承認時の実測値と一致し、0.5〜10秒の範囲に収まる', (id, expectedS) => {
+    const t = EXPOSURE / (UPPER_BOUND - threshold(id as 'gear-pom'));
+    expect(t).toBeCloseTo(expectedS as number, 2);
+    expect(t).toBeGreaterThan(0.5);
+    expect(t).toBeLessThan(10);
+  });
+
+  // 裁定■1条件3: チタンは構造腕のまま(数値閾値化しない)。
+  it('gear-titaniumはnonBreakableの構造腕のままであり、数値閾値を持たない(spec §7.1)', () => {
+    const cfg = mapD06DestructionConfig('gear-titanium');
+    expect(cfg.breakage.kind).toBe('nonBreakable');
+    expect('gearStrengthThresholdNm' in cfg.breakage).toBe(false);
+  });
+
+  // 過剰設計防止(裁定■停止条件): 強度フィールド・湿度状態を素材へ追加していないこと。
+  it('GearMaterialへ強度フィールド・湿度状態を追加していない(過剰設計防止)', () => {
+    for (const gear of GEAR_MATERIALS) {
+      const keys = Object.keys(gear);
+      expect(keys).not.toContain('flexuralStrength');
+      expect(keys).not.toContain('tensileStrength');
+      expect(keys).not.toContain('yieldStress');
+      expect(keys).not.toContain('humidity');
+      expect(keys).not.toContain('moistureState');
+    }
   });
 });

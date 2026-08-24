@@ -15,7 +15,9 @@ import {
 import { BATTERY_MATERIALS, BODY_MATERIALS, BRUSH_MATERIALS, GEAR_MATERIALS, MAGNET_MATERIALS, WIRE_MATERIALS, type BatteryMaterial, type GearMaterial, type MagnetMaterial, type WireMaterial } from './materials';
 import type { MotorConfig } from '../engine/motorPhysics';
 import type { CarConfig } from '../engine/vehiclePhysics';
-import type { BatteryDestructionConfig, DestructionConfig } from '../engine/destructionOrchestration';
+import type { BatteryDestructionConfig, DestructionConfig, GearBreakageProfile } from '../engine/destructionOrchestration';
+import { D01_CALIBRATION, D02_CALIBRATION, D05_COMMON_CALIBRATION } from './destructionCalibration';
+import { resolveGearMassDeltaGById, resolveGearReflectedInertiaKgM2ById } from './gearInertia';
 
 export type GearMaterialId = (typeof GEAR_MATERIALS)[number]['id'];
 export type MagnetMaterialId = (typeof MAGNET_MATERIALS)[number]['id'];
@@ -360,10 +362,23 @@ export function composeConfigFromMaterials(
   };
   const massDelta = computeWireMagnetMassAdjustmentG(wire, magnet, windingParams);
   if (!massDelta.ok) return massDelta;
-  const massG = applyMassAdjustmentToBaselineG(baseline.chassisBaselineG, massDelta.deltaG);
+  // P3-4 G3 G-R1(人間再承認済み2026-08-19): ギヤ実質量のanchor差分をmassGへ加算する。
+  // V2のchassisBaselineGは標準ギヤを暗黙包含するため絶対質量ではなく差分方式(anchor=POM装備時は
+  // 差分0でmassG不変、V2回帰を厳密に保つ)。幾何はJ経路と同一の単一出典を共有する(gearInertia.ts)。
+  const gearMassDelta = resolveGearMassDeltaGById(selection.gearId);
+  if (!gearMassDelta.ok) return { ok: false, reason: gearMassDelta.reason };
+  const massG = applyMassAdjustmentToBaselineG(baseline.chassisBaselineG, massDelta.deltaG + gearMassDelta.value);
   if (!massG.ok) return massG;
 
   const brushRatios = mapBrushRatios(selection.brushId);
+
+  // P3-4 G3(§10.3・§10.4、Suu_mot3 G3-P2「gameStore後付けを作らない」): ギヤの反射慣性を
+  // **同一のselection.gearIdと合成後のgearRatioから**ここで決める。carConfigの単一出典を
+  // composeConfigFromMaterialsに保ち、store側の後付けによる第二の出典を作らない。
+  // 解決できない素材(密度が未検証かつ設計仮定も持たない)ではフィールドを設定せず、
+  // 既定0扱い(V2回帰と同一)とする——黙って0を書き込むのではなく「載せない」ことで、
+  // 「値が未確認」と「慣性が0」を区別する。
+  const gearInertia = resolveGearReflectedInertiaKgM2ById(selection.gearId, baseCarConfig.gearRatio);
 
   return {
     ok: true,
@@ -381,6 +396,7 @@ export function composeConfigFromMaterials(
       ...baseCarConfig,
       gearEfficiency: gearEfficiency.efficiency,
       massG: massG.massG,
+      ...(gearInertia.ok ? { gearReflectedInertiaKgM2: gearInertia.value } : {}),
     },
   };
 }
@@ -725,4 +741,215 @@ export function assembleD05Config(
   },
 ): DestructionConfig['d05'] {
   return { ...commonPart, ...materialPart };
+}
+
+// ---------------------------------------------------------------------------
+// P3-4 G1a: production DestructionConfig assembler(docs/phase3-p3-4-plan.md v12 §4、
+// 人間再承認一覧A/D/E該当分〈確定裁定分のみ、G1a時点でD06/D09は現行の最小形〉)。
+// 人間再承認2026-08-15(A〜O、15件)。engine v12 §20.5参照。
+// ---------------------------------------------------------------------------
+
+/**
+ * battery: batteryId自身のswitchでnarrowingする。各map関数は既にprofile込みの
+ * 完全なBatteryDestructionConfig variantを返すため{profile,...}の再構築は不要。
+ */
+function resolveBatteryDestructionConfig(batteryId: BatteryMaterialId): BatteryDestructionConfig {
+  switch (batteryId) {
+    case 'battery-alkaline':
+    case 'battery-nickel-metal-hydride':
+      return mapD03DestructionConfig(batteryId);
+    case 'battery-lithium-polymer':
+      return mapD04BatteryDestructionConfig(batteryId);
+  }
+}
+
+/**
+ * d04(延焼側): bodyIdはnull非許容。G1a′ resolver(runOutcomeApplication.ts所有)が
+ * EquipmentLoadout.bodyAssemblyId===nullの場合に'body-none'(実在するBodyMaterialId、
+ * BODY_SCORCH_DELTA_FRACTION_CANDIDATE['body-none']===0)へ明示的に正規化してから渡す
+ * 契約(§4.4、arbiter補足裁定Q1・Q2)。本関数自体はEquipmentDestructionContext.bodyIdが
+ * 既に解決済みの前提で読むのみ。
+ */
+function resolveD04Config(equipmentContext: EquipmentDestructionContext, magnetId: MagnetMaterialId): DestructionConfig['d04'] {
+  return {
+    bodyScorchDeltaFraction: mapBodyScorchDeltaFraction(equipmentContext.bodyId),
+    magnetScorchDeltaFraction: mapMagnetScorchDeltaFraction(magnetId),
+  };
+}
+
+// D06較正値(G-R3、2026-08-19人間再承認済み)。titaniumはnonBreakableのため値を持たない
+// (Record<Exclude<...>,number>により型で保証。spec §7.1「チタンは発火しない」の構造的執行)。
+//
+// **旧値(0.4 / 0.55 / 0.7 N·m)は構造的に到達不能だった**: engineが比較する`frame.loadTorqueNm`は
+// モーター軸換算(`vehiclePhysics.ts`の`loadTorqueUsed = fContact * wheelRadius /(gearRatio * eta)`)で
+// あり、`fContact`はタイヤのグリップ上限(μ×m×g)でcapされる。したがってどれほど強いモーターでも
+// タイヤが伝えられる力以上の負荷はギヤを通らない。実測の両側拘束は
+// **下限(NORMAL_OPERATION 15組合せ最大)=0.003080 N·m / 上限(production-valid攻め構成)=0.013544 N·m**で、
+// 旧値0.4はこの上限の約30倍だった。
+//
+// **相対比は実素材の一次資料にアンカーする(裁定■1条件1)**: 指標は3素材で揃う**引張降伏応力**
+// (曲げ強度はPOM公式資料に記載がなく揃わない)。
+//   - POM  62 MPa   : Celanese公式 Hostaform POM Product Manual、ISO 527、23°C、標準未充填
+//   - PA6  90 MPa   : BASF公式 Ultramid B3S Product Datasheet、ISO 527-1/-2、23°C、50 mm/min、未充填
+//                     (**dry値**。conditioned 45 MPaは採用しない——現行モデルは湿度状態を持たず、
+//                      吸湿差をランタイムへ持ち込むとスコープを拡大するため。実機では吸湿により
+//                      大幅に低下しうる点を承知のうえでの設計上の割り切り〈designAssumption〉。
+//                      なお本値はSuu_mot3が公式資料本文で確認した値であり、alice_mot3側は当該PDFが
+//                      画像のみ〈テキスト層なし・暗号化〉のため独立確認できていない)
+//   - PEEK 98.0 MPa : Victrex公式 PEEK 450G Datasheet、ISO 527-2、23°C、未充填
+//   比 62 : 90 : 98 = 1 : 1.4516… : 1.5806…(採用値の比率誤差 PA6 0.027% / PEEK 0.041%)
+//
+// **絶対スケールは衝撃・疲労換算係数80のdesignAssumption(裁定■1条件2)**:
+//   実効閾値 = 静的強度相当値(POM 0.4 N·m) ÷ 80。
+//   実世界の歯欠けは定常トルクではなく、ジャム・衝突・急停止でミリ秒に集中する**過渡衝撃**と疲労で
+//   起こる。simの`loadTorqueNm`は定常量なので、これを実物の静的強度と直接比較する限りD06は物理的に
+//   正しく「発火しない」。係数80はその過渡増幅を1つの明示的な数値へ抽象化したものであり、
+//   **「POMの歯が静的0.005 N·mで折れる」という主張ではない**。値自体はP3-3-Q15-1の較正値
+//   ディシプリンに従い、体感の最終較正はG5で行う。
+const GEAR_STRENGTH_THRESHOLD_NM: Record<Exclude<GearMaterialId, 'gear-titanium'>, number> = {
+  'gear-pom': 0.005,
+  'gear-nylon-pa6': 0.00726,
+  'gear-peek': 0.0079,
+};
+
+/**
+ * ギヤ材質→DestructionConfig.d06(G1a時点の現行最小形{breakage}のみ、docs v12 §6.3)の
+ * 写像純関数。他のmapD0X…関数(mapD03・mapD04Battery・mapD07)と同じ規律で、対応する
+ * 状態機械(advanceD06)の実装より先に書く——advanceD06はP3-4 G3で追加される(現状fixture・
+ * gameStore配線いずれも無し、本関数はG1a時点では未消費)。G3でDestructionConfig.d06が
+ * toothFatigueExposureNmS等へ拡張される際(人間再承認一覧D)、本関数も合わせて改訂する。
+ */
+// P3-4 G3較正値(計画§9.1 R6確定裁定の候補b、G-R3で再較正、2026-08-19人間再承認済み)。
+// 歯1本を失うのに必要な累積曝露(N·m·s)。この単一の閾値で崩壊速度を直接制御する。
+//
+// **旧値0.5はGEAR_STRENGTH_THRESHOLD_NMと同じスケール誤りを共有していた**: 閾値が0.005級へ
+// 下がると超過分も同スケール(最大0.0085程度)になるため、旧値0.5では1本目まで約59秒を要し、
+// 計画§9(2)の「1本目まで0.5〜10秒」を大きく外れる。G-R3で同一デルタ内の再較正対象とした。
+//
+// **0.0100での理論1本目時間**(上限0.013544 N·m持続時、alice_mot3実測・Suu_mot3照合済み):
+//   POM 約1.170秒(140 step)/ PA6 約1.591秒(191 step)/ PEEK 約1.772秒(213 step)
+//   ——いずれも0.5〜10秒内で、強い素材ほど遅く壊れる順序も保たれる。**体感の最終較正はG5**。
+const TOOTH_FATIGUE_EXPOSURE_NM_S_CANDIDATE = 0.01;
+
+export function mapD06DestructionConfig(gearId: GearMaterialId): { breakage: GearBreakageProfile; toothFatigueExposureNmS: number } {
+  const toothFatigueExposureNmS = TOOTH_FATIGUE_EXPOSURE_NM_S_CANDIDATE;
+  // チタンはspec §7.1.1「チタンは発火しない」によりnonBreakable。曝露閾値自体は型の全域性の
+  // ため常に持たせるが、advanceD06はnonBreakableの時点で発火判定へ進まないため消費されない。
+  if (gearId === 'gear-titanium') return { breakage: { kind: 'nonBreakable' }, toothFatigueExposureNmS };
+  return { breakage: { kind: 'breakable', gearStrengthThresholdNm: GEAR_STRENGTH_THRESHOLD_NM[gearId] }, toothFatigueExposureNmS };
+}
+
+// D09較正値(§17.3、判定文§9(3)で候補承認済み、確定はG5較正sweep+人間commit承認)。
+// P3-4 G4再較正(2026-08-19人間承認、承認原文は下記)。到達可能性の両側拘束sweepにより、
+// 旧候補値(limit 1.0 / 0.2 N·m / 3000 rpm)は**構造的に到達不能**であることが実測で判明したため、
+// **production素材写像経路での構成組み立て**(resolveGarageBuild→
+// resolveProductionMaterialCompositionBaseline→composeConfigFromMaterials)による実測に
+// 基づく値へ再較正した。**この「経路」は構成の組み立て経路であり、走行入口
+// (startCourseRun→stepCourseRun)を意味しない。**
+//
+// 人間承認原文: 「D09 G4再較正の有限バンドルを承認します。loadTorqueThresholdNm=0.005 N·m、
+// rpmThreshold=400 rpm、bearingSeizureGaugeLimit=0.15をproductionへ反映してください。
+// 熱係数・入力式・公開契約は変更せず、feature gate=falseを維持し、G5以降・commit・tag・push・
+// default true化は禁止します。」
+//
+// 実測根拠(両側拘束):
+//  - 下限: NORMAL_OPERATION基準構成×実在5コース×全3電池=15組合せで到達ゲージは厳密に0
+//    (通常運用の包絡線は最大|loadTorqueNm| 0.003464 N·m・最大車軸rpm 309.6であり、閾値の
+//    下余裕はトルク1.44倍・rpm 1.29倍)。金属接触経路(チタン)15組合せの最大ゲージは
+//    0.059694で、limit 0.15に対する安全余裕は2.51倍。
+//  - 上限: 攻めたproduction-valid構成288組合せ中66件がtriggered到達(62件はfinished終端)。
+//    到達ゲージ上限はPOM 0.252160(上余裕1.68倍)・チタン 0.570387(3.80倍)。
+//
+// **上記数値の測定条件(証跡区分、台帳改訂24-補)**: いずれもengine層のno-noise harness
+// (wrapper非経由・RNG=`()=>0.5`固定)での測定であり、production入口の測定ではない。
+// 正典run RNG(mulberry32)での再測定では、NORMAL_OPERATIONはPOM 45走行・チタン45走行とも
+// 発火0件(最大ゲージ0 / 0.059694)、攻め構成はPOM 6/576・チタン 87/576が発火し、
+// **両側拘束は維持されている**。production入口でのPOM正例はclosedStep 333・
+// terminalModes ["D09"]・ratio 0.15030281668535994(詳細は台帳改訂24-補)。
+//
+// **D06との同値は偶然の一致である**: 本閾値0.005 N·mはD06のPOM閾値
+// (`GEAR_STRENGTH_THRESHOLD_NM['gear-pom']`)と同値だが、共通のloadTorqueNmスケール上で
+// 独立に較正した結果であり、D06値を参照していない(D09側は通常運用包絡線0.003464 N·mに対する
+// 下余裕1.44倍から決めた)。**将来どちらか一方だけを変更してよい。**
+//
+// **これはG4暫定較正であり、G5最終較正を先取りするものではない**(Q15-1恒久規則により
+// 最終確定はG5較正sweep+人間commit承認を要する)。
+const BEARING_SEIZURE_GAUGE_LIMIT_CANDIDATE = 0.15;
+// P3-4 G4較正値(§17.3、判定文§9(3)で候補承認済み。確定はG5較正sweep+人間commit承認)。
+const D09_THERMAL_CONDUCTION_COEFFICIENT_CANDIDATE = 0.25; // 無次元/秒、D07確定値と同オーダー
+const D09_THERMAL_DISSIPATION_COEFFICIENT_CANDIDATE = 0.5; // 同上
+const D09_LOAD_TORQUE_THRESHOLD_NM_CANDIDATE = 0.005; // N·m(モーター軸換算、frame.loadTorqueNmと同軸。G4再較正)
+const D09_RPM_THRESHOLD_CANDIDATE = 400; // rpm(車軸換算、§7.4 R15規約は不変。G4再較正)
+const D09_GEAR_SEIZURE_DELTA_FRACTION = 0.15; // 無次元(0-1)、1回の終端でgearのseizureFractionを進める量
+const D09_BEARING_SEIZURE_DELTA_FRACTION = 0.2; // 同上(軸受はgearより直接的被害を受ける設計意図)
+
+/**
+ * 金属ギヤか否か(D09の金属接触経路、spec §7.1「金属ギヤかじり含む」)。
+ * **engineは素材IDを知らない**ため、ここでbooleanへ写像してconfigへ載せる(leaf規則の維持)。
+ * 現行4素材のうち金属はチタンのみで、他3種は樹脂(POM/PA6/PEEK)である。
+ */
+const METAL_GEAR_IDS: ReadonlySet<GearMaterialId> = new Set<GearMaterialId>(['gear-titanium']);
+
+/**
+ * DestructionConfig.d09(P3-4 G4で§7.2の最終形へ拡張)の写像純関数。
+ * G1a時点はbearingSeizureGaugeLimitのみの最小形で、gearIdは未消費だった(シグネチャを先に
+ * 固定し破壊的変更を避ける設計)。G4で metalGearContactAlways 等へ拡張し、gearIdを実際に消費する。
+ */
+export function mapD09DestructionConfig(gearId: GearMaterialId): DestructionConfig['d09'] {
+  return {
+    thermal: {
+      conductionCoefficient: D09_THERMAL_CONDUCTION_COEFFICIENT_CANDIDATE,
+      dissipationCoefficient: D09_THERMAL_DISSIPATION_COEFFICIENT_CANDIDATE,
+    },
+    bearingSeizureGaugeLimit: BEARING_SEIZURE_GAUGE_LIMIT_CANDIDATE,
+    // gearIdはここで初めて消費される(G1a時点は未消費のままシグネチャのみ固定していた)。
+    metalGearContactAlways: METAL_GEAR_IDS.has(gearId),
+    highLoadHighSpeed: {
+      loadTorqueThresholdNm: D09_LOAD_TORQUE_THRESHOLD_NM_CANDIDATE,
+      rpmThreshold: D09_RPM_THRESHOLD_CANDIDATE,
+    },
+    gearSeizureDeltaFraction: D09_GEAR_SEIZURE_DELTA_FRACTION,
+    bearingSeizureDeltaFraction: D09_BEARING_SEIZURE_DELTA_FRACTION,
+  };
+}
+
+/**
+ * EquipmentDestructionContext: assembleDestructionConfigが必要とする、MaterialSelection
+ * (5フィールド、素材購入選択)に含まれない装備由来の追加コンテキスト(docs v12 §4.4)。
+ */
+export interface EquipmentDestructionContext {
+  /**
+   * null不可。alice提供のG1a′ resolver(`deriveMaterialSelectionFromEquipment`相当、
+   * src/store/runOutcomeApplication.ts所有)が未装備時に'body-none'へ正規化してから渡す
+   * (arbiter補足裁定HB-DEC-011ケースA Q1・Q2により精密化。旧v12までの
+   * 「呼び出し側〈brabit〉が正規化」という記述は、独立resolverの新設に伴い訂正した——
+   * interface自体の型・フィールドは無変更、正規化の実施主体のみの変更)。
+   */
+  bodyId: BodyMaterialId;
+}
+
+/**
+ * production DestructionConfig全体のassembler(docs v12 §4.2、確定-2でalice/materials-store
+ * 境界所有と裁定済み)。total pure function(Result型なし)——全入力(MaterialSelection・
+ * EquipmentDestructionContext)は既に型システムで閉じた合法な値であることが保証されている
+ * (各IDはunion型)。composeConfigFromMaterialsがResult型を持つ理由はbaseMotorConfig/
+ * baseCarConfigという「任意の数値」を受け取り範囲外を検出する必要があるためだが、本関数は
+ * 数値レンジの外部入力を一切受け取らない(全フィールドが列挙型IDからの決定的な写像)。
+ *
+ * G1a時点の注記: d06/d09は現行のDestructionConfig最小形(§6.3・§7.2、mapD06/mapD09
+ * DestructionConfig参照)を返す——G3/G4での型拡張(人間再承認一覧D/E)に伴い、本関数の
+ * 戻り値もそれぞれのゲートで追従する。UI側からの呼び出し契機・呼び出し禁止事項(確定-2:
+ * UI/gameStoreが個別mapXxx…を独自再構成することは禁止)はG1b以降の配線時に適用される。
+ */
+export function assembleDestructionConfig(selection: MaterialSelection, equipmentContext: EquipmentDestructionContext): DestructionConfig {
+  return {
+    battery: resolveBatteryDestructionConfig(selection.batteryId),
+    d01: D01_CALIBRATION,
+    d02: D02_CALIBRATION,
+    d04: resolveD04Config(equipmentContext, selection.magnetId),
+    d05: assembleD05Config(mapD05BrushWearConfig(selection.brushId), D05_COMMON_CALIBRATION),
+    d06: mapD06DestructionConfig(selection.gearId),
+    d07: mapD07DestructionConfig(selection.magnetId),
+    d09: mapD09DestructionConfig(selection.gearId),
+  };
 }

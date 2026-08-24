@@ -48,12 +48,19 @@ function validDestructionConfig(overrides: Partial<DestructionConfig> = {}): Des
       recoveryFrames: 6,
       recoveryContactResistanceMultiplier: 1.2,
     },
-    d06: { breakage: { kind: 'breakable', gearStrengthThresholdNm: 1.0 } },
+    d06: { breakage: { kind: 'breakable', gearStrengthThresholdNm: 1.0 }, toothFatigueExposureNmS: 0.5 },
     d07: {
       thermal: { conductionCoefficient: 0.1, dissipationCoefficient: 0.05 },
       irreversible: { kind: 'demagnetizing', magnetHeatGaugeLimit: 0.8, reversibleDroopThreshold: 0.5, reversibleDroopMultiplier: 0.95, demagnetizationDeltaFraction: 0.1 },
     },
-    d09: { bearingSeizureGaugeLimit: 0.9 },
+    d09: {
+        thermal: { conductionCoefficient: 0.25, dissipationCoefficient: 0.5 },
+        bearingSeizureGaugeLimit: 0.9,
+        metalGearContactAlways: false,
+        highLoadHighSpeed: { loadTorqueThresholdNm: 0.2, rpmThreshold: 3000 },
+        gearSeizureDeltaFraction: 0.15,
+        bearingSeizureDeltaFraction: 0.2,
+      },
     ...overrides,
   };
 }
@@ -125,7 +132,8 @@ describe('destructionModes.ts: createInitialDestructionState', () => {
       cumulativeWearDeltaFraction: 0,
       recoveryFramesLeft: 0,
     });
-    expect(state.modes.D06).toEqual({ toothLossCount: 0, firstLossAtT: null, causeLog: null });
+    // P3-4 G3: cumulativeOverloadExposure(§9.1候補b)・meshPhaseAccumulator(§9.4 R7)を追加。
+    expect(state.modes.D06).toEqual({ toothLossCount: 0, firstLossAtT: null, causeLog: null, cumulativeOverloadExposure: 0, meshPhaseAccumulator: 0 });
     expect(state.modes.D07).toEqual({
       magnetHeatGaugeRatio: 0,
       reversibleDroopActive: false,
@@ -505,8 +513,15 @@ describe('destructionModes.ts: advanceDestructionState — P3-0-Q6不変条件�
         recoveryFrames: 99,
         recoveryContactResistanceMultiplier: 9.9,
       },
-      d06: { breakage: { kind: 'nonBreakable' } },
-      d09: { bearingSeizureGaugeLimit: 0.001 },
+      d06: { breakage: { kind: 'nonBreakable' }, toothFatigueExposureNmS: 0.5 },
+      d09: {
+        thermal: { conductionCoefficient: 0.25, dissipationCoefficient: 0.5 },
+        bearingSeizureGaugeLimit: 0.001,
+        metalGearContactAlways: false,
+        highLoadHighSpeed: { loadTorqueThresholdNm: 0.2, rpmThreshold: 3000 },
+        gearSeizureDeltaFraction: 0.15,
+        bearingSeizureDeltaFraction: 0.2,
+      },
     });
 
     const resultA = advanceDestructionState(state, frame, configA, motorRunContext(), DT);
@@ -1195,5 +1210,313 @@ describe('destructionModes.ts: advanceDestructionState — events固定順序(D0
       state = result.state;
     }
     expect(result!.events.map((e) => e.mode)).toEqual(['D01', 'D02', 'D04', 'D05', 'D07']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P3-4 G3: D06状態機械(計画§6・§9.1 R6候補b・§9.4 R7)
+// ---------------------------------------------------------------------------
+
+describe('destructionModes.ts: D06(ギヤ歯欠け、P3-4 G3)', () => {
+  const DT = 1 / 120;
+  const TOTAL_TEETH = 10;
+
+  function vehicleCtx(): DestructionRunContext {
+    return { context: 'vehicle', fireExposureProfile: { bodyEquipped: false, adjacentRolesEquipped: [] }, gearTotalToothCount: TOTAL_TEETH };
+  }
+  function motorCtx(): DestructionRunContext {
+    return { context: 'motor', fireExposureProfile: { bodyEquipped: false, adjacentRolesEquipped: [] }, gearTotalToothCount: null };
+  }
+  function d06Config(overrides: Partial<{ threshold: number; exposure: number; nonBreakable: boolean }> = {}): DestructionConfig {
+    const base = validDestructionConfig();
+    return {
+      ...base,
+      d06: overrides.nonBreakable
+        ? { breakage: { kind: 'nonBreakable' }, toothFatigueExposureNmS: overrides.exposure ?? 0.5 }
+        : { breakage: { kind: 'breakable', gearStrengthThresholdNm: overrides.threshold ?? 0.05 }, toothFatigueExposureNmS: overrides.exposure ?? 0.5 },
+    };
+  }
+  /** 過負荷トルクを与えるvehicle frame。 */
+  function overloadFrame(loadTorqueNm: number, axleOmega = 10): DestructionFrameInput {
+    return {
+      currentA: 2, theoreticalCurrentA: 2, rpm: 500, batteryHeat: 0, shorted: false, chatterFramesLeft: 0,
+      coilCollapsedRisingEdge: false, loadTorqueNm, coilLossW: 0, isChatteringThisFrame: false,
+      angularVelocityRadS: 40, axleAngularVelocityRadS: axleOmega,
+    };
+  }
+  function advanceN(state: DestructionState, frame: DestructionFrameInput, config: DestructionConfig, steps: number, ctx = vehicleCtx()) {
+    let s = state;
+    const events: string[] = [];
+    for (let i = 0; i < steps; i++) {
+      const r = advanceDestructionState(s, frame, config, ctx, DT);
+      s = r.state;
+      for (const e of r.events) events.push(e.mode);
+    }
+    return { state: s, events };
+  }
+
+  it('閾値以下の負荷では曝露が進まず歯も欠けない(0恒等性)', () => {
+    const config = d06Config({ threshold: 0.05 });
+    const { state, events } = advanceN(createInitialDestructionState('nonLipo'), overloadFrame(0.05), config, 600);
+    expect(state.modes.D06.cumulativeOverloadExposure).toBe(0);
+    expect(state.modes.D06.toothLossCount).toBe(0);
+    expect(events).not.toContain('D06');
+  });
+
+  it('閾値超過分が累積し、toothFatigueExposureNmSに達すると歯が1本欠けて曝露が0へリセットされる(候補b)', () => {
+    // 超過分0.1N·m、閾値0.5N·m·s → 5.0秒 = 600step でちょうど1本目
+    const config = d06Config({ threshold: 0.05, exposure: 0.5 });
+    const frame = overloadFrame(0.15);
+    const { state, events } = advanceN(createInitialDestructionState('nonLipo'), frame, config, 600);
+    expect(state.modes.D06.toothLossCount).toBe(1);
+    expect(state.modes.D06.cumulativeOverloadExposure).toBe(0); // リセット
+    expect(events.filter((m) => m === 'D06')).toHaveLength(1);
+    expect(state.modes.D06.firstLossAtT).not.toBeNull();
+  });
+
+  it('1stepで失う歯は最大1本(同一frameでの複数歯損失は構造的に起こらない)', () => {
+    // 曝露閾値を極小にしても1stepでは1本まで
+    const config = d06Config({ threshold: 0.05, exposure: 1e-6 });
+    const r = advanceDestructionState(createInitialDestructionState('nonLipo'), overloadFrame(10), config, vehicleCtx(), DT);
+    expect(r.state.modes.D06.toothLossCount).toBe(1);
+    expect(r.events.filter((e) => e.mode === 'D06')).toHaveLength(1);
+  });
+
+  it('全損(toothLossCount===歯数)でisTotalLoss:trueのeventを返す', () => {
+    const config = d06Config({ threshold: 0.05, exposure: 1e-6 });
+    const frame = overloadFrame(10);
+    let state = createInitialDestructionState('nonLipo');
+    let totalLossEvent: { isTotalLoss?: boolean } | undefined;
+    for (let i = 0; i < TOTAL_TEETH; i++) {
+      const r = advanceDestructionState(state, frame, config, vehicleCtx(), DT);
+      state = r.state;
+      const ev = r.events.find((e) => e.mode === 'D06');
+      if (ev && 'isTotalLoss' in ev && ev.isTotalLoss) totalLossEvent = ev;
+    }
+    expect(state.modes.D06.toothLossCount).toBe(TOTAL_TEETH);
+    expect(totalLossEvent, '全損eventが発行されること').toBeDefined();
+    expect(totalLossEvent!.isTotalLoss).toBe(true);
+  });
+
+  it('isFirstThisSessionは1本目のみtrue', () => {
+    const config = d06Config({ threshold: 0.05, exposure: 1e-6 });
+    const frame = overloadFrame(10);
+    let state = createInitialDestructionState('nonLipo');
+    const flags: boolean[] = [];
+    for (let i = 0; i < 3; i++) {
+      const r = advanceDestructionState(state, frame, config, vehicleCtx(), DT);
+      state = r.state;
+      const ev = r.events.find((e) => e.mode === 'D06');
+      if (ev) flags.push(ev.isFirstThisSession);
+    }
+    expect(flags).toEqual([true, false, false]);
+  });
+
+  it('チタン(nonBreakable)では歯欠けが一切発火しない(spec §7.1.1)', () => {
+    const config = d06Config({ nonBreakable: true, exposure: 1e-6 });
+    const { state, events } = advanceN(createInitialDestructionState('nonLipo'), overloadFrame(100), config, 600);
+    expect(state.modes.D06.toothLossCount).toBe(0);
+    expect(events).not.toContain('D06');
+  });
+
+  it('motor-only(loadTorqueNm/axleAngularVelocityRadS未供給)では曝露も位相も進まない', () => {
+    const config = d06Config({ threshold: 0.05, exposure: 1e-6 });
+    const motorFrame: DestructionFrameInput = {
+      currentA: 2, theoreticalCurrentA: 2, rpm: 500, batteryHeat: 0, shorted: false, chatterFramesLeft: 0,
+      coilCollapsedRisingEdge: false, coilLossW: 0, isChatteringThisFrame: false, angularVelocityRadS: 40,
+    };
+    const { state, events } = advanceN(createInitialDestructionState('nonLipo'), motorFrame, config, 600, motorCtx());
+    expect(state.modes.D06.toothLossCount).toBe(0);
+    expect(state.modes.D06.cumulativeOverloadExposure).toBe(0);
+    expect(state.modes.D06.meshPhaseAccumulator).toBe(0);
+    expect(events).not.toContain('D06');
+  });
+
+  it('meshPhaseAccumulatorは|axleω|×歯数×dt/(2π)で単調増加し、トリガ判定から独立している(チタンでも進む)', () => {
+    const config = d06Config({ nonBreakable: true });
+    const axleOmega = 10;
+    const { state } = advanceN(createInitialDestructionState('nonLipo'), overloadFrame(0, axleOmega), config, 120);
+    const expected = (Math.abs(axleOmega) * TOTAL_TEETH * DT * 120) / (2 * Math.PI);
+    expect(state.modes.D06.meshPhaseAccumulator).toBeCloseTo(expected, 10);
+    expect(state.modes.D06.toothLossCount).toBe(0); // トリガとは独立
+  });
+
+  it('決定論: 同一入力の2回実行が完全一致する(rng非依存)', () => {
+    const config = d06Config({ threshold: 0.05, exposure: 0.05 });
+    const run = () => advanceN(createInitialDestructionState('nonLipo'), overloadFrame(0.15), config, 300);
+    expect(run()).toEqual(run());
+  });
+
+  it('有限性: 長時間走行でも曝露・位相・歯欠け数が有限で非負', () => {
+    const config = d06Config({ threshold: 0.05, exposure: 0.5 });
+    const { state } = advanceN(createInitialDestructionState('nonLipo'), overloadFrame(0.2, 50), config, 3600);
+    expect(Number.isFinite(state.modes.D06.cumulativeOverloadExposure)).toBe(true);
+    expect(state.modes.D06.cumulativeOverloadExposure).toBeGreaterThanOrEqual(0);
+    expect(Number.isFinite(state.modes.D06.meshPhaseAccumulator)).toBe(true);
+    expect(state.modes.D06.meshPhaseAccumulator).toBeGreaterThanOrEqual(0);
+    expect(state.modes.D06.toothLossCount).toBeLessThanOrEqual(TOTAL_TEETH);
+  });
+});
+
+describe('destructionModes.ts: D09(軸受焼付き、P3-4 G4)', () => {
+  const DT = 1 / 120;
+
+  function vehicleCtx(): DestructionRunContext {
+    return { context: 'vehicle', fireExposureProfile: { bodyEquipped: false, adjacentRolesEquipped: [] }, gearTotalToothCount: 10 };
+  }
+  /**
+   * D09 configのテスト用fixture。**production較正値ではない**——G4時点でproduction候補値
+   * (0.2 N·m / 3000 rpm / thermal 0.25・0.5)は実測により到達不能であることが判明しており、
+   * 較正はSuu_mot3へ停止報告済みで未確定である。ここでは状態機械そのものの契約を検証するため、
+   * テスト側で到達可能な値を明示的に与える(production到達域の数値アンカーは較正確定後に別途置く)。
+   */
+  function d09Config(overrides: Partial<{
+    conduction: number; dissipation: number; limit: number; metal: boolean; torque: number; rpm: number;
+  }> = {}): DestructionConfig {
+    const base = validDestructionConfig();
+    return {
+      ...base,
+      d09: {
+        thermal: {
+          conductionCoefficient: overrides.conduction ?? 1,
+          dissipationCoefficient: overrides.dissipation ?? 0.5,
+        },
+        bearingSeizureGaugeLimit: overrides.limit ?? 0.5,
+        metalGearContactAlways: overrides.metal ?? false,
+        highLoadHighSpeed: {
+          loadTorqueThresholdNm: overrides.torque ?? 0.05,
+          rpmThreshold: overrides.rpm ?? 60,
+        },
+        gearSeizureDeltaFraction: 0.15,
+        bearingSeizureDeltaFraction: 0.2,
+      },
+    };
+  }
+  /** vehicle文脈のframe。axleOmegaは車軸角速度[rad/s](rpmThresholdと同一軸、§7.4 R15)。 */
+  function d09Frame(overrides: Partial<{ loadTorqueNm: number; axleOmega: number; lossW: number }> = {}): DestructionFrameInput {
+    return {
+      currentA: 2, theoreticalCurrentA: 2, rpm: 500, batteryHeat: 0, shorted: false, chatterFramesLeft: 0,
+      coilCollapsedRisingEdge: false, coilLossW: 0, isChatteringThisFrame: false, angularVelocityRadS: 40,
+      loadTorqueNm: overrides.loadTorqueNm ?? 0,
+      axleAngularVelocityRadS: overrides.axleOmega ?? 0,
+      gearFrictionLossW: overrides.lossW ?? 0,
+    };
+  }
+  function advanceN(frame: DestructionFrameInput, config: DestructionConfig, steps: number, ctx = vehicleCtx()) {
+    let s = createInitialDestructionState('nonLipo');
+    const events: { mode: string }[] = [];
+    for (let i = 0; i < steps; i++) {
+      const r = advanceDestructionState(s, frame, config, ctx, DT);
+      s = r.state;
+      for (const e of r.events) events.push(e);
+    }
+    return { state: s, events };
+  }
+
+  it('無負荷・非金属では熱ゲージが厳密に0のまま進まない(0恒等性)', () => {
+    const { state, events } = advanceN(d09Frame(), d09Config(), 600);
+    expect(state.modes.D09.bearingHeatGaugeRatio).toBe(0);
+    expect(state.modes.D09.triggered).toBe(false);
+    expect(events.map((e) => e.mode)).not.toContain('D09');
+  });
+
+  it('高負荷でも車軸rpmが閾値以下ならAND条件が成立せずゲージが上がらない', () => {
+    // トルクは閾値0.05を大きく超えるが、車軸角速度は0(=0 rpm < 60 rpm)
+    const { state } = advanceN(d09Frame({ loadTorqueNm: 1.0, axleOmega: 0 }), d09Config(), 600);
+    expect(state.modes.D09.bearingHeatGaugeRatio).toBe(0);
+    expect(state.modes.D09.triggered).toBe(false);
+  });
+
+  it('高速でも負荷が閾値以下ならAND条件が成立せずゲージが上がらない', () => {
+    // 車軸100 rad/s(≒955 rpm > 60 rpm)だが、トルクは閾値0.05以下
+    const { state } = advanceN(d09Frame({ loadTorqueNm: 0.05, axleOmega: 100 }), d09Config(), 600);
+    expect(state.modes.D09.bearingHeatGaugeRatio).toBe(0);
+    expect(state.modes.D09.triggered).toBe(false);
+  });
+
+  it('高負荷かつ高速のANDが成立するとゲージが上昇し、bearingSeizureGaugeLimit到達でD09 eventを1回だけ発行する', () => {
+    const config = d09Config({ limit: 0.5 });
+    const { state, events } = advanceN(d09Frame({ loadTorqueNm: 0.06, axleOmega: 100 }), config, 600);
+    expect(state.modes.D09.triggered).toBe(true);
+    expect(state.modes.D09.bearingHeatGaugeRatio).toBeGreaterThanOrEqual(0.5);
+    expect(state.modes.D09.triggeredAtT).not.toBeNull();
+    // 発火後もstepし続けるが、eventは再発行されない(D07の不可逆到達後と同型)
+    expect(events.filter((e) => e.mode === 'D09')).toHaveLength(1);
+  });
+
+  it('§7.9の正しい負例: 摩擦増加中(0 < ゲージ < limit)のフレームはD09 eventを一切発行しない', () => {
+    // 平衡値 = 入力W × conduction/dissipation。入力を小さくして平衡値をlimit未満に保つ
+    const config = d09Config({ limit: 0.9, conduction: 1, dissipation: 1, metal: true });
+    const { state, events } = advanceN(d09Frame({ lossW: 0.1 }), config, 1200);
+    expect(state.modes.D09.bearingHeatGaugeRatio).toBeGreaterThan(0); // 確かに進行している(非空虚)
+    expect(state.modes.D09.bearingHeatGaugeRatio).toBeLessThan(0.9); // まだ終端未満
+    expect(state.modes.D09.triggered).toBe(false);
+    expect(events.map((e) => e.mode)).not.toContain('D09'); // 中間状態のeventは存在しない
+  });
+
+  it('metalGearContactAlwaysがtrueならAND条件なしでもgearFrictionLossW由来でゲージが上がる(金属ギヤかじり経路)', () => {
+    const config = d09Config({ metal: true, limit: 0.5 });
+    const resin = advanceN(d09Frame({ lossW: 1.0 }), d09Config({ metal: false }), 300);
+    const metal = advanceN(d09Frame({ lossW: 1.0 }), config, 300);
+    expect(resin.state.modes.D09.bearingHeatGaugeRatio).toBe(0); // 樹脂は同一frameでも0
+    expect(metal.state.modes.D09.bearingHeatGaugeRatio).toBeGreaterThan(0);
+  });
+
+  it('causeLogは終端瞬間の生値のみを持ち、解釈済みの原因ラベルを持たない(R4候補A)', () => {
+    const config = d09Config({ limit: 0.3 });
+    const { events } = advanceN(d09Frame({ loadTorqueNm: 0.06, axleOmega: 100 }), config, 600);
+    const d09 = events.find((e) => e.mode === 'D09') as unknown as {
+      causeLog: Record<string, unknown>;
+      gearSeizureDeltaFraction: number;
+      bearingSeizureDeltaFraction: number;
+    };
+    expect(d09).toBeDefined();
+    expect(d09.causeLog.metalGearContactActive).toBe(false);
+    expect(d09.causeLog.highLoadHighSpeedActive).toBe(true);
+    expect(d09.causeLog).not.toHaveProperty('originKind'); // 解釈済みラベルを持たない
+    // 軸受専用の温度計は存在しないため、生ゲージ比のみを出す(D02と同型、捏造しない)
+    expect(d09.causeLog.temperature).toEqual({ kind: 'uncalibratedGauge', ratio: d09.causeLog.bearingHeatGaugeRatio });
+    // configの単一出典値がeventへそのまま複写される(E7、D07と同一パターン)
+    expect(d09.gearSeizureDeltaFraction).toBe(config.d09.gearSeizureDeltaFraction);
+    expect(d09.bearingSeizureDeltaFraction).toBe(config.d09.bearingSeizureDeltaFraction);
+  });
+
+  it('motor-only文脈ではgearFrictionLossW/axleAngularVelocityRadSがundefinedのため発火しない', () => {
+    const motorCtx: DestructionRunContext = {
+      context: 'motor', fireExposureProfile: { bodyEquipped: false, adjacentRolesEquipped: [] }, gearTotalToothCount: null,
+    };
+    const motorFrame: DestructionFrameInput = {
+      currentA: 2, theoreticalCurrentA: 2, rpm: 500, batteryHeat: 0, shorted: false, chatterFramesLeft: 0,
+      coilCollapsedRisingEdge: false, coilLossW: 0, isChatteringThisFrame: false, angularVelocityRadS: 40,
+    };
+    // 金属ギヤ扱いにしてもmotor-onlyには車軸もギヤも存在しないため入力が0になる
+    const { state, events } = advanceN(motorFrame, d09Config({ metal: true }), 600, motorCtx);
+    expect(state.modes.D09.bearingHeatGaugeRatio).toBe(0);
+    expect(state.modes.D09.triggered).toBe(false);
+    expect(events.map((e) => e.mode)).not.toContain('D09');
+  });
+
+  it('熱ゲージは[0,1]へclampされ、過大入力でも1を超えない', () => {
+    const config = d09Config({ metal: true, limit: 1.0, conduction: 1000 });
+    const { state } = advanceN(d09Frame({ lossW: 1000 }), config, 600);
+    expect(state.modes.D09.bearingHeatGaugeRatio).toBeLessThanOrEqual(1);
+    expect(state.modes.D09.bearingHeatGaugeRatio).toBeGreaterThanOrEqual(0);
+  });
+
+  it('入力が止まればゲージはdissipation項で減衰し、負にはならない', () => {
+    const config = d09Config({ metal: true, limit: 1.0 });
+    let s = createInitialDestructionState('nonLipo');
+    for (let i = 0; i < 300; i++) s = advanceDestructionState(s, d09Frame({ lossW: 0.5 }), config, vehicleCtx(), DT).state;
+    const heated = s.modes.D09.bearingHeatGaugeRatio;
+    expect(heated).toBeGreaterThan(0);
+    for (let i = 0; i < 3000; i++) s = advanceDestructionState(s, d09Frame({ lossW: 0 }), config, vehicleCtx(), DT).state;
+    expect(s.modes.D09.bearingHeatGaugeRatio).toBeLessThan(heated);
+    expect(s.modes.D09.bearingHeatGaugeRatio).toBeGreaterThanOrEqual(0);
+  });
+
+  it('決定論: 同一入力の2回実行が完全一致する(rng非依存)', () => {
+    const config = d09Config({ metal: true });
+    const run = () => advanceN(d09Frame({ lossW: 0.3, loadTorqueNm: 0.06, axleOmega: 100 }), config, 300);
+    expect(run()).toEqual(run());
   });
 });
