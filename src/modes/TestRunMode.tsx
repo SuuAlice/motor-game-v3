@@ -1,6 +1,7 @@
 import { TestRunResult } from '../components/TestRunResult';
 import { RaceCanvas } from '../render/RaceCanvas';
 import { TEST_RUN_COURSE_LENGTH_M, useGameStore } from '../store/gameStore';
+import { DestructionHud } from '../components/DestructionHud';
 
 const STATUS_LABELS = {
   ready: '待機中',
@@ -30,6 +31,8 @@ export function TestRunMode() {
 
   return (
     <div className="mx-auto flex w-full max-w-4xl flex-col gap-4 p-4 pb-10">
+      {/* G7-D: 走行中の破壊症状HUD。run未開始の間は何も描かない(コンポーネント内で判定)。 */}
+      <DestructionHud />
       <header className="rounded-2xl bg-slate-900 p-5 text-white">
         <p className="text-xs font-bold tracking-[0.2em] text-sky-300">10 m STRAIGHT TEST</p>
         <div className="mt-2 flex flex-wrap items-end justify-between gap-3">

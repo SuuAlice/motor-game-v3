@@ -55,3 +55,18 @@ dialog.retro-dialog::backdrop {
 @media (prefers-reduced-motion: reduce) {
   .current-particle-path, .slip-smoke { animation: none; }
 }
+
+/* P3-4 G7-E(a11y項目2・8、UI計画§13): フォーカス可視化。
+   すべてのフォーカス可能要素にリングを出し、forced-colors環境でも消えないよう
+   システム色のアウトラインを併記する(背景色由来のリングはforced-colorsで潰れるため)。 */
+:focus-visible {
+  outline: 2px solid #2f5da8;
+  outline-offset: 2px;
+}
+
+@media (forced-colors: active) {
+  :focus-visible {
+    outline: 2px solid Highlight;
+    outline-offset: 2px;
+  }
+}

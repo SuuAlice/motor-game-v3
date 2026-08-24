@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   BGM_MASTER_GAIN,
+  SE_MASTER_GAIN,
   INSTRUMENT_PREVIEW_GAIN,
   MOTOR_MASTER_GAIN,
   REVERB_DRY_MIX,
@@ -17,14 +18,21 @@ describe('mixLevels', () => {
     expect(BGM_MASTER_GAIN + MOTOR_MASTER_GAIN).toBeLessThanOrEqual(1);
   });
 
+  // 破壊モードSEが加わった後の予算はこちらが本体。2チャンネルだけ見て合格させない。
+  it('SE_MASTER_GAINを含めた3チャンネル合計でも1.0を超えない(項目M)', () => {
+    expect(BGM_MASTER_GAIN + MOTOR_MASTER_GAIN + SE_MASTER_GAIN).toBeLessThanOrEqual(1);
+  });
+
   it('両者とも正の値である', () => {
     expect(BGM_MASTER_GAIN).toBeGreaterThan(0);
     expect(MOTOR_MASTER_GAIN).toBeGreaterThan(0);
   });
 
-  it('Task#AUDIO-MIX-FIX2で承認された既知値(0.93/0.07)になっている', () => {
-    expect(BGM_MASTER_GAIN).toBe(0.93);
-    expect(MOTOR_MASTER_GAIN).toBe(0.07);
+  // P3-4 G7-D(項目M、R21、人間再承認済み): SE用の第三チャンネル予算新設に伴い
+  // 0.93/0.07から0.85/0.05へ再配分した。3値の合計上限はdestructionSe.test.tsで固定する。
+  it('項目Mで再配分された既知値(0.85/0.05)になっている', () => {
+    expect(BGM_MASTER_GAIN).toBe(0.85);
+    expect(MOTOR_MASTER_GAIN).toBe(0.05);
   });
 
   // Task#AUDIO-MIX-FIX: INSTRUMENT_PREVIEW_GAINは単独試聴専用で、AudioDemo.tsx側の

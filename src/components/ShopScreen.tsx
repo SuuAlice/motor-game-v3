@@ -30,6 +30,7 @@ import { ALL_MATERIALS, type MaterialId } from '../materials/materials';
 import { canAffordCartPurchase, computeCartTotalG, isPurchasableFamily, MAX_CART_LINE_QUANTITY, type CartLine } from '../store/shopEconomy';
 import { useShopEconomyStore } from '../store/shopEconomyStore';
 import { useGameStore } from '../store/gameStore';
+import { InstrumentShopPanel } from './InstrumentShopPanel';
 
 export function ShopScreen() {
   const setMode = useGameStore((s) => s.setMode);
@@ -598,6 +599,7 @@ export function ShopScreen() {
           </>
         )}
       </div>
+      <InstrumentShopPanel />
     </div>
   );
 }

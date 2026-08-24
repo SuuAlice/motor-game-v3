@@ -16,8 +16,23 @@
 // 分割」から「譜面から実測した最大同時発音voice数で分割」(score.ts
 // computeMaxConcurrentVoices)へ変更しており、体感音量の向上は主にこちらの
 // 分割方式変更による(定数の変更幅自体は小さい)。
-export const BGM_MASTER_GAIN = 0.93;
-export const MOTOR_MASTER_GAIN = 0.07;
+// P3-4 G7-D(項目M、UI計画§8.3・R21、人間再承認済み): 破壊モードSE用の第三チャンネル
+// 予算`SE_MASTER_GAIN`を新設し、既存2チャンネルを0.93/0.07から0.85/0.05へ再配分する。
+// BGM_MASTER_GAIN + MOTOR_MASTER_GAIN + SE_MASTER_GAIN <= 1.0 を保つこと(テストで固定)。
+//
+// **3値とも初期候補**である。G8の人間の耳による較正で最終確定するため、この値を
+// 前提に他の音量値を調整しない(§19の分類表)。
+export const BGM_MASTER_GAIN = 0.85;
+export const MOTOR_MASTER_GAIN = 0.05;
+
+/**
+ * 破壊モードSE(D01〜D09)全体で共有する第三チャンネルの予算(初期候補0.10)。
+ *
+ * 単一のSEバスで管理する——D01/D02・D04炎/D09の継続音と、D02/D03/D04/D05/D06の
+ * イベント音は**モードを横断して同時に鳴りうる**ため、モード内だけの上限では
+ * 予算超過を防げない(§8.3のv7の誤りとJ3是正)。
+ */
+export const SE_MASTER_GAIN = 0.1;
 
 // Task#AUDIO-MIX-FIX(Suu承認): 個別楽器の単独試聴(AudioDemo.tsx
 // handlePlayInstrument)専用のゲイン。「音色確認用の単独試聴レベル」であり、
