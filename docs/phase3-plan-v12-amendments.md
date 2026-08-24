@@ -406,6 +406,263 @@
 
 ---
 
+## P3-4-M-1・P3-4-R1〜R27: P3-4統合実装前計画 正式arbiter技術レビュー判定(engine v10+UI v9クロスレイヤ統合)
+
+- **日付**: 2026-08-14(正式arbiter技術レビュー、送信者名義「arbiter_mot3〈旧称Fable役〉」、Suu_mot3中継確認済み)。arbiter_mot3の設置自体は、人間プロジェクトリードがSuu_mot3との直接会話〈agmsg外〉で2026-08-14に設置を明示し、Suu_mot3が正規性を確認したうえでalice_mot3・brabit_mot3へ中継したものである(A4是正)。
+- **契機**: `docs/phase3-p3-4-plan.md`(engine計画v10)+`docs/phase3-p3-4-ui-plan.md`(UI計画v9)のクロスレイヤ統合レビュー依頼(`docs/phase3-p3-4-fable-review-request.md`)。照合基準はspec.md r3・art-spec.md r3・phase3-plan-v12.md+本台帳・P3-2報告§12・P3-3報告§13。形態A(使い捨てクローン・read-only)。対象コミット`c163033`(タグ`p3-3-complete`付与済みコミットの直後のdocs同期コミット=HEAD)。
+- **総合判定**: **条件付き承認。**実装開始を妨げる必須修正は**M-1(1件、D06クロスラン会計契約の欠落)**のみ。M-1のdocs反映+Suu_mot3照合、および本エントリ「人間再承認一覧A〜O」の承認をもってG1aから実装解禁。
+- **M-1(必須修正)**: 部分損傷ギヤ(例: 9歯欠け)を次走行で再装備すると、走行内`D06Progress.toothLossCount`が0から再スタートするため、(a)エンジンが更に10本欠けるまで終端しない会計破綻、(b)`applyWearToCarConfig`の歯欠け由来効率因子とD06 runtime効果の二重計上、(c)検死ログの「何本目か」の虚偽表示、という3欠陥が式展開で証明された。確定裁定(i)〜(viii): (i)`RunSnapshot.initialDestructionState.modes.D06.toothLossCount`を装備ギヤ個体の永続`WearState.gear.toothLossCount`でseedingする(単一出典)。(ii)`applyWearToMotorConfig`/`applyWearToCarConfig`から歯欠け由来効率因子を削除(seedingと対で実施必須)。(iii)`isTotalLoss`・曝露積分・再武装はseededカウントの上でそのまま動く。(iv)`restoreRunSnapshot`へtoothLossCountの範囲検証(0以上`gearTotalToothCount`未満)を追加。(v)gear全損個体(`toothLossCount>=10`)の装備拒否を追加(collapsed rotor・burnedOut rotorと同輩)。(vi)§9.3の`gearEfficiency`契約を契約0(素材写像[0.60,0.95])/契約1′(Wear反映後base、seizure込み下限≈0.42、歯欠け因子は含まない)/契約2(runtime effective、seeded歯欠け込み最悪≈0.042)の3レンジへ再定義。(vii)負例(α)9歯seed個体の1本目歯欠けで`isTotalLoss:true`、(β)`applyGearDiff`適用後の永続値が厳密10、(γ)`applyWearToCarConfig`是正後は`toothLossCount=9`でも`gearEfficiency`不変、をDoDへ追加。(viii)両計画(engine §9/§12/§13.1/§14/§15/§16、UI §6.2)+本エントリへの反映完了。
+- **人間再承認**: **要(単一一覧A〜O、下表参照)**。詳細は`docs/phase3-p3-4-plan.md`(現行v12)§20.5・`docs/phase3-p3-4-ui-plan.md`側の対応節を参照。
+- **実装ステップ**: ゲート0〜9(**M-1反映〈完了、engine v11、A1〜A5是正はv12〉+人間再承認A〜O待ち、未着手**)。
+- **出典**: `docs/phase3-p3-4-plan.md`(v11、A1〜A5是正はv12)§20〜§20.7に全文引用・反映。判定文原本はSuu_mot3中継の全文agmsgメッセージ(2026-08-14T08:28:38Z)。
+
+各裁定の要旨(詳細・実装コードはengine計画(現行v12)§20またはUI計画該当節を参照):
+
+| 番号 | 要旨 | 人間再承認 |
+|---|---|---|
+| P3-4-R1 | recipeKey搬送は`RunSnapshot`への独立フィールド追加(候補a)。`contractVersion`2→3、v2 snapshot非救済 | 要(A) |
+| P3-4-R2 | recipeKeyへ`MaterialSelection`5フィールド(wireId/magnetId/gearId/batteryId/brushId)を先頭固定順で含める。bodyIdは含めない | 要(A) |
+| P3-4-R3 | D09劣化量供給はconfig固定値→event複写→derive一方向(D07demagnetizationDeltaFractionと同型)を承認 | 要(E) |
+| P3-4-R4 | D09被害記録は候補A(常時両diff発行+生boolean2値のcauseLog)確定、候補B(originKind履歴記録)却下 | 要(E) |
+| P3-4-R5 | D06 runtime etaの2契約分離は方向承認、M-1(vi)の3契約(契約0/1′/2)へ置換 | 不要 |
+| P3-4-R6 | D06トリガは候補b(累積曝露)確定採用、候補d(歯噛合位相)却下 | 要(D) |
+| P3-4-R7 | トルクリップルは承認、専用噛合位相アキュムレータ(`meshPhaseAccumulator`)新設で確定 | 要(D、R6と同一型変更) |
+| P3-4-R8 | D09入力物理式(`gearFrictionLossW`)は既存反射式から代数的に`P_loss=P_in-P_out`と証明され二重計上でないことを確認、正帰還は意図的挙動として受容(C-9でsweep定量化) | 不要(型変更なし) |
+| P3-4-R9 | G統合後は明示cleanupゲートG9でフラグ・分岐削除(候補a)確定 | 不要 |
+| P3-4-R10 | courseRuns/vehicleTestRunsのexport/import新設はP3-4スコープ外と確定 | 不要(新設見送りのため) |
+| P3-4-R11 | NotebookExportはversion 2方式+`StoredExperimentSession`等union(legacy/current混在)を確定 | 要(C) |
+| P3-4-R12 | recipeKey外形検証(`length>0`+envelope形式、payload非再parse)を確定 | 不要 |
+| P3-4-R13 | gear反射慣性式は`J_reflected=J_actual/gearRatio²`(etaを含めない)を確定採用 | 要(G) |
+| P3-4-R14 | gear密度pending対応順序は(c)一次資料検証→(a)designAssumption代用→(b、titanium禁止)を確定 | 要(G) |
+| P3-4-R15 | bearing軸=ギヤ軸(車軸側)、`axleAngularVelocityRadS=ω_motor/gearRatio`を確定 | G(R13)に付随 |
+| P3-4-R16 | D09摩擦増によるstalled優先競合を許容する設計を確定 | 不要 |
+| P3-4-R17 | burnedOut rotorもcollapsed rotorと同様に装備拒否対象と確定 | 要(H) |
+| P3-4-R18〜R26 | UI/brabit所有(D07/D09視覚表現・D01/D07変調なし・D09焼付き音・SE_MASTER_GAIN・motor-only終了ライフサイクル・ガウスメーター一式・staleLease非契約・検死レポート拡張・D06 SE queue)、詳細は`docs/phase3-p3-4-ui-plan.md`側 | J〜O(該当項目のみ) |
+| P3-4-R27 | v12 §1.2のgear-seizure→効率ペナルティ写像(`gearEfficiency`)はP3-4次run反映の主旨に反しないと精密化確定。`computeCompositeGearDamageFraction`(経済専用)の物理経路非参照を構造テストで固定 | 不要(v12契約の精密化、型変更なし) |
+
+**人間再承認が必要な項目の単一一覧(A〜O、判定文§8、重複なし、engine専属A〜I/UI所有J〜O)**:
+
+A. `RunSnapshot.recipeKey`必須追加+`contractVersion`2→3+v2非救済+素材ID5フィールド包含(R1・R2) / B. notebook 3腕への`finalDestructionState`+`recipeKey`必須追加+Legacy union+共通validator / C. `NotebookExportV2`(version1→1/2の2形式、sessions=union)(R11) / D. D06契約変更一式(`cumulativeOverloadExposure`+`meshPhaseAccumulator`+`toothFatigueExposureNmS`+M-1クロスラン会計契約)(R6・R7+M-1) / E. D09契約変更一式(`DestructionConfig.d09`型完成+`D09CauseLog`生boolean2値+derive完成)(R3・R4) / F. `DestructionFrameInput`拡張+`buildVehicleFrameInput`のcarConfig引数追加(破壊的シグネチャ変更) / G. `CarConfig.gearReflectedInertiaKgM2?`追加+`gearInertia.ts`新設(R13・R14) / H. `ValidateEquipmentLoadoutResult`への`destroyedRole`分岐+拒否3種(collapsed rotor/burnedOut rotor〈R17〉/全損gear〈M-1(v)〉) / I. WearState→次run反映の新経路(`wearReflection.ts`+較正定数3種)(R27) / J. `PersistedSaveState`への`InstrumentOwnership`追加+`SCHEMA_VERSION`1→2(R23、UI) / K. `CodexRecordEntry`拡張(R25、UI) / L. ガウスメーター経済接続(R23、UI) / M. `SE_MASTER_GAIN`新設+再配分(R21、UI) / N. motor-only終了ライフサイクル+G9旧経路削除(R22、UI) / O. 音・アート適用例外2件(D07固有SE免除+D01固有SE新規追加)(UI)。
+
+**付帯条件C-1〜C13(判定文§11)・推奨REC-1〜4(判定文§12)**: `docs/phase3-p3-4-plan.md`(現行v12)§20.6・§20.7に全文記載、本台帳では重複記載しない。
+
+**再提出要否**: arbiter再提出は不要——M-1・C-1のdocs反映が判定文の指定どおりである限り。実装解禁の条件: (1)M-1反映(両計画+本台帳)+Suu_mot3照合、(2)人間再承認一覧A〜Oの承認、(3)C-1はG7着手前まで、C-13の台帳追記はM-1と同時。以上の完了後、G1aから着手可。
+
+---
+
+## P3-4-S1〜S10・P3-4-N1〜N3: production config出典分裂 補足裁定(HB-DEC-011ケースA)
+
+- **日付**: 2026-08-16(arbiter_mot3補足裁定、HB-DEC-011ケースA・実行形態A、Suu_mot3中継確認済み)。**判定文§8(外部情報自己申告)の最終確定記述**: **判定作成モデル: claude-fable-5(人間PM確認済み)。起動時system prompt表示: claude-sonnet-5(履歴として記録)。**(判定文§8と不可分一体として本エントリへ同時収録)。影響評価: 判定内容(Q1〜Q8・S-1〜S-10・N-1〜N-3)への影響なし(受領照合・テスト・build/lint/tsc・rg実測はすべて機械的・終了コード付きで記録済み、モデル非依存に再現可能)、役割の有効性への影響なし(arbiter.mdの実体要件は能力で定義され特定モデルに固定されない)、役名`arbiter_mot3`は旧役名Fableとモデル名Fable 5の同名衝突とは無関係に変更なし(役割命名原則の適用対象は役名のみ)。**再レビューは不要**とされた。(履歴: 当初の暫定訂正は「参加直後にclaude-fable-5へ切り替えられており、工程1返信〜受領照合〜判定文起草の一部または全部がFable 5で実行された可能性が高い」という不確定形だったが、後続の人間PM確認により上記確定記述へ上書きされた。)
+- **契機**: G1b着手時、brabit_mot3の実装照会をSuu_mot3が実コード・計画へ照合した結果、正式arbiter条件付き承認(2026-08-14)+人間再承認済みのengine計画・UI計画いずれにも、gameStoreが保持するproduction motorConfig/carConfig(V2由来のraw値)と、P3素材システムが保持する装備個体(EquipmentLoadout/PlayerInventory)の間を橋渡しする契約が一度も定義されていなかったことが判明した(2026-08-15)。alice_mot3が実コード実査を経て`docs/phase3-p3-4-production-config-source-review-request.md`を作成し、Suu_mot3の追補指示(P1: 仕様書変更点欄、P2: §9.5必須回答一覧Q1〜Q8、P3: HEAD/PRESENTED状態分離+G1a現行9件のハッシュ固定)を経て、形態A(使い捨てクローン)ケースAとしてarbiter_mot3へ提出された。
+- **総合判定**: **条件付き承認。** クロスレイヤ契約欠落は実在(独立実測で確認)。G1a′新設(Q6)・resolver新設(Q1〜Q2)・二層命名(Q3)・baseline単一出典(Q4)・beginRun合流(Q5)を、Q1〜Q8裁定+条件S-1〜S-10のとおり承認。G1aの再open範囲はなし(Q7)。人間再承認項目P新設を要する(Q8)。
+- **依頼書の実査に対する矛盾指摘(4点、実測どおり記録。いずれも欠落の存在自体は覆さない——むしろ補強する)**:
+  - **指摘1**: 依頼書§1.1「gameStore.config/carConfigの生成元は2箇所のみ」は実測不一致。実際は少なくとも8系統+1同期経路——(1)起動時bootstrap(`_initialProgress`、gameStore.ts:253前後)、(2)スライダー系action(`clampToCoilWindow`、295-297)、(3)`setGarageSelection`(299-306)、(4)`setLabCarConfig`(308-313)、(5)`loadRecipe`(316-331、configのみ)、(6)`loadCarRecipe`(332-350、依頼書が「loadRecipe(336-344行)」と呼んだ実体はこちら)、(7)`startDiagnosis`(664-685)、(8)`setDiagnosisCarConfig`(687-695)、加えて`useSaveStore.subscribe`同期(746-757)。全系統がV2 raw値であり素材非参照という構造的結論は不変だが、「2箇所」を前提にC-4監査や単一出典契約を設計すると(4)(7)(8)経由の別事実混入を見逃す。
+  - **指摘2**: 依頼書§1.5「productionでこの2値をどこから取るかの規則は存在しない」は部分的に不正確。`chassisBaselineG`には既存の確定出典指示が存在する——materialMapping.ts:281 docstring「assumedGeometry.tsの`resolveChassisBaselineG()`の結果を渡す」+`resolveChassisBaselineG`(assumedGeometry.ts:192-200、'one-cell'→135g/'two-cell'→150g=標準シャーシ110g+電池25g/40g)。`baseGearEfficiency`にも同docstring(materialMapping.ts:283-284)が「既存gearRatio階層のみに基づく値。例: V2互換0.9/0.8/0.74」と半確定の意味論を与えており、`GEAR_PRESETS`(partPresets.ts:12-16、fast 0.9/balanced 0.8/torque 0.74)と値レベルで一致する。未定義だったのは「これらを装備・garage状態から誰がいつ導出するか」という配線規則のみ。
+  - **指摘3**: 依頼書§5候補(a)原文「`resolveGarageBuild`から`chassis.baseMassG`・`gear.gearEfficiency`を取る」は既存契約と数値矛盾。`chassis.baseMassG`は電池質量抜きの60/110/190gであり、凍結契約の135/150g(電池込み・常に標準シャーシ基準)と矛盾する——two-cell標準構成で凍結契約はmassG=150+Δ(wire,magnet)だが、候補(a)原文採用だとmassG=110+Δとなり**電池40gが恒久欠落**する。`scripts/materialSweep.ts:118`の`REPRESENTATIVE_BASELINE {chassisBaselineG:150}`+起動時V2回帰anchor自己検証(同165行以降)はこの150を厳密値として固定しており、候補(a)原文採用は既存sweep自己検証を破る。
+  - **指摘4**: 依頼書冒頭・人間再承認バンドルの特徴づけ「EquipmentDestructionContext解決純関数」は、G1a実測では独立exported関数として不存在(rg実測0件)——`EquipmentDestructionContext`はinterface定義(materialMapping.ts:802-805)+「呼び出し側(brabit)が'body-none'へ正規化」docstring契約のみ。engine計画§4.4自体は独立関数を要求していないためG1a通過判定は覆らないが、特徴づけの不正確さと、`bodyAssemblyId`非null時の`inventory.bodyParts`→`materialId`引き当て経路が明文化されていなかった穴の両方が判明した。
+- **Q1〜Q8裁定(要旨、全文の正準参照は`docs/phase3-p3-4-plan.md` §20.8。`docs/phase3-p3-4-production-config-source-review-request.md` §11は受領履歴、`docs/phase3-p3-4-human-reapproval-bundle.md` P項目は承認範囲の説明であり、いずれも全文の正準参照ではない)**:
+  - **Q1**: resolver(`deriveMaterialSelectionFromEquipment`基準候補、命名はalice裁量)の所有は**alice、`src/store/runOutcomeApplication.ts`**(materials→storeのimport逆転を避けるため`src/materials/`には置かない、P3-2ゲート7の`deriveFireExposureProfileFromLoadout`が先例)。検証順は`validateEquipmentLoadout`→resolverの単一順、resolverは検証を再実装しない。戻り値`{ok:true; selection; equipmentContext} | {ok:false; reason; missingRole}`。bodyId解決を同一resolverへ統合。
+  - **Q2**: `batteryItemId===null`は既存validateEquipmentLoadoutの`missingRole:'battery'`によりresolver到達前に構造的に排除(拒否確定)。`sourceWireMaterialId===null`はresolver内で防御的拒否(`missingRole:'rotor'`、現行到達経路0件)。既定値代用はいずれも却下(P3-0-Q4a「壊れたものは自動的に補われない」)。bodyIdがMaterialSelection対象外であることを確認、resolver戻り値equipmentContextとして同一関数が解決する形へ精密化。
+  - **Q3**: 二層命名を採用——`rawPlayerConfig`(gameStore.config/carConfig系統、指摘1の全8系統+subscribeを含む)/`materialComposedBase`(`composeConfigFromMaterials`出力、Wear反映前)。production素材走行のbeginRunでは、rawPlayerCarConfigはbeginRun時の`resolveGarageBuild(garageSelection)`単一呼び出し結果とし、gameStore.carConfig現在値を直接読まない(帰結: V2ラボ/診断の直接編集値は素材走行へ影響しない、**ゲームプレイ可視のため人間再承認Pに含める**)。recipeKey・DestructionConfig・RunSnapshotはすべて同一selection実体・同一materialComposedBase実体から派生。8段順は段1を「1a単一読取り→1b validateEquipmentLoadout→1c resolver→1d baseline構築→1e composeConfigFromMaterials」へ精密化。
+  - **Q4**: 候補(a)を指摘3のとおり修正採用——`chassisBaselineG := resolveChassisBaselineG(cellSelection)`(`cellSelection`はrawPlayerMotorConfig.batteryVoltage(1.5|3.0)からの全域写像、`resolveGarageBuild`のchassis側は使わない)。`baseGearEfficiency := resolveGarageBuild(garageSelection)`結果のgear.gearEfficiency(gearRatioと同一呼び出し結果)。候補(b)(carConfigからの逆算)は却下(resolveGarageSelectionFromRecipeの非可逆近似汚染リスク)。production構築はalice所有の単一純関数へ集約。recipe load時、recipeCode.tsは素材選択をencodeしない既存設計のため素材走行の出典になり得ず、以後の素材走行は近似garageSelectionを単一出典として整合的に走る(静かな不一致は生じない、gear段の作者意図との差異はPhase 5申し送り)。
+  - **Q5**: 新規`BeginRunConfigError`型は設けない。resolver失敗は既存`missingRole`腕へ、baseline/compose/有限性検証失敗は既存`{ok:false, reason}`腕へ合流。失敗時不変条件(nextRunSequence不変・snapshot不生成・ローカル状態不変)を各経路で個別にテスト固定する。判別union化の実需要が生じた場合はP3-3-Q15-4先例に照らした追加裁定を要求可(無断導入不可)。
+  - **Q6**: **G1a′新設を承認**(既存G1aへの統合は否)。内容: (1)Q1 resolver+テスト、(2)Q4 baseline production構築関数+テスト、(3)二層命名・8段順精密化・§4.4コメント精密化のdocs反映、(4)本裁定の台帳収録。位置はG1aとG1bの間。**G1b着手はG1a′のSuu照合通過+人間再承認P承認後**。G1bの配線対象6段(現存1/2/3/5/6/8)は不変。G6(Wear反映4/seeding 7)も不変。C-4最終DoDをG1a′・G1b・G6の3段階で充足。
+  - **Q7**: **G1aの再open範囲なし。** assembleDestructionConfig・captureRunSnapshot・computeRecipeKey・destructionCalibrationの各公開シグネチャと挙動は一切変更しない。許すのはmaterialMapping.ts内docstringのコメント精密化のみ。実装中にG1aのexportシグネチャ変更が必要と判明した場合は追加裁定を要求すること。
+  - **Q8**: **人間再承認項目Pの新設が必要**(equipment→config導出は新規クロスレイヤ契約、かつQ3(i)/Q4の帰結がゲームプレイ可視のため)。Pは単一項目(G1a′一式)。**arbiter再提出は不要**(本補足裁定〈ケースA〉が該当審査に相当)。
+- **受領照合・独立検証(実測)**: clone HEAD `c1630330f2990cb2ca9e261910e9faade1e6dda2`一致。review-input 11件中5件はHEAD追跡内容とバイト一致、amendments.mdはHEAD内容と差分あり(既知)、P3-4計画/UI計画/人間バンドル/旧レビュー依頼/本補足依頼の5件はHEAD不存在(未追跡DRAFT申告と一致)。G1a現行9件をoverlayした使い捨てvalidation copyで独立再実測: `npm run test`70ファイル/1447件全通過、`npm run build`成功(791.23kB/gzip 221.31kB)、`npm run lint`成功、`tsc -p tsconfig.material-sweep.json --noEmit`成功。検証copyは判定完了まで保持。
+- **条件S-1〜S-10・負例仕様N-1〜N-3**: **全文の正準参照は`docs/phase3-p3-4-plan.md` §20.8**(本改訂で反映済み)。`docs/phase3-p3-4-production-config-source-review-request.md` §11は受領履歴(受領照合・モデル訂正・効力の記録)、`docs/phase3-p3-4-human-reapproval-bundle.md` P項目は人間承認の対象範囲を示す説明であり、いずれも条件・負例本文の正準参照ではない(本台帳では重複記載しない)。S-1〜S-5は実装(production/test)、S-6・S-7はdocs反映(engine計画v13で反映済み・UI計画は次工程)、S-8は本台帳収録(本エントリで充足)、S-9は負例実装、S-10は人間承認Pまでdocs以外へ着手しないこと。
+- **人間再承認**: **承認済み(単一項目P、`docs/phase3-p3-4-human-reapproval-bundle.md`)**。判定の効力は人間プロジェクトリードの承認後に発生する(判定文§9)。**人間プロジェクトリードが2026-08-16、定型文「補足裁定判定文全体（Q1〜Q8・S-1〜S-10・N-1〜N-3）と項目Pを承認します。」で判定文全体+項目Pを明示承認した(Suu_mot3中継確認済み)——判定文§9の効力発生条件は充足された。** Suu_mot3独立照合の要修正9点(改訂17参照)のdocs-only反映もSuu_mot3が再照合し通過、engine計画v13+本台帳改訂17+再承認バンドルPのdocsゲートを正式通過とした。**G1a′実装(resolver・baseline構築関数)が解禁され、alice_mot3が実装、Suu_mot3照合(初回P1〜P3是正+精度追補の3ラウンド)を経た。その過程で発見されたG1a′完了条件の循環はP3-4-Q9エントリ(直後)で解消済み。**
+- **再提出要否**: arbiter再提出は不要(Q8裁定)。ただしS-1〜S-10の条件からの逸脱、またはQ5/Q7の但書事象が生じた場合は追加裁定を要する。
+- **出典**: `docs/phase3-p3-4-production-config-source-review-request.md`(§11に受領記録として全文引用済み)、`docs/phase3-p3-4-human-reapproval-bundle.md`(P項目)。判定文原本はSuu_mot3中継の全文agmsgメッセージ(2026-08-16T10:42:32Z、訂正追記は同10:54:24Z)。
+
+---
+
+## P3-4-Q9: S-5/N-2後半のゲート循環解消(arbiter追加裁定)
+
+- **日付**: 2026-08-16(arbiter_mot3追加裁定、HB-DEC-011ケースAへの追加裁定、Suu_mot3中継確認済み)。
+- **契機**: G1a′初回実装報告に対するSuu_mot3レビューで、engine計画v13 §20.8「条件S-1〜S-10全充足後にG1a′完了」と§3.1「beginRunActionへの配線はG1b、G1bはG1a′完了後に着手」が循環していることが発見された。alice_mot3・Suu_mot3は独断で先送りせず、arbiterへ追加裁定(Q9)を依頼して停止した。
+
+**判定文原文(Suu_mot3中継、2026-08-16T15:06:57Z、無改変引用。P4是正: 見出し改変・圧縮・実装済み/承認済み注記混入を除去し、受領した原文をそのまま保存する)**:
+
+> 【arbiter_mot3 追加裁定判定文Q9: S-5/N-2後半のゲート循環解消】2026-08-16、補足裁定(人間承認済み・発効済み)への追加裁定。判定作成モデル: claude-fable-5(前回一体記録の申告と同一)。判定効力は人間責任者承認後。
+>
+> ■0. 起草側欠陥の自己申告(インシデント記録用)
+> 本循環は、arbiter自身が条件S-1〜S-10の合成を値レベルで試した際に「単一構成での導出経路の整合」のみを検証し、**ゲート境界(所有境界×実装時期)を跨いだ充足可能性の照合を省略した**ことによる起草側欠陥である(arbiter.md §4「条件どうしの合成を値のレベルで試す」・§7「裁定条件の発行前に充足可能性を承認済み計画・木の状態と照合」の不履行)。alice/Suuの停止判断は正当であり、独断先送りしなかった運用は規律どおり。本欠陥は叱責対象ではなく資産として、台帳のQ9エントリへ本節を含めて記録すること。
+>
+> ■1. 裁定(Q9)
+> **(a)を採用する。** G1a′完了条件を純関数側へ限定し、S-5+N-2後半をG1bの必須DoDへ移管する。確定内容:
+>
+> 1. **G1a′完了条件(改訂)**: S-1〜S-4、S-6〜S-10、および負例N-1・N-2前半・N-3の充足をもってG1a′実装完了とみなす。S-5とN-2後半はG1a′の完了条件から除外する。
+> 2. **G1a′で担保する代替保証**: resolver・baseline構築関数・composeが**純関数であること**(引数以外を読まず、store/localStorage/グローバル状態へ一切書き込まないこと)をG1a′テストで固定する——S-5不変条件のうち純関数側で成立しうる唯一の部分は「関数自身が副作用を持たない」ことであり、これをG1a′で先取りする。
+> 3. **G1bへの移管(必須DoD化)**: S-5の失敗時不変条件(nextRunSequence不変・pendingRunEquipmentSnapshot不変・RunSnapshot/RunAccumulator不生成・gameStoreローカルruntime state不変)を、resolver失敗・baseline/compose失敗・有限性検証失敗の各経路について、N-2後半の統合テストとともに**G1bの必須DoD**とする。G1b配線と同一差分内で実装し、G1bのSuu照合対象へ含める。「config構築失敗がrunSequence消費より前に確定する構築順序」の実装指針もS-5からG1bへ移動する。テスト所有はalice(純関数・fixture提供)+brabit(beginRunAction配線・統合テスト本体)の共同とし、C-4監査のG1b段階分と同時充足する。
+> 4. **契約の不変性**: 本裁定はS-5/N-2後半の**検証時期と所有ゲートのみ**を変更し、不変条件の内容・失敗時の要求挙動・エラー型合流(Q5)・値・型は一切変更しない。
+> 5. **(b)は却下**: G1a′をalice+brabit共同ゲートへ拡張する案は、人間承認済みのG1b定義(brabit所有・配線ゲート)を再分割し、所有境界で切ったゲート設計(確定-1〜-6・§3.1)自体を崩す。検証時期の整合という目的に対し過大な構造変更であり、採らない。
+>
+> ■2. 付随回答
+> **(i)人間再承認の要否**: 要——ただし新規バンドル項目の追加ではなく、**本Q9裁定文自体の人間承認**(全裁定共通の効力条件)で足りる。台帳・バンドルには「項目P追補(P-1): S-5/N-2後半の検証時期をG1bへ移管(契約不変、Q9裁定)」として項目Pと一体記録する。
+> **(ii)docs修正文言(骨子、alice転記時はこの意味を保存すること)**:
+> - engine計画v13 §20.8の「条件S-1〜S-10(すべて充足後にG1a′実装完了とみなす)」→「条件S-1〜S-4・S-6〜S-10+負例N-1・N-2前半・N-3の充足後にG1a′実装完了とみなす。S-5および負例N-2後半はQ9裁定によりG1b必須DoDへ移管(契約内容は不変、検証時期のみ移動)」。
+> - S-5本文末尾へ追記: 「検証時期はG1b(beginRunAction配線と同一差分)。G1a′では関数自身の副作用非保有(純関数性)のみを先取りして固定する(Q9裁定)」。
+> - G1bのゲート定義(engine計画§3.1のG1b行またはDoD表)へ追記: 「S-5失敗時不変条件(config系3失敗経路×4不変項目)+N-2後半統合テスト+config構築失敗がrunSequence消費前に確定する構築順序(Q9裁定、alice+brabit共同、C-4のG1b段階分と同時充足)」。
+> - UI計画§6.2/§23相当のG1b節へ同旨を追記。
+> - 台帳へP3-4-Q9として収録(本判定文全文+§0の起草側欠陥記録を含む)。
+> **(iii)arbiter再提出要否**: 不要——本Q9裁定(ケースA追加裁定)で完結する。以後もS-1〜S-10・Q9からの逸脱、または新たな充足不能が発見された場合は、その時点で追加裁定を求めること(独断先送りの禁止は本件で実証された運用どおり)。
+>
+> ■3. Q9対象外3欠陥の扱いについて(確認)
+> Suu検出の3欠陥(baseline関数のresolveGarageBuild再呼出しによる単一呼び出し結果違反/S-4監査の許可ファイル内違反・.tsx見逃し/N-2前半のreason・パス未固定)を「既裁定内の実装欠陥としてalice是正」とする整理に同意する。特に1点目はQ3/Q4が排除対象とした「同一事実の複数読取り」そのものであり、是正後のG1a′ Suu照合で単一呼び出し結果の受け渡し(引数経由)を明示確認すること。3欠陥の是正はQ9裁定の効力発生を待たず進めてよい(既裁定の枠内のため)。
+>
+> ■4. 外部情報自己申告(HB-DEC-013)
+> 本判定は、Suu_mot3の裁定依頼文(2026-08-16T14:22)+arbiter自身の判定文(本セッション内で起草・送信済みの全文)+既読の固定入力(review-input・norm-input・clone・presented-g1a)のみを根拠とする。新たなファイル読取り・clone再接触は行っていない(循環の実在は自文とQ6裁定・UI計画既読内容の照合で確認した)。engine計画v13・台帳改訂17・バンドルPの転記後文書は未受領・未読であり、§2(ii)の修正文言は骨子指定である——転記後のSuu照合で意味保存を確認すること。
+>
+> ■5. 効力
+> 本判定の効力は人間プロジェクトリードの承認後に発生する。承認対象: 本Q9判定文全体(§1裁定+§2付随回答、項目P追補P-1を含む)。全文転送を依頼する。承認まではG1a′は現行の停止状態(純関数提出済み・Suuレビュー保留)を維持してよいが、■3の3欠陥是正は先行してよい。
+
+**docs-only反映状況(引用の外、alice_mot3の後続注記)**:
+- engine計画をv13からv14へ改訂し、§20.8の完了条件をS-1〜S-4・S-6〜S-10+N-1・N-2前半・N-3へ限定(S-5・N-2後半除外)、S-5本文へG1b移管+G1a′での純関数性先取りを追記、新設§20.9へ本判定文を収録、§3.1 G1b行・§22 DoD表へS-5の3失敗経路×4不変項目・N-2後半・runSequence構築順・alice+brabit共同/C-4同時充足を追加した(`docs/phase3-p3-4-plan.md`)。
+- 本台帳へ本エントリ(P3-4-Q9)を新設した。
+- 人間再承認バンドルの項目Pへ「追補P-1」として一体記録した(新規独立項目化はしていない、`docs/phase3-p3-4-human-reapproval-bundle.md`)。
+- **■3の3欠陥是正**: 2026-08-16、alice_mot3がP1(baseline関数のシグネチャ変更、resolveGarageBuild再呼出し排除)・P2(S-4監査を関数本体スコープへ限定+.tsx走査追加)・P3(N-2前半のexact reason固定)として是正済み(Suu_mot3独立確認済み)。続けてSuu_mot3の精度追補指摘(`GarageBuildResult`型を手書きshapeから`ReturnType<typeof resolveGarageBuild>`へ、過大な「型レベルで強制」表現の是正)も反映済み。
+- **■2(ii)のG1a′純関数性テスト実装**: 2026-08-16、`src/store/__tests__/runOutcomeApplication.test.ts`へresolver・baseline構築関数・composeの純関数性(store/localStorage等非参照+引数非破壊+同一入力同一出力)を固定するテストを実装した。
+
+**人間承認(引用の外)**: **人間プロジェクトリードが2026-08-16、定型文「P3-4追加裁定Q9判定文全体（S-5/N-2後半のG1b移管および項目P追補P-1を含む）を承認します。」で明示承認した(Suu_mot3中継確認済み)——Q9は発効した。**
+
+- **人間再承認**: 承認済み(本Q9判定文自体の承認で足りる、新規バンドル項目は作らず`docs/phase3-p3-4-human-reapproval-bundle.md`の項目Pへ追補P-1として一体記録)。
+- **再提出要否**: arbiter再提出は不要(引用■2(iii))。
+- **出典**: Suu_mot3中継の全文agmsgメッセージ(2026-08-16T15:06:57Z、判定文原文)。人間承認はSuu_mot3中継(同日、Suu_mot3正式中継の補足メッセージ2026-08-16T15:07:10Zで確認)。
+
+---
+
+## P3-4-Q10: G1b `beginRunAction`のクロスストア原子的境界(arbiter追加裁定+§8補足裁定)
+
+**経緯**: 2026-08-16T20:01のG1b明示解禁を受けてbrabit_mot3が実装着手した際、UI計画v12が繰り返し参照していた「`beginRunAction`(gameStore.ts所有)」という記述が実コードと食い違うこと(実体は`src/store/saveStore.ts`のP3-0由来の既存actionであり、`gameStore.ts`からは一度も呼ばれていない)を実測で発見した。さらに、config構築(8段順)とrunSequence発行の**原子的境界がどの承認済み計画にも定義されていない**ことが判明した。既存`beginRunAction`は`pureBeginRun`成功時に`writeOrFail`で`saveMeta.nextRunSequence`を永続更新し`applyFreshStateToStore`でruntime 3フィールドも設定するため、これを先に呼んでからconfig構築を行うとQ9/S-5の「`nextRunSequence`不変」「config構築失敗をrunSequence消費前に確定」に直接違反する。brabit_mot3の設計案2版(v1: 既存action先行呼出し、v2: OCC/CAS方式)はいずれもSuu_mot3が差し戻し、事前照合21点(P1〜P21)を経て`docs/phase3-p3-4-g1b-atomic-boundary-review-request.md`(317行・25847 bytes・SHA256 `5ac68f9487e797db94a7048a5143c6036eae23d7dbc7442272bad5d2ef5151d5`)としてarbiter_mot3へ正式提出、2026-08-18に**条件付き承認**の裁定を受けた。続けて§8ブロッキング指摘の解消案についてalice_mot3が設計回答v2を提出し、同日**補足裁定(条件付き承認)**を受けた。
+
+### 本裁定(§1〜§9、2026-08-18)
+
+- **§1(最優先): A1・A2いずれも不採用、第3案A3を採用。** 依頼書§0.1は「(a)commit前にRunSnapshotを作らない/(b)storage I/O失敗を痕跡なく失敗させる/(c)commit後のcapture例外が起きないruntime保証」の3つが同時に満たせないと整理したが、(c)を文字どおり満たす必要はない。「commit後にcaptureが例外を投げ、runはcommit済みだがRunSnapshotを得られない」状態は**本設計に固有の新種の問題ではなく**、プレイヤーがrun開始直後にタブを閉じた場合と構造的に同一であり、**P3-0-Q1の高水位runSequence意味論(「未適用のまま高水位に飛び越された番号は冪等skip、エラーではない」)が既に日常的に許容している**。孤立runSequenceが1件生まれるだけでロールバック不要。必要な不変条件は「例外が発生しても未捕捉のまま伝播させず、saveStore側のruntime状態を『run進行中』のまま取り残さない(=UIが即座に再試行できる)こと」という、より弱いが十分な保証である。**A3はUI契約(a)の再openを一切必要としない**(A2案は不要な代償を払っている)。**A3の必須修正2点**: (i) `captureRunSnapshot`呼出しを`try/catch`で包み、catch時は新設の判別可能な失敗腕`{ok:false, reason:'snapshotCaptureFailed'}`を返す。(ii) catchブロック内でruntime専用フィールド(`currentRunSequence`・`pendingRunEquipmentSnapshot`・`pendingRunSaveId`)を**明示的に`null`へ戻す`set(...)`を呼ぶ**——怠ると`pureBeginRun`の`if (currentRunSequence !== null) return {reason:'runInProgress'}`ガードにより**ページリロードなしには再挑戦できないソフトロック**になる(arbiterが自らA1由来の設計をトレースして発見した具体的負例)。`snapshotCaptureFailed`はUI計画§6.4.1失敗表の新規行とし、UI文言は「この操作は行われませんでした」的な含意を避け**再試行が安全であることを示す文言**とする。これは**契約(a)の修正ではなく契約(a)の対象外の新規契約の追加**として扱う。
+- **§2: trusted narrowing——案(i)局所type assertionを承認。** 案(ii)(`BeginRunResult`拡張)は戻り値型の変更もシグネチャ変更でありP13(iv)「`pureBeginRun`無改修」に反するとして却下。条件: アサーション箇所に「なぜ安全か」の1行コメント(既存`deriveMaterialSelectionFromEquipment`内のtrusted precondition記法と同様式)。追加の機械テストは不要。
+- **§3: compose/有限性失敗腕の§6.4.1既存generic行への合流——承認、ただし表記の精密化を条件とする。** 既存行ラベル「Wear反映後のconfig範囲外」は、既に承認済みのC-3(Wear適用**前**のbase有限性検証)を文字どおりカバーしていない記述不備があるため、「config構築失敗(base有限性検証〈C-3〉およびWear反映後範囲外の両方を含む)」へ改称すること。実装上のハンドラ統合は問題ない。
+- **§4: P16(判別union`RunPreparationRunKind`)・P17(`initialVehicleState`/`initialMotorState`の内部導出)・P18(`GEAR_TOTAL_TOOTH_COUNT`)は全件承認。** P16はP3-1-Q6の「fail-fastより構築不能」原則に沿う。P17はP3-1-Q9の「走行開始時に確定する構成情報はRunSnapshotを唯一の出典とし独立引数として再入力させない」の直接の帰結。P18はarbiterが`src/materials/inventoryItem.ts:27`を実測確認(値10)。
+- **§5: runKind/`equipmentSnapshot.context`の整合——依頼書の「呼出し側の前提とする」設計は不承認、要修正。** `prepareDestructionRun`は公開export純関数であり将来別の呼び出し元から呼ばれうるため、同じ事実を表す2つの独立入力から不整合な組合せを構築できる構造(P3-1-Q6が明示的に排除対象とした「静かな不一致」)が残る。関数内部先頭で`(runKind.kind==='motorOnly') === (equipmentSnapshot.context==='motor')`を明示検証し不一致時は`throw`すること(無効入力に対するthrowは参照透過性を損なわない)、および実際に矛盾する引数を渡してthrowを確認する負例テストを`gameStore.test.ts`へ追加することを条件とする。二重入力自体の設計解消は任意の改善として実装者判断に委ねる。
+- **§6: 新規public型・actionの人間再承認——要(全件)。** `RunPreparationResult`・`RunPreparationCallback`・`beginRunActionWithPreparation`・`prepareDestructionRun`、および`snapshotCaptureFailed`失敗腕(単独の行として明示提示すること)。**追加のみであることは再承認省略の理由にならない**(P3-0-Q1・Q3・Q4a・Q4b・Q5の先例)。
+- **§7: docs反映の順序・所有。** Q10は`src/engine/`の型・関数を一切変更しない(`captureRunSnapshot`・`CaptureRunSnapshotInput`はalice所有・無改修)。したがって**engine計画v14への実体的反映は不要**(相互参照コメント1行で足りる)、実体的反映先は**UI計画(brabit所有)のみ**でv13として改訂。台帳は名前空間`P3-4-Q10`で追記(運用規則追補1)。
+- **§8(ブロッキング指摘)**: 依頼書pseudocodeが呼んでいた`isFiniteMaterialComposedBase`が**リポジトリに実在しない**(arbiterの独立実測で`rg`0件)。「既存C-3同型」という表現は誤解を招くもので、C-3は**要件**であって実装済み関数ではない。この関数がなければG1bはコンパイルすら通らない。配置は`src/materials/materialMapping.ts`(alice所有)が推奨されるが、最終的な配置・命名・検証粒度はalice_mot3の設計判断に委ねる。
+- **§9(効力)**: 本裁定の効力は人間プロジェクトリードの承認後に発生する。arbiter_mot3はコード作成・編集・commit・push・仕様の代行確定のいずれも行っていない。
+
+### §8補足裁定(2026-08-18、`validateMaterialComposedBase`の設計確定)
+
+alice_mot3の設計回答v2に対する**条件付き承認**(条件: P-Q10-A3の人間再承認バンドルからの除外。他は全件そのまま承認)。
+
+- **配置を`recipeKey.ts`とする判断: 承認。** `materialMapping.ts`の現行importには`recipeKey.ts`への依存が一切なく、逆に`recipeKey.ts`は`MaterialSelection`を`materialMapping.ts`から**型のみ**片方向importしている(実測、`recipeKey.ts:5`)。`materialMapping.ts`へ置いてcollectorを共有しようとすると**値import**が新たに必要になり循環が生じる。共有せずフィールド列挙を複製する代案は「検査対象集合と`computeRecipeKey`が読む集合が独立した2箇所に存在し静かに乖離しうる」構造(P3-1-Q6の核心)を再導入する。**arbiter当初推奨(§8時点の`materialMapping.ts`)より優れた判断であり、覆すことに異論はない。**
+- **依存閉包による十分性証明: 承認。** arbiterがalice_mot3の算術を鵜呑みにせず`MotorConfig`(`motorPhysics.ts:38-`、宣言18フィールド)・`CarConfig`(`vehiclePhysics.ts:44-54`、宣言9フィールド)を自ら読み直して独立再計算した結果、27エントリが覆っていないのは`effectiveTurnsRatio`のみであり、これを層2で別途検証することで宣言フィールド全数を過不足なく覆うことを確認した。2関数への分離は不要。
+- **`effectiveTurnsRatio`違反のResult拒否、`encodeRecipe`との機構差: 承認。** 両者は**呼び出し境界の性質が異なる**ため機構が異なって当然であり不整合ではない——`encodeRecipe`のthrowは**プレイヤー操作を経由しない開発者向けAPI誤用検出**であるのに対し、`validateMaterialComposedBase`は**beginRun経路(プレイヤー操作起点)に直接位置する**ため、ここで例外を投げればQ10 §1で指摘した「未捕捉例外がbeginRun経路へ伝播する」問題を再導入しA3裁定の趣旨に反する。候補3(型レベル分離)はP3-3-Q14が「偽の安全」として却下済みの先例をそのまま適用でき再提案の余地はない。
+- **collector非export化+単一出典共有、公開増分をvalidator1件に限定: 承認。** 「検査した集合とthrowする集合が別々の場所に存在し得る」構造そのものを排除する(P3-1-Q6の適用)。件数不変条件(27)を**公開API(`computeRecipeKey`出力文字列の第3セグメント要素数)からのみ**固定するテスト設計は、公開面を増やさずに追加漏れ・重複を検出できる健全な設計。
+- **所有分担(materials=alice、store=brabit、engine変更0件): 承認。** `src/materials/`はPhase 2以来の既存の役割分担と整合する。
+- **人間再承認項目の範囲: 条件付き承認。** P-Q10-A1(新規public関数)承認、P-Q10-A2(内部リファクタ、公開面の増分なし)は再承認対象外として記載のみで可、**P-Q10-A3(配置決定)はバンドルから除外することを条件とする**——「公開面不変の内部配置変更は人間再承認不要」という確立した先例(**P3-1-Q2**「`DestructionRunContext`等の定義元移設」・**P3-1-Q7**「`BatteryDestructionConfig`等の定義元移設」、いずれも「人間再承認: 不要(公開面不変、実装詳細の逸脱)」)と同型であり、人間PMにファイル配置の可否判断を求めることはバンドルの信号対雑音比を下げる。**本項目はarbiter裁定記録および本決定台帳への記載で足りる**(本エントリがその記載である)。P-Q10-A4(検証対象契約)承認。P-Q10-A5は下記の確定文言で確定。
+- **P-Q10-A5確定文言**: 「`effectiveTurnsRatio`が`undefined`でも`1`でもない場合、`validateMaterialComposedBase`はResultとして`{ ok: false, reason: string }`を返す(候補1、判定式は`recipe.motorConfig.effectiveTurnsRatio !== undefined && recipe.motorConfig.effectiveTurnsRatio !== 1`でP3-3-Q14の`encodeRecipe`判定式と同一)。既存`encodeRecipe`(P3-3-Q14裁定によりthrow)との機構差は、呼び出し境界の性質の違い(前者はプレイヤー操作起点のbeginRun経路、後者は開発者向けAPI誤用検出)に基づく意図的な設計であり、beginRun経路で例外を未捕捉のまま伝播させないというarbiter追加裁定Q10 §1(A3)の要求と整合する。」
+- **§8ブロッキング指摘は設計上解消済みと判定。** **G1b着手前の追加条件**: (1)本補足裁定を人間再承認バンドルへ反映すること、(2)**Q10旧§1〜§7の条件はいずれも本補足裁定によって変更・免除されない(すべて有効なまま継続)**、(3)alice v2 §9のテスト(特に**#4「件数固定(公開APIのみ)」・#5「双方向同期(検査集合⊆throw集合およびその逆)」**)が実装され全文出力・終了コードとともに完了報告されること(要約報告は禁止)、(4)決定台帳・人間再承認バンドル・UI計画への実追記をSuu_mot3の照合を経てから行うこと。
+- **効力**: 本補足裁定の効力は人間プロジェクトリードの承認後に発生する。
+
+### 確定した設計(alice_mot3設計回答v2+補足裁定)
+
+| 項目 | 確定内容 |
+|---|---|
+| 公開関数 | `validateMaterialComposedBase(motorConfig: MotorConfig, carConfig: CarConfig): { ok: true } \| { ok: false; reason: string }` |
+| 配置 | `src/materials/recipeKey.ts`(alice所有)——`materialMapping.ts`ではない(値import循環回避) |
+| 検証第1層 | `computeRecipeKey`が読む**27エントリ**(`MotorConfig` 17件+`CarConfig` 10件〈`gearReflectedInertiaKgM2`を含む〉)の有限性 |
+| 検証第2層 | `effectiveTurnsRatio`のbase契約(`undefined \| 1`)、違反時はResult拒否 |
+| 内部helper | `collectRecipeKeyNumericFields`(**非export**、`computeRecipeKey`と単一出典共有) |
+| `computeRecipeKey` | 公開シグネチャ・出力文字列とも**不変**(内部リファクタのみ) |
+| 公開面の増分 | **`validateMaterialComposedBase` 1件のみ** |
+| 呼び出し位置 | `prepareDestructionRun`内、`composed.ok===true`確認後・`computeRecipeKey`の**直前** |
+| 所有分担 | `src/materials/`=alice_mot3、`src/store/saveStore.ts`・`gameStore.ts`=brabit_mot3、`src/engine/`=変更0件 |
+
+**反映先**: `docs/phase3-p3-4-ui-plan.md` v13(§1・§6.4.1・§6.5・§17・§23 DoD23〜27)、`docs/phase3-p3-4-human-reapproval-bundle.md`(項目Q)、`docs/phase3-p3-4-q10-decision-proposals.md`(裁定記録)。engine計画v14は相互参照のみで実体的変更なし。
+
+**出典**: Suu_mot3中継の全文agmsgメッセージ(本裁定=2026-08-18T08:37:44Z、補足裁定=2026-08-18T09:31:28Z、いずれも判定文原文)。
+
+**【後続注記(2026-08-18、人間承認到達)】** 本裁定§9および§8補足裁定の効力発生条件(いずれも「人間プロジェクトリードの承認後に効力が発生する」)は、**2026-08-18に充足した**。人間プロジェクトリードが次の単一定型文で明示承認し、Suu_mot3が原文どおり中継・確認した(受領時刻 2026-08-18T10:22:21Z):
+
+> P3-4追加裁定Q10判定文全体（A3採用・snapshotCaptureFailed新設）および§8補足裁定判定文全体と、項目Q（brabit担当分の新規公開契約およびalice担当分P-Q10-A1・A4・A5）を承認します。
+
+これにより**Q10本裁定・§8補足裁定はいずれも発効し、人間再承認バンドル項目Qの再承認も完了した**(`docs/phase3-p3-4-human-reapproval-bundle.md`の項目Q・承認記録に原文を収録)。**残るG1b着手条件は次の2点のみ**: (1) `validateMaterialComposedBase`(`src/materials/recipeKey.ts`、alice_mot3所有)の実装と、alice設計回答v2 §9のテスト——特に**#4「件数固定(公開APIのみ)」・#5「双方向同期(検査集合⊆throw集合およびその逆)」**——が実装され、**全文出力・終了コードを伴って完了報告されること**(要約報告は禁止)、(2) Suu_mot3によるG1bの明示解禁指示。**Q10旧§1〜§7の条件はいずれも補足裁定・本承認によって変更・免除されず、すべて有効なまま継続する。** production配線・feature gate切替・commit/tag/pushは上記2点が揃うまで引き続き禁止。
+
+---
+
+## P3-4-Q11: RunSnapshotとlive開始入力の単一出典+`finishAssembly`の原子的境界(arbiter追加裁定)
+
+**経緯**: G1b実装のSuu_mot3独立レビューで、`RunSnapshot`と実際のlive開始入力が食い違う箇所(P9・P13)と`finishAssembly`の順序・失敗原子性の問題(P17)が検出された。arbiterは依頼文の指摘を鵜呑みにせず固定入力の実コードで独立確認し、**4件の不一致すべてを事実と認定**した: (1)snapshot側`initialMotorState: REST_STATE`対live側`{...s.simState, omega: FLICK_INITIAL_OMEGA}`/`{...REST_STATE, omega: clampedOmega}`、(2)snapshot側composed由来`createInitialVehicleState(composed.motorConfig, composed.carConfig)`対live側raw由来`createInitialVehicleState(s.config, s.carConfig)`、(3)snapshot.seed(`beginProductionRun`内部生成)対live `_rngState`(`recipeSeed`)/`_vehicleRngState`(別の`createSessionSeed()`)/finishAssemblyのさらに別seed、**加えてliveのrngはxorshift(`nextRandom`)だがリプレイ規約(P3-1-Q9付帯条件(i))はmulberry32であり、アルゴリズム不一致も実在する**、(4)`finishAssembly`は`beginProductionRun`(旧`state.config`を読む)を先に呼び、その後新configをcommitする——snapshotは旧config・liveは新config。
+
+**総合判定**: **条件付き承認**(Q11-2/Q11-3の原則は確定、Q11-1は両候補とも不採用で第3案を裁定、Q11-3はseedの供給経路とRNGアルゴリズム正典化の2点を必須修正、Q11-4は案Aを採用)。人間再承認デルタ4件(Q-R1〜Q-R4)の承認までG1b該当部分(P9/P13/P17)の実装停止を継続する。
+
+### Q11-1: motor-onlyの`RunSnapshot.initialMotorState`(両候補とも不採用、第3案を裁定)
+
+**裁定**: 「REST_STATE維持」でも「post-input state全体の捕捉」でもなく、**`initialMotorState = 静止状態(REST_STATE相当)+omegaのみを開始操作のclamp済み初速で置換した値`**とする。`RunPreparationRunKind`のmotorOnly腕へ`initialOmega: number`を必須追加し、`prepareDestructionRun`が`{...REST_STATE, omega: runKind.initialOmega}`を構築してsnapshotへ入れる。begin成功後のlive `simState`は、返された`runSnapshot.initialMotorState`のdeep copy(`structuredClone`)から初期化する(逆方向の再構築はしない)。
+
+理由: (a)REST_STATE固定は不可——初速はまさに「走行開始時に確定する構成情報」であり、P3-1-Q9によりRunSnapshotが唯一の出典でなければならない。snapshotがomega=0のままでは同一snapshotから初速を再現できず、リプレイ契約が最初の1stepから破れる。既存フィールド内で決定論的に再現する方法は存在しない(seedはrng系列であり初速を運べない)。(b)post-input state全体の捕捉も不可——直前runの過渡状態(`batteryHeat`・`theta`・`chatterFramesLeft`・`coilCollapsed`等)が新runのsnapshot初期値へ漏れ込む。run間の恒久効果は`applyRunOutcome`→`WearState`/個体状態という単一経路に限るというP3-0以来の確立契約に対し、これは**第二の伝搬チャネル**を作る。特に`coilCollapsed=true`の持ち越しは`RotorAssemblyState.collapsed`(個体状態)で管理される既存契約と二重表現になる。`SimState`全体を腕に持たせる型設計も`batteryHeat=0.9`のような不正な初期状態を型上構築可能にするため不採用(P3-1-Q6「構築不能」原則)。
+
+**帰結**: true側の`flickStart`のlive初期化は`{...s.simState, omega}`から`runSnapshot.initialMotorState`のdeep copyへ変わる(過渡状態の持ち越しはtrue側では廃止。false側=V2旧経路は無改修)。`finishAssembly`の現行live初期化は既に`{...REST_STATE, omega: clampedOmega}`でありこの裁定と同型——snapshot側をこれに一致させる形になる。clampの実施主体は呼出し側(gameStore各入口)。`prepareDestructionRun`は防御として`Number.isFinite(initialOmega)`かつ`|initialOmega| <= MAX_FLICK_OMEGA`を検証し、違反時はQ10 §5のcontext不整合と同じ扱いでthrowする(呼出し側プログラミングエラーでありプレイヤー到達経路ではないため、Result腕ではなくthrowが正しい)。
+
+### Q11-2: test-runのlive vehicleState(承認)
+
+**begin成功後のlive `vehicleState`は、返された`runSnapshot.initialVehicleState`のdeep copyから開始し、raw configから再生成してはならない。** 現行の`createInitialVehicleState(s.config, s.carConfig)`はtrue側では削除しsnapshot由来値へ置換する。wrapperが読むconfig(snapshot側composed)とliveの第1step入力が同一出典になる。deep copy必須の理由: live側の状態オブジェクトをsnapshotと参照共有すると、将来の実装変更でin-place変更が入った場合に`accumulator.replaySnapshot`まで汚染される——現行engineは毎stepで新オブジェクトを返すため即座の実害はないが、この安全性を実装の偶然に依存させない。
+
+### Q11-3: live RNG seedとnotebook seed(条件付き承認——原則確定+必須修正2点)
+
+**原則「live `_rngState`/`_vehicleRngState`および`_sessionSeed`(notebook seed)は、返された`runSnapshot.seed`を唯一の出典とする」を承認・確定する。** ただし次の2点を必須修正とする。
+
+**修正(i) seedの供給経路——`beginProductionRun`へ`seed: number`引数を追加する。** 現行(承認済みpseudocode)は`beginProductionRun`が内部で`createSessionSeed()`を呼ぶ。この設計のままだと、`flickStart`(サンドボックス)の`recipeSeed`による再現実行——**プレイヤー可視の既存機能**(「固定初速で再現性を保つ」)——がtrue側で静かに死ぬ(snapshot.seedが常にランダム新規値になり、プレイヤーの指定seedと無関係になる)。よって`beginProductionRun(runKind, seed)`とし、呼出し側が供給する: `flickStart`は`recipeSeed`を、`finishAssembly`は新規生成した`seed`(同じ値を`recipeSeed`へも保存)を、`startTestRun`は`createSessionSeed()`のexact1回呼出し結果を渡す。内部生成は削除する。
+
+**修正(ii) RNGアルゴリズムの正典化——seed一致だけではリプレイは再現しない。** liveのrngはxorshift(`nextRandom`)、確定済みリプレイ等価テスト規約(P3-1-Q9付帯条件(i))はmulberry32である。同じseedでも系列が異なるため、seedの単一出典化だけでは「同一snapshotからの正直な再生」は成立しない。**正典run RNGをmulberry32と確定し、production関数として単一のexport(例: `createRunRng(seed: number): () => number`)を新設する。true側のlive stepはこの正典関数を`runSnapshot.seed`で初期化して用いる。false側(V2旧経路)は`nextRandom`のまま無改修とする。** mulberry32を選ぶ理由: 既存のリプレイ等価テスト(commit済み、P3-1-Q9)が既にmulberry32(snapshot.seed)を規約としており、true側は新規経路なのでliveを規約側へ合わせるのが変更面最小。**所有はalice_mot3**(リプレイ機構の一部)。配置はQ10 §8と同じ委任方式——`src/engine/destructionOrchestration.ts`(RunSnapshot/replay機構の既存の家、V2凍結対象外のPhase 3拡張ファイル)を推奨するが、最終配置はaliceの設計判断に委ねる。**brabit所有の`src/retro/audio/prng.ts`にあるmulberry32を所有境界を越えて共有してはならない**(audio用途とrun物理用途の変更理由が異なる。意図的重複はこのプロジェクトの確立パターン)。
+
+### Q11-4: `finishAssembly`の順序・失敗原子性(案Aを採用)
+
+**案A**: (1)前runのfinalize→(2)omega clamp・seed生成→(3)config永続commit(progress gate、`recipeSeed`込み)→(4)**commit成功時のみ**`beginProductionRun`実行(この時点で`state.config`は新config)→(5)begin成功時のみlive runtimeを`runSnapshot`由来で初期化。
+
+失敗時: (3)のcommit失敗→beginを呼ばない・永続不変・saveStore runtime不変(runSequence未消費)・gameStore runtime不変。(4)のbegin失敗→**configは保存済みのまま保持**・saveStore runtimeはA3/S-5の各裁定どおり(`snapshotCaptureFailed`のみ孤立runSequence1件+runtime3フィールドnullリセット、他は完全不変)・gameStore run runtime不変。(5)は失敗しない。
+
+**案Bの却下理由**: `beginRunActionWithPreparation`(承認済み項目Q)の責務を「run開始」から「プレイヤー構成の永続化+run開始」へ拡張することになり、承認済み契約の大幅再openとcallback契約の複雑化(prospective configの注入)を招く。得られる利益は「config保存済みだがrun未開始」という中間状態の排除だが、**この中間状態は欠陥ではない**——「組み立てを完了した」はrun開始と独立に成立するプレイヤーの耐久的決定であり、購入がrun開始と無関係に確定するのと同格である。
+
+**S-5「gameStoreローカルruntime不変」の適用範囲の明文化**: S-5が指すのは**run runtime**(`_runAccumulator`・`simState`/`vehicleState`・`_sessionSeed`/`_sessionStartedAt`/`_sessionConfig`/`_sessionSamples`・`_rngState`/`_vehicleRngState`・`testRunPhase`/`courseRunPhase`等)のみである。**プレイヤー確定構成(`config`/`carConfig`/`garageSelection`/`recipeSeed`)はS-5の対象外**であり、progress gate(`commitWithProgressGate`)の既存セマンティクス(先に永続化、成功時のみローカル反映)に従う。
+
+現行実装(begin先行)は本裁定により**是正対象**である(snapshotが旧configで作られる欠陥、および「begin成功→config commit失敗で旧config snapshotのrunだけが進行中に残る」経路)。案Aの順序ではこの経路自体が消滅する。
+
+### Q11-5: 公開型/signature変更のexact列挙+人間再承認(Q-R1〜Q-R4)
+
+- **Q-R1**: `RunPreparationRunKind`のmotorOnly腕を`{ kind: 'motorOnly'; initialOmega: number }`へ変更(承認済み型の破壊的変更)。`prepareDestructionRun`はこの値の有限性・`|initialOmega| <= MAX_FLICK_OMEGA`をthrowで防御する。
+- **Q-R2**: `beginProductionRun`のシグネチャを`(runKind: RunPreparationRunKind, seed: number)`へ変更(内部`createSessionSeed()`を削除し呼出し側供給へ)。C-4のexact1捕捉テストは新シグネチャへ追従する。
+- **Q-R3**: 正典run RNG関数(mulberry32、**alice所有**、名称・配置はalice確定——推奨は`src/engine/destructionOrchestration.ts`)の新設(新規public関数)。
+- **Q-R4**(契約文の追加、型変更なし): (a)begin成功後のlive runtime初期化は返された`runSnapshot`のdeep copyを唯一の出典とし、raw configからの再生成・別seedの使用を禁止する。(b)`finishAssembly`の順序=案A。(c)S-5適用範囲の明文化。
+
+**変更しないもの(明示)**: `RunPreparationResult`・`RunPreparationCallback`・`beginRunActionWithPreparation`(saveStore側)・`prepareDestructionRun`のシグネチャ(runKind型の変更が透過するのみ)・`CaptureRunSnapshotInput`/`RunSnapshot`(engine、無改修)・V2凍結engine本体(Q-R3はPhase 3拡張ファイルへの追加であり凍結面に触れない)。
+
+依頼文の「最小変更案(motorOnly腕へ`initialMotorState`必須追加)」について: 方向は採用するが、**腕に持たせるのは`SimState`全体ではなく`initialOmega: number`のみ**とする(Q11-1の理由による縮小)。
+
+### Q11-6: G1b内の是正範囲+追加DoD
+
+**是正範囲(すべてG1b内、brabit所有。ただしQ-R3のみalice所有)**: `flickStart`・`startTestRun`・`finishAssembly`のtrue側分岐、`beginProductionRun`、`RunPreparationRunKind`型、`prepareDestructionRun`のmotorOnly分岐+防御検証。**G6以降への先送りは認めない**(いずれも「同一snapshotからの再現」というG1bのcommit境界契約の一部であるため)。
+
+**追加DoD(UI計画v14 §23の28〜34へ採番)**: DoD-Q11-a(snapshot⇔live一致)・b(再現性機能の保持、`runSnapshot.seed === recipeSeed`)・c(finishAssembly失敗原子性3経路)・d(production経路のリプレイ等価、非ゼロinitialOmega)・e(RNG正典適合、系列先頭N値一致)・f(防御throw負例)・g(false側回帰)。
+
+### 独立報告I-1(裁定せず報告のみ、Q11の範囲外)
+
+`flickStart`・`finishAssembly`は`_sessionConfig: {...s.config}`(rawPlayerMotorConfig)を実験ノートへ記録するが、true側の物理はmaterialComposedBase(素材写像込み)で走る。実験ノートが「rawのプレイヤー入力値」と「実際に物理へ渡ったcomposed値」のどちらを見せるべきかは、spec §1.2(生の数値を見せる/現象は隠さない)に関わる**提示設計**の問題であり、Q11の裁定範囲(単一出典・原子性)の外にある。推測で補わず、独立論点としてSuu_mot3のルーティング(必要ならG7 notebook配線前の別裁定)へ委ねる。
+
+### docs反映先・担当・ゲート・効力
+
+決定台帳: 本エントリ(brabit起草・Suu照合)。UI計画v13→v14: §6.5.4 pseudocode・§6.5.7(live初期化規則、新設)・§6.5.8(finishAssembly順序+S-5適用範囲、新設)・§23 DoD 28〜34。engine計画: Q-R3(正典RNG)の追加のみalice側で追記(配置確定込み)——**2026-08-18にalice_mot3がv14→v15として反映済み(§20.10)**。人間再承認: Q-R1〜Q-R4を項目Qの追補として1回のバンドルで提示(C-13の同梱推奨と同型)。**実装解禁は人間再承認デルタの承認+Suu_mot3照合の後**——それまでP9/P13/P17の停止を継続する。本裁定の効力は人間プロジェクトリードの承認後に発生する。arbiter_mot3はコード作成・編集・test・commit・push・仕様の代行確定のいずれも行っていない。
+
+**出典**: Suu_mot3中継の全文agmsgメッセージ(2026-08-18T14:52:23Z、arbiter_mot3判定文原文、発行2026-08-18T14:49:05Z)。
+
+**【後続注記(2026-08-18、人間承認到達)】** 本裁定の効力発生条件は**2026-08-18に充足した**。人間プロジェクトリードが次の単一定型文で明示承認し、Suu_mot3が原文どおり中継・確認した(受領時刻 2026-08-18T14:57:08Z):
+
+> P3-4追加裁定Q11判定文全体、および人間再承認デルタQ-R1・Q-R2・Q-R3・Q-R4を承認します。
+
+これによりQ11裁定は発効し、Q-R1〜Q-R4の人間再承認条件も充足した。**ただしP9/P13/P17に対応するG1bコード実装は、Suu_mot3の文書照合・明示解禁まで停止を継続する。** Q-R1・Q-R2の依存閉包はpitfalls#2に従い事前実測済み(UI計画v14 §6.5.9): `RunPreparationRunKind`のmotorOnly腕リテラル構築は3ファイル17箇所、`beginProductionRun`は3ファイル15箇所。
+
+**Q-R3の確定内容の同期(2026-08-18、alice計画v15 §20.10)**: 裁定本文はQ-R3の名称・配置を「alice設計判断へ委任(推奨は`src/engine/destructionOrchestration.ts`)」としていたが、alice_mot3が**関数名`createRunRng`・公開signature`export function createRunRng(seed: number): () => number`・配置`src/engine/destructionOrchestration.ts`**として確定し、engine計画をv14→**v15**へ改訂した(§20.10新設。命名根拠=「run(走行)の正典RNG」であることが名称から判別でき、brabit所有のaudio用PRNG〈`src/retro/audio/prng.ts`〉およびテストヘルパ〈`src/engine/__tests__/prng.ts`〉と用途を取り違えないこと。裁定の例示名をそのまま採用)。**この確定により、Q10時点で記していた「`src/engine/`は変更0件」は撤回される**——ただしV2凍結面には触れず、Phase 3拡張ファイルへの追加に閉じる。したがってQ-R1・Q-R2の依存閉包実測における「engineへの波及0件」も、Q-R3の新設分(`destructionOrchestration.ts`へのexport追加、alice所有)を除いた記述として読むこと。**上記は確定内容の同期であり、人間が承認した判定文原文は改変していない。**
+
+---
+
 ## 改訂履歴
 
 - 初版(2026-08-04、v9作成と同時): P3-1裁定7件(Q2・Q4・Q5・Q6・Q7・Q8・Q9、当時は名前空間なし表記)を収録。Q1・Q3は監査のうえ対象外と判断し、その理由を記録。
@@ -421,3 +678,200 @@
 - 改訂10(2026-08-11、正式Fable補足裁定〈P3-3 D01較正、人間プロジェクトリード直接提示、Suu_mot3中継確認済み〉反映、Suu_mot3指示): **P3-3-D01較正確定**エントリを新設し、checkpoint5較正レビューが追加指示したD01(`decayExposureScaleRad`/`minEffectiveTurnsRatio`)の4条件sweepで判明した「現行値1000/0.5は旧条件3〈floor到達可能性〉を満たさない」という実測結果への正式Fable補足裁定を記録した。裁定は値ではなく受け入れ条件3自体を誤りと認定し、現行値1000/0.5を維持したまま確定した。実測で発見された自己制限フィードバック(劣化→トルク定数低下→回転低下→減衰停止)を、Phase 2の銅線+フェライト過熱レジームに続く本プロジェクト2件目の創発的実測知見として受容し、条件3→3′(プラトーの実測固定)・条件1→1′(トリガ+1秒でratio≥0.8)へ改訂した。`minEffectiveTurnsRatio=0.5`の役割を「ゲームプレイ上の到達目標」から「数値安全域のclamp」へ再定性し、Phase 5コース設計への申し送り(急降坂コースの潜在挙動)を記録した。人間再承認は不要(値の変更なし、型契約の変更なし)。Gate 6解禁条件3点は本改訂と同一差分で(1)(2)完了、(3)Suu_mot3照合は2026-08-11通過(P59是正4点の独立再検証込み)——**Gate6(store fixture統合)は正式に解禁された**。
 - 改訂11(2026-08-11、Suu_mot3独立照合〈P59〉指摘4点の是正+Gate6解禁確定、Suu_mot3指示): 改訂10提出後のSuu_mot3独立照合(P59)で発見された精度不足4点をdocs-only(一部testの実装精度)で是正した。(1) D01自己制限プラトー回帰テスト(`materialMapping.test.ts`)がproduction`composeEffectiveMotorConfig`の式を`Math.max(0.5, 1-decayExposureRad/1000)`として再実装しており二重出典だった——`composeEffectiveMotorConfig(...).effectiveTurnsRatio`から取得する形へ修正(`decayExposureRad`の停止assertは現状維持、実測値は変更前と完全一致)。(2) 確定申請表の項目数「全21値」が算術誤りだった——実際には20項目(較正値19項目+較正対象外契約値`coilOverheatGaugeLimit`1項目)であり、`docs/phase3-p3-3-plan.md`・本台帳の該当表現を訂正した。(3) 改訂10・`docs/phase3-p3-3-checkpoint5-implementation-report.md`のGate6解禁条件記述が、Suu_mot3照合(3点目)未完了の時点で「3点すべて充足」「いずれも充足済み」と先取りしていた——(1)(2)完了・(3)Suu照合待ちへ訂正した。(4) D01正式補足裁定はJST 2026-08-11に人間から直接提示されていたが、新規D01裁定・回帰テスト・v16改訂履歴の一部に2026-08-10という誤った日付が残っていた——該当箇所を2026-08-11へ訂正し、前段checkpoint5較正レビュー自体・Q15補足裁定の2026-08-10表記(いずれも正しい)は維持した。P59是正4点の独立再検証(targeted D01テスト・69ファイル1406テスト・build・lint・material-sweep tsc・cmp・diff --check)がすべて成功し、**Suu_mot3がGate6(store fixture統合)を正式に解禁した**。contract値・実測値の変更はなし(docs-onlyの精度是正+テストの出典一本化のみ)。
 - 改訂12(2026-08-11、Gate6〈store fixture統合〉実装完了+Suu_mot3独立レビュー5ラウンド〈P60〜P64〉是正+正式通過、Suu_mot3指示): Gate6解禁(改訂10・11)後、`src/store/__tests__/runOutcomeApplication.test.ts`へD01/D02/D05の3文脈(motor-only/test-run/track-run)fixture統合+原子性負例2件(#71〜#80)を実装した。初回提出後、Suu_mot3独立レビューで5ラウンドの是正を経て2026-08-11に最終照合通過した。**値(D01/D02/D05/D07較正値)は一度も変更していない——是正はすべてtest fixture構築側に閉じている。** (P60)較正値の実質差し替え違反(D01/D02/D05トリガのdestructionConfig個別上書き)+`vehicleSnapshotInput`ヘルパーの出典分裂(overrides.motorConfig/carConfigを渡してもinitialVehicleStateが既定値のまま)+適用前event直接assert欠落の3点を是正。(P61)D02 test-run/track-runの到達不能判断が`batteryInternalResistanceRatio`(既定1.0=アルカリ)を固定した理論分析に基づいており、実在するNiMH(ratio=0.3)という電池素材軸を見落としていたと指摘され、反映すると理論上界V²/(4·R_battery)が7.5W→25Wへ改善した。(P62)「NiMH ratioだけを既定fixtureへ足す」構成はfixture全体のproduction-valid性としては不十分と指摘され、`composeConfigFromMaterials`(正式素材写像パイプライン)を一度通した結果を出発点にする構成へ差し替え、D02 test-run/track-runが成立した(NiMH+magnet-neodymium+wire-silver+brush-precious-metal+gear-titanium+player-adjustable値〈magnetDistanceMm=2等〉)。(P63)「値」だけでなく「値の対応関係」もproduction-valid性の対象であるとの指摘——D01/D05の基底motorConfigがmagnetStrength=1.0(実在磁石写像の最大値neodymium=0.9を超過)であったこと、D01の磁石強度とd07.nonDemagnetizing・D05のbrush素材とd05摩耗設定がそれぞれ同一の素材事実を2つの別経路(手入力)から入力できる構造的な穴を残していたことが指摘され、`pvMotorCarGate6`(`MaterialSelection`明示入力の汎用production-valid fixture builder)へ全#71〜78を統一し、d07は`mapD07DestructionConfig(magnetId)`、d05は`mapD05BrushWearConfig(brushId)`+`assembleD05Config`から同一素材IDより自動導出する構造へ是正した。(P64)P63の全面書き直しで#76〜78から既存の`expect(result.termination).toBeNull()`(D05非終端の直接固定)が脱落していたことが指摘され復元した。2026-08-11、Suu_mot3独立レビューがP64是正を最終確認し、**Gate6(store fixture統合)は正式に通過した(Fable追加裁定は不要と判断)**。Gate7(最終docs/全体DoD確認)が解禁された。人間再承認は不要(値の変更なし、型契約の変更なし、test-onlyの差分)。詳細な是正史・最終構成(素材選択の対応表)は`docs/phase3-p3-3-plan.md` 13.2.1節を参照。
+- 改訂13(2026-08-14、正式arbiter技術レビュー〈P3-4統合実装前計画、engine v10+UI v9クロスレイヤ、送信者名義arbiter_mot3〈旧称Fable役〉、Suu_mot3中継確認済み〉反映、Suu_mot3指示): **P3-4-M-1・P3-4-R1〜R27**エントリを新設し、`docs/phase3-p3-4-plan.md`(v10→v11)・`docs/phase3-p3-4-ui-plan.md`(v9)への正式arbiter技術レビュー判定(条件付き承認)を記録した。arbiter_mot3は「Fable」役の通信名改名であり、人間プロジェクトリードがSuu_mot3との直接会話(agmsg外)で2026-08-14に設置を明示し、Suu_mot3が正規性を確認したうえでalice_mot3・brabit_mot3へ中継したものである(A4是正)。agmsg履歴上は「arbiter_mot3」という名義自体が初出だったため、alice_mot3は一旦全ての関連作業を保留してSuu_mot3へ出自を照会し、上記の回答を受けて正式回答として扱った——pitfalls#1の正規チャネル要件〈人間PM直接提示またはSuu_mot3中継〉自体は当初から満たしていた。必須修正M-1(D06クロスラン会計契約の欠落、部分損傷ギヤ再装備時の会計破綻・二重計上・検死ログ虚偽表示の3欠陥)を式展開込みで記録し、確定裁定(i)〜(viii)を`docs/phase3-p3-4-plan.md`(v11)§9.2・§9.3・§12・§13.1・§14・§15・§16へ反映した。R1〜R27(D06トリガは候補b確定・D09被害記録は候補A確定・gear反射慣性はetaを含めない式で確定・gear密度はtitanium検証優先順で確定・recipeKeyは素材ID5フィールドを先頭に含める形で確定 等)を要旨として収録し、人間再承認が必要な単一一覧A〜O(engine専属A〜I/UI所有J〜O)・付帯条件C-1〜C13・推奨REC-1〜4を記録した。人間再承認バンドル未作成(次工程)。
+- 改訂14(2026-08-15、Suu_mot3最終クロスレイヤ照合A1〜A5是正反映、契約変更なし、Suu_mot3指示): engine計画をv11からv12へ改訂した(`docs/phase3-p3-4-plan.md`)。A1(§7.3フィールド数11→12訂正+REC-1自己矛盾除去)・A2(§14.2をUI §6.2と同一の8段呼び出し順序へ全面同期)・A3(captureRunSnapshotのシグネチャ変更は人間再承認A〈recipeKey追加〉起因でありM-1のseeding自体は追加のシグネチャ変更を伴わない旨を§14.3へ明記)・A4(本台帳P3-4-M-1エントリの日付行+改訂13の出自記述を、正しい経緯「人間PMがSuu_mot3との直接会話で設置を明示→Suu_mot3が正規性確認→alice_mot3・brabit_mot3へ中継」へ訂正)・A5(engine末尾の手続き注記を現状化、正式arbiterレビュー完了済み・残条件はSuu最終照合+人間再承認A〜Oのみである旨を明記)のいずれも反映済み。続けてA6として、本台帳P3-4エントリ内の現行版参照4箇所(人間再承認詳細参照・出典・各裁定要旨・付帯条件/REC詳細)を「現行v12」表記へ同期した(本改訂14自体、および改訂13の履歴記述は書き換えていない)。人間再承認は不要(値・型契約の変更なし、docs-only是正のみ)。Suu_mot3最終クロスレイヤ照合は継続中(本改訂時点では未通過、先取り記載はしない)。
+- 改訂15(2026-08-15、Suu_mot3最終クロスレイヤ照合通過+H1是正+人間再承認一覧A〜O人間承認+G1a初回実装提出〈Suu照合中、完了未宣言〉、Suu_mot3指示): Suu_mot3がengine v12・UI v10・台帳改訂14の最終クロスレイヤ照合を通過と宣言(正式arbiter再提出不要)。続けてSuu_mot3指示により`docs/phase3-p3-4-human-reapproval-bundle.md`を新規作成し、engine v12 §20.5のA〜O15項目を型/変更・理由・影響・所有者・実装時期付きで転記した(契約の追加変更なし)。Suu_mot3のH1是正指摘(バンドルJのmigration失敗分類「validator失敗=corrupted/readRaw」という誤記——readRawがcorrupted側に読めてしまう)を「旧/新validator失敗=corrupted、readRawまたはwriteV16のI/O失敗=storageError」へ訂正した。人間プロジェクトリードが2026-08-15、定型文「A〜O、15件を再承認します。」でA〜O全15項目を明示承認(Suu_mot3中継確認済み)。これにより正式arbiter条件付き承認の発効条件(M-1 docs反映+Suu最終照合+A〜O承認)がすべて充足され、Suu_mot3の指示によりG1a(assembler・確定較正定数集約・EquipmentDestructionContext解決純関数・RunSnapshot capture/recipeKey関連純関数)のみ実装解禁された。alice_mot3がpitfalls#2依存閉包をrg再実測したうえでG1aを実装した: 新設`src/materials/destructionCalibration.ts`(D01/D02/D05共通部の確定較正値集約)・`src/materials/recipeKey.ts`(`computeRecipeKey`、R2確定の素材ID5フィールド先頭込み)、`src/materials/materialMapping.ts`改修(`EquipmentDestructionContext`型・`resolveBatteryDestructionConfig`・`resolveD04Config`・`mapD06DestructionConfig`〈§17.3候補値〉・`mapD09DestructionConfig`〈G1a時点の現行最小形〉・`assembleDestructionConfig`新設)、`src/engine/destructionOrchestration.ts`改修(`RunSnapshot`/`CaptureRunSnapshotInput`/`RestoredRunSnapshot`への`recipeKey: string`追加、`RUN_SNAPSHOT_CONTRACT_VERSION`2→3、`captureRunSnapshot`のrecipeKey受け渡し、`restoreRunSnapshot`のrecipeKey外形検証追加)。d06/d09は`DestructionConfig`の現行最小形(`{breakage}`/`{bearingSeizureGaugeLimit}`)のまま実装し、G3/G4での型拡張(人間再承認一覧D/E)時に対応するmap関数を改訂する設計とした(この段階実装自体はSuu_mot3のG1a独立照合で受理方向と確認済み)。新規テスト25件(`recipeKey.test.ts`新設9件+`materialMapping.test.ts`13件+`destructionOrchestration.test.ts`4件〈うち1件contractVersion期待値2→3の既存修正〉)を追加し、既存1416件+新規25件=全1441件成功、`npm run build`成功(bundle 791.23kB/gzip 221.31kB、旧790.97kB/gzip 221.23kBから微増)、`npm run lint`成功、`npx tsc -p tsconfig.material-sweep.json`成功、`git diff --check`クリーン、`cmp AGENTS.md CLAUDE.md`差分なしを確認した。G1b以降(gameStore配線・feature gate)には一切着手していない。commit/tag/pushは行っていない。
+
+**Suu_mot3のG1a独立照合(初回差分)で要修正3点(P1〜P3)を受領、是正済み(同日、docs-onlyではなくtest/production両方の是正)。** P1(recipeKeyのversion契約違反): `recipeKey.ts`が`carConfig.gearReflectedInertiaKgM2`をG3まで含めず「G3でversion 1→2」とした設計が、計画v12 §13.2の10項目目exact設計+R2確定裁定「RECIPE_KEY_VERSIONは1のまま最終形で開始」に反していた——是正: RECIPE_KEY_VERSION=1を維持したまま、局所的な互換view型(`CarConfig & {readonly gearReflectedInertiaKgM2?: number}`)でG1a時点から10項目目を`?? 0`で読み込む形へ修正し、「G3でversion変更」という注釈は削除した(CarConfig本体はG3まで無改修のまま)。P2(RunSnapshot version負例不足): contractVersion不正値のテストが2のみだったため、`it.each([1,2,4])`で3値すべてがexact `{ok:false,reason:'unsupportedContractVersion'}`になることを固定した。P3(recipeKey validator負例の判定精度): 空文字・非envelope・数値・欠落の負例テストが`ok:false`のみを確認しreasonを検証していなかったため、全負例で`reason==='invalidSchema'`+実装のdetails文言をexact固定するテストへ強化した。是正後、`npm run test -- --run`全件成功・`npm run build`成功・`npm run lint`成功・`npx tsc -p tsconfig.material-sweep.json`成功・`git diff --check`クリーン・`cmp AGENTS.md CLAUDE.md`差分なしを再確認済み。
+
+**2026-08-15、Suu_mot3がP1〜P3是正を独立再実測のうえG1aを正式通過と宣言した。** 確認事項: recipeKeyはRECIPE_KEY_VERSION=1維持・G1a時点からCarConfig 10項目目を`?? 0`で包含・G3でのversion変更記述が残っていないこと(改訂履歴の是正史記述のみ残存)、RunSnapshotの不正contractVersion(1/2/4)全てがexact `unsupportedContractVersion`で拒否されること、recipeKey raw validatorの空/形式不正/数値/欠落がexact `invalidSchema`+details文言で固定されていること、D06/D09最小shape assemblerがproduction呼出し・event発行を伴わない段階実装として受理されG3/G4での原子的拡張という不変条件が維持されていること。Suu独立再実測(test 70ファイル/1447テスト・build 791.23kB/gzip 221.31kB・lint・material-sweep tsc・diff check・cmpすべてPASS)も一致を確認。**次はG1b(brabit所有、gameStore production配線を`productionWiringEnabled=false`の下で実装)が解禁された。alice_mot3の役割はG1bのAPI支援・照合のみであり、G1c/G2以降の実装には進まない。**commit/tag/pushは引き続き禁止。
+
+- 改訂16(2026-08-16、arbiter補足裁定〈HB-DEC-011ケースA、production config出典分裂〉受領+docs-only先行是正、Suu_mot3指示): G1b着手時に発覚したgameStore(V2 raw config)↔素材個体(EquipmentLoadout/PlayerInventory)間の橋渡し契約欠落(2026-08-15発覚)について、alice_mot3作成の`docs/phase3-p3-4-production-config-source-review-request.md`(Suu_mot3のP1〜P3追補指示を経て完成)へarbiter_mot3が補足裁定(HB-DEC-011ケースA)を下した。**P3-4-S1〜S10・P3-4-N1〜N3**エントリ(本改訂の直前に新設)へQ1〜Q8裁定・条件S-1〜S-10・負例仕様N-1〜N-3・依頼書実査への矛盾指摘4点・判定文§8モデル訂正(参加直後にclaude-fable-5へ切替、人間PM申告・人間PM確認済み「判定はFable 5変更後に作成」・再レビュー不要)を記録した。Suu_mot3の指示により、alice_mot3が以下のdocs-only先行是正を実施した: (1) `docs/phase3-p3-4-production-config-source-review-request.md`へ指摘1〜4を「arbiter補足裁定による訂正」として履歴を消さず追記(§1.1の「2箇所」を8系統+subscribeへ、§1.5へ既存半確定契約の反映、候補(a)原文のchassis.baseMassG採用撤回+Q4確定式への置換、EquipmentDestructionContext独立resolver不存在の訂正)、および§11(受領記録)の新設。(2) `docs/phase3-p3-4-human-reapproval-bundle.md`へ項目P(G1a′一式、未承認)を追加、A〜O既承認は変更なしと明記。(3) 本エントリ(P3-4-S1〜S10)の新設。**engine計画をv12からv13へ改訂し(`docs/phase3-p3-4-plan.md`)、S-6(二層命名`rawPlayerConfig`/`materialComposedBase`を§12・§13.1・§13.2・§14.2へ反映)・S-7(C-4最終DoDを§20.6・§22へ反映)・G1a′ゲート新設(§3.1)・resolver設計(§4.4)・baseline単一出典確定式(§12)・§20.8(補足裁定Q1〜Q8+S-1〜S10+N-1〜N3の全文、本裁定の正準参照)をいずれも反映済み。UI計画(`docs/phase3-p3-4-ui-plan.md`)側の反映は次工程(brabit所有)。** **人間再承認は必須(項目P、未承認)。materialMapping.tsのdocstring精密化を含むproduction/test実装は一切行っていない(G1a′実装・G1b以降・commit/tag/pushは禁止継続)。**
+
+**Suu_mot3独立照合(初回)で要修正9点を受領、是正済み(同日、docs-onlyのまま)。** (1)G1aの誤った特徴づけ(「EquipmentDestructionContext解決純関数」)をengine計画冒頭状態・§3.1ゲート表・人間再承認バンドル冒頭状態・依頼書HEAD/PRESENTED節の4箇所で「型定義+呼び出し側正規化のdocstring契約、独立resolverはG1a′で新設」へ訂正。(2)engine計画§20.5の見出し・運用文をA〜Pへ更新(A〜O=既承認・再承認不要、P=新規未承認を明確に分離)。(3)§3.1 G1b行の着手条件を「G1a′完了+Suu照合通過+項目P承認後」へ明記。(4)§20.8 S-7の自己矛盾(「§22は次工程」)を「§20.6・§22ともv13で反映済み」へ訂正。(5)§14.2の時系列矛盾(「G1a′実装前のG1bでは…」という存在しない中間経路の記述)を削除し、G1b開始時点で段1は最初から完成形(1a〜1e)である旨へ一本化。(6)本台帳・依頼書§11・バンドルP項目の相互参照を、engine計画§20.8を条件S/負例N全文の正準参照、依頼書§11を受領履歴、バンドルPを承認範囲の説明、と役割分離。(7)判定作成モデルの記述を最終確定形「判定作成モデル: claude-fable-5(人間PM確認済み)。起動時system prompt表示: claude-sonnet-5(履歴として記録)。」へ統一(暫定表現「Fable 5だった可能性が高い」等は後続PM確認により上書きされた履歴として明記)。(8)本改訂16の「engine計画v12次版への反映は未着手」という記述を、実際にはv13で反映済みという現状と整合させた(上記段落へ反映)。(9)人間承認文を判定文§9と一致させ、バンドル末尾を「補足裁定判定文全体（Q1〜Q8・S-1〜S-10・N-1〜N-3）と項目Pを承認します。」の単一定型文へ変更(A〜Oは既承認で変更なし)。併せて依頼書の候補節番号の誤記(「§3(候補(a))」→正しくは「§5(候補(a))」)を訂正した。
+
+**【注記(2026-08-16、改訂17時点で追記)】** 上段(改訂16冒頭段落)の「人間再承認は必須(項目P、未承認)」は、9点是正着手時点(同日、人間承認到達前)の状態を記録した歴史的記述であり、書き換えていない。実際の承認到達・発効は下記**改訂17**を参照。
+
+- 改訂17(2026-08-16、人間PM承認到達+補足裁定発効+承認状態同期是正、Suu_mot3指示): 上記9点是正の完了報告とほぼ同時に、人間プロジェクトリードが次の単一定型文で明示承認した(Suu_mot3が全文中継、Suu_mot3が独立照合済み): 「補足裁定判定文全体（Q1〜Q8・S-1〜S-10・N-1〜N-3）と項目Pを承認します。」。これにより判定文§9の効力発生条件(人間承認)が充足され、**補足裁定判定文全体(Q1〜Q8・条件S-1〜S-10・負例仕様N-1〜N-3)と人間再承認項目Pはいずれも発効した**。S-10(「人間再承認P〈Q8〉の承認を得るまでG1a′の実装〈docs以外〉に着手しないこと」)はこれにより充足され、G1a′の実装着手条件のうち人間承認の要件は満たされた。Suu_mot3の指示により、alice_mot3が承認状態をdocs-onlyで現状化した: (1) engine計画(`docs/phase3-p3-4-plan.md`)の冒頭状態・§3.1 G1a′行・§20.5運用文/P項目・§20.8発効条件・§22人間承認P行の「P未承認」「本書時点で未承認」をすべて承認済み記述へ更新(v13のまま、版数は変更なし)。(2) 人間再承認バンドル(`docs/phase3-p3-4-human-reapproval-bundle.md`)のタイトル・状態行・P節・末尾の「承認いただきたい範囲」を「承認記録」へ改題し、人間が実際に送った定型文を全角括弧を含めverbatim記録した。A〜O既承認は変更なし。(3) 本改訂17として承認日時・定型文・判定発効・S-10充足を記録し、改訂16の過去時点の「未承認」記述は上記注記のとおり書き換えず履歴として保存した。(4) 依頼書(`docs/phase3-p3-4-production-config-source-review-request.md`)§11の「本書時点では承認済みと記載しない」は提出時点の状態を保存する記述として維持し、現状は本改訂17を参照する旨の注記を追加した(現行状態としての誤読を避けるため)。**残条件**: G1a′実装(docs以外)・G1b以降は、Suu_mot3による本承認状態同期のdocs-only是正への最終照合通過まで、引き続き未着手。production配線・feature gate切替・commit/tag/pushは引き続き禁止。
+
+- 改訂18(2026-08-16、Suu_mot3が承認状態同期是正を独立照合しG1a′実装を解禁→alice_mot3がG1a′実装(resolver・baseline構築関数)→Suu_mot3レビュー3ラウンド(P1〜P3是正・精度追補)→G1a′完了条件の循環発見→arbiter追加裁定Q9→人間承認、の一連の経緯を記録、Suu_mot3指示): Suu_mot3が承認状態同期(改訂17)を独立照合し、engine計画v13+本台帳改訂17+再承認バンドルPのdocsゲートを正式通過とした。これによりG1a′(resolver・production baseline単一出典関数・S-4構造監査・N-1〜N-3負例)の実装が解禁され、alice_mot3が`src/store/runOutcomeApplication.ts`へ`deriveMaterialSelectionFromEquipment`(Q1・Q2)・`resolveProductionMaterialCompositionBaseline`(Q4)を新設、`src/materials/materialMapping.ts`のdocstring精密化(Q1・Q2、`EquipmentDestructionContext`正規化主体の記述)、`src/store/__tests__/runOutcomeApplication.test.ts`へ新規テスト12件(resolver3件・baseline検証6件・N-2前半1件・S-4構造監査3件)を実装し報告した。Suu_mot3の初回targeted照合で要修正3点(P1: baseline関数内での`resolveGarageBuild`再呼出しがQ3/Q4「同一の単一呼び出し結果」契約に反する、P2: S-4監査がALLOWED_CALLERファイルを丸ごと除外し関数外の不正呼出し・`.tsx`ファイルを見逃す偽陰性を持つ、P3: N-2前半の負例が`ok:false`のみでexact reasonを固定していない)を受け、alice_mot3が(1)baseline関数のシグネチャを`(rawPlayerMotorConfig, garageSelection)`から`(rawPlayerMotorConfig, garageBuild: GarageBuildResult)`へ変更し内部での`resolveGarageBuild`呼出しを排除、(2)S-4監査を波括弧対応によるS-3関数本体スコープ限定+`.ts`/`.tsx`双方走査へ改修(N-3検出力確認を「同一ファイル内・関数外」「別`.tsx`ファイル」の2ケースで実施しいずれも赤へ転じることを確認、一時注入は`diff`で完全一致を確認のうえrevert)、(3)N-2前半のexact reason(`'baseline+deltaが既存clamp範囲[80,250]gを外れました: 10'`)固定、をいずれも是正し独立再実測(test 70ファイル/1461テスト・build・lint・material-sweep tsc・diff check・cmp)込みで報告、Suu_mot3のtargeted確認で通過を確認した。続けてSuu_mot3の精度追補指摘(`GarageBuildResult`型を手書きshapeから`ReturnType<typeof resolveGarageBuild>`参照へ、過大な「型レベルで同一呼び出し結果を強制する」というコメントの是正)も反映・確認された。この過程で、Suu_mot3のtargetedレビューがengine計画v13 §20.8「条件S-1〜S-10全充足後にG1a′完了」と§3.1「beginRunActionへの配線はG1b、G1bはG1a′完了後」の**循環**(S-5・N-2後半がbeginRunAction統合を要求するが、その統合自体がG1b以降にしか行えないためG1a′単体では原理的に充足不能)を発見した。alice_mot3・Suu_mot3は独断で先送りせずarbiterへ追加裁定(Q9)を依頼して停止し、arbiterが**P3-4-Q9**(直前エントリ、§0起草側欠陥の自己申告込み)を裁定、人間プロジェクトリードが2026-08-16、定型文「P3-4追加裁定Q9判定文全体（S-5/N-2後半のG1b移管および項目P追補P-1を含む）を承認します。」で明示承認した(Suu_mot3中継確認済み)。**Q9は発効した。** これを受け、alice_mot3がdocs-onlyで以下を反映した: (1) engine計画をv13からv14へ改訂し(`docs/phase3-p3-4-plan.md`)、§20.8の完了条件をS-1〜S-4・S-6〜S-10+N-1・N-2前半・N-3へ限定(S-5・N-2後半除外)、S-5本文へG1b移管+G1a′での純関数性先取りを追記、新設§20.9へQ9判定文全文(§0起草側欠陥含む)を収録、§3.1 G1b行・§22 DoD表へS-5の3失敗経路×4不変項目・N-2後半・runSequence構築順・alice+brabit共同/C-4同時充足を追加。(2) 本台帳へ**P3-4-Q9**エントリ(全文)を新設(直前参照)。(3) 人間再承認バンドル(`docs/phase3-p3-4-human-reapproval-bundle.md`)の項目Pへ「追補P-1」として一体記録(新規独立項目化はしない)。**残条件**: G1a′の完了条件(改訂後のS-1〜S-4・S-6〜S-10+N-1・N-2前半・N-3)充足のうち、Q9が新たに要求する純関数性固定テスト(resolver・baseline構築関数・composeが副作用を持たないこと)の実装はまだ着手していない——次工程。G1b配線・feature gate・commit/tag/pushは引き続き禁止。
+
+- 改訂19(2026-08-16、G1a′純関数性テスト実装→Suu_mot3レビュー(P4〜P8是正)→G1a′正式通過、Suu_mot3指示): alice_mot3がG1a′純関数性テスト(resolver・baseline構築関数・composeの3関数について、store/localStorage等非参照の構造検査+引数非破壊+同一入力同一出力を固定)を実装し報告したところ、Suu_mot3レビューで4点(P4〜P7)を指摘された。**P4**: 台帳P3-4-Qエントリ・engine計画§20.9が「全文」を称しながら見出し改変・§2(ii)圧縮・実装済み/承認済み注記混入を行っていた——台帳のP3-4-Q9エントリを受領原文の無改変引用ブロック(`>`)へ改め、実装状況・人間承認・Suu確認は引用の外の後続注記へ分離し、engine計画§20.9は「全文」の主張を撤回して「自己完結反映」へ見出しを訂正した。**P5**: engine計画§3.1 G1a′行・`runOutcomeApplication.test.ts`のN-2前半直後コメント・冒頭/バンドルの「純関数性テストの実装+Suu照合待ち」という読解可能な曖昧表現(実装未完とも読める)を、それぞれ現状(実装済み)へ更新した(改訂履歴内の歴史的記述である改訂18は書き換えていない)。**P6**: 既存N-1負例(resolverのsourceWireMaterialId=null失敗)・N-2前半負例(composeのbaseline=10失敗)へ、失敗分岐でも入力非破壊+同一入力同一出力が成立することを固定するassertを統合した(純関数保証は成功分岐だけでなく関数全体が対象であるため)。**P7**: `extractNamedFunctionBody`(構造検査の本体抽出ヘルパー)の抽出範囲自体が正しいことを固定する恒久回帰テスト(各対象関数の抽出本体が既知トークン——derive: `sourceWireMaterialId`/`findNarrowedInventoryItemById`、baseline: `resolveChassisBaselineG`、compose: `computeWireMagnetMassAdjustmentG`——を含むことをassert)を新設し、禁止パターン集合を個別store名列挙から`use*Store`一般形+`.getState`/`.setState`/`.subscribe`の汎用アクセスパターン、`Date.now`/`Math.random`/`performance.now`/`crypto`、`process`一般形(env限定を撤回)へ拡張した。検出力確認(`useFooStore.getState()`+`Date.now()`の一時注入→red確認→`diff`で完全一致確認のうえrevert)込みで独立再実測(targeted 2ファイル/240テスト、全体70ファイル/1470テスト・build・lint・material-sweep tsc・diff check・cmp)を報告、Suu_mot3のtargeted確認で通過を確認した。続けて**P8**: 台帳の引用ブロック先頭に、受領原文の見出し行「【arbiter_mot3 追加裁定判定文Q9: S-5/N-2後半のゲート循環解消】」が1行欠落していたことが指摘され、verbatimで補完した。2026-08-16、Suu_mot3がP4〜P8を独立照合し、**G1a′を正式通過と宣言した**(確認証跡: Q9原文がagmsg履歴と台帳引用が見出しを含め一致、targeted 2ファイル/240件PASS、全体70ファイル/1470件PASS、build/lint/material-sweep tsc/diff-check/cmpすべて成功、resolver N-1・compose N-2失敗分岐の非破壊/決定性・3関数の構造純関数検査・抽出範囲回帰・禁止集合拡張・一時注入残存なしを確認)。**G1a′のproduction/test追加編集はここで終了した。次工程はdocs-onlyでのengine計画/台帳の現状更新(本改訂で反映)+brabitのUI計画Q9同期に必要なengine契約情報の提供。G1b production/test・feature gate・commit/tag/pushは、UI計画側のSuu_mot3クロスレイヤ照合通過まで引き続き未解禁。**
+
+- 改訂20(2026-08-18、arbiter追加裁定Q10〈G1b beginRunActionのクロスストア原子的境界〉+§8補足裁定〈`validateMaterialComposedBase`設計確定〉の実反映、Suu_mot3指示): **P3-4-Q10**エントリを新設し、本裁定§1〜§9(A1・A2不採用→A3採用、必須修正2点〈`try/catch`+runtime専用3フィールドの明示nullリセット〉、`snapshotCaptureFailed`新設と契約(a)対象外としての位置づけ、trusted narrowing案(i)、§6.4.1既存generic行の改称条件、P16/P17/P18承認、runKind/context整合assertionの要修正、新規public契約の全件再承認、docs反映先はUI計画のみ)と§8補足裁定(配置`recipeKey.ts`承認、27エントリ十分性証明のarbiter独立再計算、`effectiveTurnsRatio`のResult拒否承認と`encodeRecipe`との機構差の理由、collector非export承認、所有分担承認、**P-Q10-A3の人間再承認バンドルからの除外を条件とする**〈P3-1-Q2・P3-1-Q7の先例と同型〉、P-Q10-A5確定文言、§8ブロッキング指摘の設計上解消判定、G1b着手前の追加条件4点)を条件文を省略せず全文収録した。**A3の配置判断(`materialMapping.ts`ではなく`recipeKey.ts`)は、人間再承認バンドルからは除外され本台帳の裁定記録にのみ残る。** 反映先: `docs/phase3-p3-4-ui-plan.md` v13・`docs/phase3-p3-4-human-reapproval-bundle.md`(項目Q)。engine計画v14は相互参照のみで実体的変更なし。**G1b production/test・feature gate・commit/tag/pushは、項目Qの人間再承認+`validateMaterialComposedBase`のalice実装完了報告+Suu_mot3明示解禁まで引き続き未解禁。**
+- 改訂21(2026-08-18、人間プロジェクトリードによるQ10本裁定・§8補足裁定・項目Qの正式承認、Suu_mot3指示): `P3-4-Q10`エントリ末尾へ**【後続注記(2026-08-18、人間承認到達)】**を追加し、承認定型文の原文・受領時刻(2026-08-18T10:22:21Z、Suu_mot3中継確認済み)・効力発生条件の充足を記録した。**これによりQ10本裁定(§9)・§8補足裁定はいずれも発効し、人間再承認バンドル項目Q(brabit担当分の新規公開契約+alice担当分P-Q10-A1・A4・A5)の再承認も完了した。** あわせて`docs/phase3-p3-4-human-reapproval-bundle.md`(項目Qを承認済みへ更新+承認記録へ原文追記)・`docs/phase3-p3-4-ui-plan.md`(§1項目Q・§17着手条件・末尾手続き注記を承認済みへ現状化)・`docs/phase3-p3-4-q10-decision-proposals.md`(冒頭状態を承認済みへ、提案/未承認表記を履歴として区別)を同期した。**裁定原文・履歴本文は一切改変していない。残るG1b着手条件は、aliceの`validateMaterialComposedBase`実装+指定テスト(#4・#5)の全文出力・終了コードを伴う完了報告と、Suu_mot3のG1b明示解禁指示の2点のみ。** production/test実装・feature gate・commit/tag/pushはいずれも未実施。
+- 改訂22(2026-08-18、arbiter追加裁定Q11〈RunSnapshotとlive開始入力の単一出典+finishAssemblyの原子的境界〉の反映、brabit_mot3起草): `P3-4-Q11`エントリを新設し、Q11-1〜Q11-6・Q-R1〜Q-R4・独立報告I-1を条件文を省略せず全文収録した。**arbiterは依頼文の指摘を鵜呑みにせず固定入力の実コードで独立確認し、4件の不一致(motor初速・test-run vehicleState出典・seed/RNGアルゴリズム・finishAssembly順序)すべてを事実と認定した。** 特にQ11-1は依頼した2候補をいずれも不採用とし第3案(REST_STATE+omegaのみ置換、`initialOmega`を腕へ追加)を裁定、Q11-3はseed単一出典化だけでは足りずRNGアルゴリズム(xorshift対mulberry32)の正典化が必要と指摘した。UI計画はv13→v14へ改訂済み(§6.5.4・§6.5.7新設・§6.5.8新設・§23 DoD 28〜34)。**Q-R1〜Q-R4の人間再承認+Suu_mot3照合まで、P9/P13/P17に対応するG1b実装は停止を継続する。** production/test実装・commit/tag/push・feature gate true化はいずれも未実施。
+- 改訂23(2026-08-18、人間プロジェクトリードによるQ11裁定・Q-R1〜Q-R4の正式承認、Suu_mot3指示): `P3-4-Q11`エントリ末尾へ**【後続注記(2026-08-18、人間承認到達)】**を追加し、承認定型文の原文・受領時刻(2026-08-18T14:57:08Z、Suu_mot3中継確認済み)・効力発生条件の充足・Q-R1/Q-R2の依存閉包実測結果を記録した。あわせて`docs/phase3-p3-4-ui-plan.md`をv13→v14へ改訂(§6.5.4 pseudocode・§6.5.7 live初期化規則・§6.5.8 finishAssembly順序とS-5適用範囲・§6.5.9 依存閉包・§23 DoD 28〜34・§1追補Q-R1〜Q-R4の承認記録)、`docs/phase3-p3-4-human-reapproval-bundle.md`へ項目Q追補(Q-R1〜Q-R4)を追記した。**独立報告I-1(実験ノートのconfig出典曖昧性)はQ11の裁定範囲外であり、未裁定・後続ルーティング待ちとして独立に保持する(本台帳では裁定として扱わない)。** P9/P13/P17のコード実装はSuu_mot3の文書照合・明示解禁まで停止継続。commit/tag/push・feature gate true化はいずれも未実施。
+
+- 改訂24(2026-08-19、P3-4 G4 D09較正の再較正〈到達不能の是正〉、人間承認済み、Suu_mot3指示): G4(D09軸受焼付き状態機械)の実装後、§17.3の既存候補値(`highLoadHighSpeed.loadTorqueThresholdNm = 0.2` N·m、車軸`rpmThreshold = 3000`、`bearingSeizureGaugeLimit = 1.0`)が**production-valid構成では構造的に到達不能**であることをalice_mot3のread-only sweepが実測した。閾値2値だけの再較正では解決不能であることも併せて反証済みである(D09のゲージ入力式において2閾値はいずれも入力の単調非増加パラメータであり、閾値0〈validatorが拒否する値〉が入力の上限。その最良ケースでも到達ゲージは0.394〈実ループ〉にとどまり、limit 1.0に届かない)。人間プロジェクトリードは、まず`bearingSeizureGaugeLimit`を追加対象としたread-only有限sweepを承認し、続いて提出された有限バンドルを次の定型文で承認した(Suu_mot3中継確認済み): 「D09 G4再較正の有限バンドルを承認します。loadTorqueThresholdNm=0.005 N·m、rpmThreshold=400 rpm、bearingSeizureGaugeLimit=0.15をproductionへ反映してください。熱係数・入力式・公開契約は変更せず、feature gate=falseを維持し、G5以降・commit・tag・push・default true化は禁止します。」。**実測根拠(すべてproduction経路〈`resolveGarageBuild`→`resolveProductionMaterialCompositionBaseline`→`composeConfigFromMaterials`〉での測定であり、test-only上書き値は確定証跡に含まない)**: 下限側はNORMAL_OPERATION基準構成×実在5コース×全3電池の15組合せで到達ゲージが厳密に0(通常運用の包絡線は最大|loadTorqueNm| 0.003464 N·m・最大車軸rpm 309.6で、閾値の下余裕はトルク1.44倍・rpm 1.29倍)、金属接触経路(チタン)15組合せは別枠測定で最大ゲージ0.059694(limit 0.15に対する安全余裕2.51倍)、いずれも全件`finished`・D09発火0件。上限側は攻めたproduction-valid構成288組合せ中66件が`triggered:true`へ到達(62件は`finished`終端でstalled優先ではない)、到達ゲージ上限はPOM 0.252160(上余裕1.68倍)・チタン 0.570387(3.80倍)。AND両辺成立はPOM(金属経路なし)の**攻め構成144組合せ**〈288組合せのうちPOM側半分〉で発火した**12件すべて**で確認した(承認用有限バンドル§4が報告した「24組合せ中6件」は、より狭い母数〈garage `gearId:'fast'`固定・コース2種〉での測定であり、再測でも同一の6/24を再現している。両者は母数の違いであって値の不一致ではない)。代表構成でtrigger step 243(t=2.0250 s)・causeLogの`temperature.ratio`と`bearingHeatGaugeRatio`一致・`metalGearContactActive:false`/`highLoadHighSpeedActive:true`を固定。決定論(同条件2回の完全一致)、終端順序(stalled構成でD09@197がstalled@785に588 step先行し、§7.9の受入条件を充足)も実測した。帰還の定量化(C-9)ではD06→D09の寄与0.000000、D09自己帰還は+1.34%(別構成では−9.1%)で**自己制限的**であり発散方向の正帰還は観測されなかった。**変更したのは`src/materials/materialMapping.ts`の既存3定数の値のみで、熱係数(0.25/0.5)・入力式・condition type・`metalGearContactAlways`・deltaFraction・公開型/シグネチャはいずれも不変。過剰設計防止条件に従い、新モデル・新係数・新状態・新公開契約・素材別分岐の追加は0件である。** 所有範囲のpin testは`src/materials/__tests__/materialMapping.test.ts`へ必要最小1件のみ追加した。**`loadTorqueThresholdNm = 0.005` N·mがD06のPOM閾値`GEAR_STRENGTH_THRESHOLD_NM['gear-pom'] = 0.005`と同値であるのは、共通の`loadTorqueNm`スケール上で独立に較正した結果の偶然の一致であり、D06値への参照依存ではない**(D09側は通常運用包絡線0.003464 N·mに対する下余裕1.44倍から決めており、D06側の値を参照していない。将来どちらか一方だけを変更してよい)。 **本値はG4暫定較正であり、G5最終較正を先取りするものではない(Q15-1恒久規則により最終確定はG5較正sweep+人間commit承認を要する)。** feature gate=falseを維持し、G5以降・commit/tag/push・default true化はいずれも未実施。
+
+- 改訂24-補(2026-08-19、改訂24の証跡区分の事実訂正、Suu_mot3指示): **承認済み3値(0.005 N·m / 400 rpm / 0.15)・受入条件・人間承認原文はいずれも不変であり、本補記は証跡の区分を正すものである(人間再承認は不要)。改訂24の本文・数値・承認原文は履歴として一切削除・書き換えていない。** 訂正内容は2点。(1)**改訂24が挙げた測定値(step 243、POM 12/144、同6/24、攻め66/288、到達ゲージ0.252160/0.570387等)は、production素材写像〈`resolveGarageBuild`→`resolveProductionMaterialCompositionBaseline`→`composeConfigFromMaterials`〉で組み立てたconfigを使う、engine層のno-noise harness(`stepTestRunWithDestruction`/`stepTrackRunWithDestruction`を経由せずstepTrackRun+advanceDestructionStateを直接回す自前ループ、RNG=`()=>0.5`固定)の証跡であり、production入口〈`startCourseRun`→`stepCourseRun`〉の証跡ではない。** 改訂24本文の「production経路」は**構成組み立ての経路**を指しており、走行入口を意味しない(誤読を招く表現であったため本補記で明示する)。wrapper非経由のためD09発火後も走行が継続する点(改訂24が記した「finished@471」)も、production wrapperがD09で`destructionTerminal`として閉じる挙動とは一致しない。A/B実測により、**DestructionConfigの差(ゲート5 harness config対production写像config)は結果に一切影響せず、RNGの差だけが結果を反転させる**ことが確認されている(定数RNGではゲージ0.252160・step 243発火、正典run RNG〈mulberry32〉ではゲージ0・stalled@315)。(2)**正典run RNGでの再測定結果**: NORMAL_OPERATION(POM)5コース×3電池×3 seed=45走行で発火0件・最大ゲージ0、NORMAL_OPERATION(チタン、金属接触経路)45走行で発火0件・最大ゲージ0.059694(定数RNG測定と同値)、攻め構成はPOM 6/576・チタン 87/576が発火。**両側拘束(通常運用非発火/攻め構成での有限到達)は正典RNGでも維持されている。** さらに**production入口(`startCourseRun`→`stepCourseRun`)でのPOM正例**を実測した: hill-climb / garage{`chassisId:'standard'`, `gearId:'fast'`, `wheelId:'large'`, `tireId:'standard'`} / gear-pom・magnet-neodymium・battery-lithium-polymer・brush-precious-metal / `coilTurns:15`・`magnetDistanceMm:2`・`brushPressure:0.2`・`sandingQuality:0.9` → **closedStep 333・`endReason:'destructionTerminal'`・`terminalModes:["D09"]`・`performApplyRunOutcome` exact 1回・`metalGearContactActive:false`/`highLoadHighSpeedActive:true`・`bearingHeatGaugeRatio` 0.15030281668535994・degradationDiffsに`{role:'gear',kind:'seizure',deltaFraction:0.15}`と`{role:'bearing',kind:'seizure',deltaFraction:0.2}`の両方**。なお改訂24の時点でPOMがproduction入口で「非発火」と観測されたのは測定上の取りこぼしであった——**D09発火stepでrunが`destructionTerminal`として閉じ、同一stepで`_runAccumulator`が`null`になるため、accumulatorを毎step読む観測ループは発火を読む前に終了する**(最後に読めるゲージは発火直前値0.1498前後となり「上限0.15に頭打ち」に見える)。`performApplyRunOutcome`のspyでoutcomeを捕捉すると発火が観測できる。本補記による変更は本追記と`src/materials/materialMapping.ts`のコメント精密化のみで、**新規の設計判断・定数・テストの追加は0件**である。
+
+- 改訂25(2026-08-19、P3-4 G5較正sweep〈正典run RNG・production wrapper〉の照合結果、人間承認済み、Suu_mot3指示): **結論——D06・D09の既存承認済み較正値をすべて維持し、変更対象は0件である。** 人間プロジェクトリードは次の定型文で承認した(Suu_mot3中継確認済み): 「P3-4 G5正式通過判定（正典run RNGおよびproduction wrapperによる有限sweep、D06・D09の全受入条件充足、既存較正値全維持・変更対象0件、1828テスト・build・lint成功、過剰設計防止条件を含む）を承認し、G5照合結果の台帳追記のみを承認します。feature gate=falseを維持し、G6以降・commit・tag・push・default true化は禁止します。」。**測定条件(証跡区分)**: 走行入口は**production wrapper `stepTrackRunWithDestruction`**(destructionTerminal処理込み。それ以外の物理終端はgameStoreと同じくharness側がstatusで閉じる)、構成組み立ては`resolveGarageBuild`→`resolveProductionMaterialCompositionBaseline`→`composeConfigFromMaterials`→`assembleDestructionConfig`のproduction写像(test-only上書きなし)、RNGは**`createRunRng`の正典run RNG(mulberry32)のみ**(改訂24-補が区分したRNG=0.5のno-noise harnessは本sweepでは不使用)。seedは`0x11111111`/`0x22222222`/`0x33333333`の3種。攻め構成576構成中**288構成でseed間の結果が相違**し、RNGが実際に作用していることを確認した(残り288構成は発火・終端がノイズに対しロバスト)。**母数**: D09 NORMAL_OPERATION=4素材×実在5コース×全3電池×3 seed=**180走行**、D06発火構成(ct150)=4素材×3 seed=**12走行**、D09攻め構成=4素材×3コース×ギヤ2×車輪2×タイヤ2×coilTurns3種×brushPressure2種×3 seed=**1728走行**、C-9対照=6走行、9歯+seizure最大=噛合位相41点sweep+実走行1本。**D09の受入結果**: (i)NORMAL_OPERATION非発火——180走行すべて`finished`・破壊イベント0件・D06歯欠け0本、D09最大ゲージは樹脂3種で0・チタン(金属接触経路)で0.059694(`bearingSeizureGaugeLimit`=0.15に対する安全余裕**2.51倍**)。(ii)攻めproduction-valid構成での有限到達——1728走行中**105件が`triggered:true`到達**(POM 12/PA6 12/PEEK 12/チタン 69)、**樹脂ギヤの発火は全件AND両辺成立**(`metalGearContactActive:false`かつ`highLoadHighSpeedActive:true`)。最早発火はチタンのstep 204(gauge 0.151524)、樹脂正例はPOMのstep 333(gauge 0.150303、brabit_mot3のG4 fixtureと同一値で再現)。(iii)stalled競合(§7.9)——**発火105件すべてが`endReason:'destructionTerminal'`・`terminalModes:["D09"]`で閉じ、D09到達前にstalledで閉じたものは0件**。(iv)C-9自己帰還——終端時点の軸摩擦増加は**0.015030**(`D09_AXLE_FRICTION_INCREASE_PER_GAUGE`=0.1×ゲージ0.15の理論値と一致)、**D06→D09帰還の寄与は0.000000**(D09発火が1本目の歯欠けより先行するため)、発散方向の正帰還は観測されなかった。**D06の受入結果**(hill-climb/garage{fast,large,standard}/neodymium・LiPo・貴金属ブラシ/ct150・md3・bp0.2・sanding1.0): 素材順序はPOM **4.5667秒**(step 548)< PA6 **5.8667秒**(704)< PEEK **7.2167秒**(866)< チタン(nonBreakableで発火なし、finished@2685)で**閾値の大小と完全に一致**、1本目の歯欠けは**全素材が0.5〜10秒の範囲内**、全損の段階性はPOMで歯欠けstep`548,743,902,1033,1141,1241,1323,1380,1416,1433`(間隔195→159→131→108→100→82→57→36→17と単調短縮=加速)を経て10本全損で`destructionTerminal ["D06"]`、3 seedすべてで一致。**9歯損傷+seizure最大の数値安定(§9.3 D5)**: 契約1′下限(base eta 0.42)へ9歯損傷+ゲージ1.0を重ねた最悪ケースを噛合位相41点でsweepし、`gearEfficiency`∈**[0.040110, 0.042000]**(全点で正の有限値かつbase以下、計画§9.3の予測`eta_effective≈0.042`と一致)、`axleFriction`=**0.100000**(全点一定・[0,1]内)、同configの実走行でも速度サンプルが全点有限で発散・数値振動なし(登坂で後退→停止という物理的に妥当な挙動)。**D06–D09共存**: 3件(代表はPOM/ct20でstep 341に`terminalModes:["D09"]`終端、その時点で歯欠け1本。degradationDiffsはgear/toothLoss(1)+gear/seizure(0.15)+bearing/seizure(0.2)が並立)。**上下拘束の余裕(現行値)**: D09 limit 0.15←通常運用最大0.059694(2.51倍)、D09トルク閾値0.005 N·m←通常運用最大0.003464 N·m(1.44倍)、D09車軸rpm閾値400←通常運用最大309.6(1.29倍)、D06閾値(POM 0.005/PA6 0.00726/PEEK 0.0079 N·m)・曝露0.01←通常運用で歯欠け0本かつ1本目4.57〜7.22秒。**申し送り(値変更の提案ではない)**: 非発火runの最大ゲージが0.14571に達し、limit 0.15との比は1.03倍である。これは閾値近傍の連続性による当然の帰結で、安全性の指標は通常運用側の2.51倍だが、将来コース・素材を追加する際に「意図せず発火する構成が増える」方向へ動きうる点を記録しておく。**過剰設計防止条件の遵守**: 新モデル・新係数・新状態・新公開契約・素材別分岐の追加は0件、production定数・公開契約・恒久テストの変更も0件、一時probeはsweep終了時に削除済み(`git status`にtmp-probeなし)。検証は`npm run test` **1828 passed / 1828(失敗0件)**・`npm run build`成功・`npm run lint`成功・`git diff --check`成功・`cmp AGENTS.md CLAUDE.md`一致。**本改訂による変更は本台帳追記1ファイルのみで、feature gate=falseを維持し、G6以降・commit/tag/push・default true化はいずれも未実施である。**
+
+## P3-4-G6: regressionDiff純データ配管の腕対応・J/K/LのG7繰越(arbiter追加裁定+人間承認2026-08-20)
+
+**人間承認原文(2026-08-20)**: 「P3-4 G6追加裁定全文（regressionDiff腕対応・候補Aの純データ配管・J/K/L承認状態訂正・J/K同一migrationのG7繰越・docs追随・禁止事項を含む）を承認します。」
+
+**確定事項**:
+
+1. **regressionDiffの腕×metric対応**: `session`(motor-only)=`steadyRpm`(**全件**——完走の概念がないため状態で絞らない)/`courseRun`=`lapTimeS`(`elapsedTimeS`、**`status==='finished'`のみ**)/`vehicleTestRun`=`topSpeedMps`(samplesの`velocityMps`最大値、**`finished`かつsamples非空のみ**)。完走していない走行をbaselineへ混ぜない趣旨。
+2. **候補A(純データ配管)をG6範囲とする**: module-level純関数による観測変換・legacy除外・同一`recipeKey` baseline抽出+単体テストまで。実装は`src/store/regressionObservation.ts`(brabit所有、新設)。`computeRecipeKey`は再計算せず、永続化済みrecordの`recipeKey`をそのまま読む(§13.1 exact transport契約3)。
+3. **G7繰越**: `detectPerformanceRegression`の実呼出し・結果保持(runtime state)・表示/HUD。
+4. **J/K/Lの承認状態の訂正**: UI計画§22-6の「人間再承認は別途要」は執筆時点の記述であり、**J・K・Lは2026-08-15の「A〜O、15件を再承認します。」に含まれ承認済み**。項目C(`NotebookExportV2`)と同型の記述残存だった。
+5. **J/K同一migrationのG7繰越**: `InstrumentOwnership`(J)・`CodexRecordEntry`拡張(K)は同一`SCHEMA_VERSION` 1→2 migrationへ同梱するため、実装時期をG7へ揃える。G6で先行すると`SCHEMA_VERSION`を二度上げることになる。**G6では`SCHEMA_VERSION`は1のまま**。
+
+**G7への申し送り**: `collectBaselineObservations`の当該run除外は**参照同一性**による——値が等しい別実体は落ちない。「保存済み記録を全件変換してから比較する」実装にすると当該runが自らのbaselineへ混入し、**本来検出すべき悪化を見逃す**。**変換前にrecord idで当該runを除外すること**。値ベース除外は正当な同値記録まで落とすため不採用。`RegressionObservation`へのrecord id追加は新規契約フィールドであり、必要が生じた場合のみG7で別途裁定を仰ぐ。この限界は`regressionObservation.test.ts`の2件で明示的に固定済み。
+
+## P3-4-G7: HUD/演出/音・図鑑/検死・計測器店・a11y/bundleの実装記録(G7正式通過は未承認。人間承認済みはD06素材色の有限写像+正典入力候補Aのみ)
+
+**本節の承認範囲(誤読防止)**: 2026-08-20時点で人間承認が及ぶのは、下記に原文を引用する**D06素材色の有限写像4件と正典入力候補A(spawn時焼き付けを含む)だけ**である。**G7全体の正式通過は未承認**であり、本節のその他の記載(実装内容・是正記録・bundle記録・§13-3 J7と§13-11に関するSuu_mot3判断)は実装・照合の記録であって人間承認を意味しない。G統合以降・commit・tag・push・default true化はいずれも未実施。
+
+**人間承認原文(2026-08-20、D06素材色。この引用の範囲が人間承認の全部である)**: 「P3-4 G7-D D06素材色有限写像（POM=N6、PA6=W3、PEEK=W2、チタン=N4）および正典入力候補A（pendingRunEquipmentSnapshot→inventory、spawn時焼き付け）を承認します。」
+
+**確定事項**:
+
+1. **D06破片の素材色(有限写像)**: `gear-pom`=`N6` / `gear-nylon-pa6`=`W3` / `gear-peek`=`W2` / `gear-titanium`=`N4`。実装は`src/retro/destruction/gearMaterialColor.ts`(brabit所有、新設)。**既定色fallbackは置かない**——art-spec §6が「素材色」と定めている以上、別の色で出すことは違う情報の提示になる。解決できない場合はD06破片を発生させない。
+2. **素材色の正典入力(候補A)**: `useSaveStore.pendingRunEquipmentSnapshot`(`EquipmentIdSnapshot`のvehicle腕)の`gearItemId` → `inventory.items`のfamily `'gear'`個体の`materialId` → 上記写像。**run開始時に固定される値**を使い、生きた`equipmentLoadout`は読まない(走行中の装備変更で破片の色が変わらないようにするため)。新規engine公開型・`RunSnapshot`拡張・`recipeKey`文字列parseはいずれも行わない。素材アイコン(`retro/shop/materialIcons.ts`)も無変更。
+3. **spawn時焼き付け**: 解決した`PaletteKey`は`DebrisParticle.materialColorKey`としてspawn時に焼き付ける。`pendingRunEquipmentSnapshot`はrun終了でnullへ戻るため、参照を持ち越すと走行終端をまたいだ破片の色が失われる。
+4. **§13-3 J7(モーダル内スクロールの伝播防止)は追加実装なしで充足(Suu_mot3判断2026-08-20。人間承認ではない)**: J7の対象はスクロール可能領域であり、既存のShop/Inventoryモーダルは`passive:false`の`wheel`+`preventDefault()`による自前スクロールで背景へ伝播しない。G7-Eで`<dialog>`化した保留中結果画面の放棄確認は短文でスクロール可能領域を持たない。**冗長な`overscroll-behavior`は追加しない。**
+5. **§13-11のE2E自動化は新規依存を追加せずに完了とする(Suu_mot3判断2026-08-20。人間承認ではない——同判断は「追加の人間承認は不要」としている)**: Playwright等の新規E2E依存は追加しない。「可能な範囲」は既存の構造テスト・純関数テストで満たす。**実focus移動・Escape・フォーカス復帰・forced-colors・スクリーンリーダー読み上げ・200%ズーム/320px reflow・OS側`prefers-reduced-motion`は、計画どおりG8人間試遊票へ明示して確認する。** 追加の人間承認は不要。
+
+**G7で是正した既存欠陥(いずれもG7範囲内、新規契約の追加なし)**:
+
+- `applyFreshStateToStore`(`saveStore.ts`)がG7-Aで追加した`instrumentOwnership`を列挙しておらず、永続実体だけが更新されメモリ上のstoreが古いまま残っていた(購入直後に所持状態が画面へ反映されない)。
+- 保留中結果画面の放棄確認が`role="alertdialog"`+`aria-modal`を付けたただの`div`で、背面無効化・Escape・フォーカス移動・accessible nameのいずれも無かった。既存`useRetroDialog`(native `<dialog>`+`showModal()`)へ載せ替えて充足させた。**初期フォーカスは「やめる」側**とする——破棄側を初期フォーカスにすると、Enterの連打で取り返しのつかない操作が確定しうる。
+- 計測器の拒否理由・保留中画面の再試行失敗・破壊症状HUDが、いずれも条件付きでstatusノードごと出し入れされていた(§13-6 J7違反)。常設ノードのtextContent差し替えへ変更。あわせて再試行失敗は緊急エラーではなく操作の拒否理由のため`role="alert"`→`role="status"`。
+
+**bundle記録(§14)**: 起点 raw 790.97 kB / gzip 221.23 kB。G7-E区切り1時点で **JS raw 867.09 kB / gzip 242.62 kB** + **CSS raw 24.66 kB / gzip 5.67 kB**。増分は raw +76.1 kB / gzip +21.4 kB で、候補警戒線900 kBの手前。動的importは採用していない(採用時は分割ルート単位の設計・初回フォーカス先・ロード失敗時UIの計画化が先行条件)。
+
+**feature gate**: `productionWiringEnabled`の既定値は`false`のまま。G統合以降・commit・tag・push・default true化はいずれも未実施。
+
+## P3-4-C1: G7正式通過以降の人間承認原文とPhase 3最終状態（arbiter最終レビュー条件C1、2026-08-25追記）
+
+**追記規則**: 本節は、上記P3-4-G7節を含む既存記録を書き換えず、後続の人間承認と現在状態を追記専用で収録する。上記P3-4-G7節末尾の「G7正式通過は未承認」「G統合以降未実施」「feature gate=false」は**2026-08-20当時の履歴**として維持し、現在状態は本節を正とする。
+
+### C1-1. G7正式通過とG統合着手
+
+**人間承認原文（2026-08-20）**:
+
+> P3-4 G7正式通過判定全文を承認し、G統合（productionWiringEnabledをfalseからtrueへ変更する1行diffのみ）への着手を承認します。G9以降・commit・tag・pushは引き続き禁止します。
+
+この承認により、G7は正式通過し、G統合は`productionWiringEnabled`の既定値を`false`から`true`へ変更する1行diffだけに限定して着手が解禁された。G9以降・commit・tag・pushは禁止されたままだった。
+
+### C1-2. G統合（1行diff、検証追随、G9移行）
+
+**G統合着手の人間承認原文（2026-08-20。C1-1と同一原文を、G統合側の効力記録として再掲）**:
+
+> P3-4 G7正式通過判定全文を承認し、G統合（productionWiringEnabledをfalseからtrueへ変更する1行diffのみ）への着手を承認します。G9以降・commit・tag・pushは引き続き禁止します。
+
+**G統合後の検証追随有限バンドルの人間承認原文（2026-08-20）**:
+
+> G統合後の検証追随有限バンドル全文を承認します。A-1・A-2およびB-0〜B-3を、testRunStore内localのarrangeFinishFixture採用で実装してください。変更はテスト3ファイル・既存5テストに限定し、新規テスト・production変更・共有fixture基盤は追加しないでください。提示済みの実走確認2条件と停止条件を守り、G9以降・commit・tag・pushは禁止を維持してください。
+
+**Node縮退経路のlease token再同期デルタの人間承認原文（2026-08-21 JST）**:
+
+> G統合後の検証追随追加デルタとして、testRunStore.test.tsのresetSaveFixture末尾へ_evaluateLeaseOnce(new Date(0).toISOString())を1回追加し、Node縮退経路のleaseToken再同期を行うことを承認します。変更はこの1行に限定し、fake localStorage・writeV16・lease fixture・production変更・beforeEach/afterEach変更は追加しないでください。既存5件と対象外11件、実走条件2件、全test・build・lint・型検査を確認し、G9以降・commit・tag・pushは禁止を維持してください。
+
+**コメント整合デルタの人間承認原文（2026-08-21 JST）**:
+
+> G統合後の検証追随コメント整合デルタとして、testRunStore.test.tsのresetSaveFixture直前JSDocの「writeV16もlease取得も要らない」の1行を、提示されたruntime lease token再同期の説明へ置換することを承認します。production変更・テスト変更・commit・tag・pushは禁止を維持してください。
+
+**G統合完了後、G9へ移行する人間承認原文（2026-08-21 JST）**:
+
+> P3-4 G9 cleanupへの着手を承認します。上記の削除・検証範囲に限定し、新機能・仕様変更・新規基盤・commit・tag・pushは禁止します。
+
+以上により、G統合のproduction変更は既定値の1行diffだけで完了し、追随は既存テスト5件・テスト3ファイルの有限範囲と2件の追加デルタに閉じた。新規production変更・新規公開契約・新規共有fixture基盤は追加されず、G9着手へ移行した。
+
+### C1-3. G9正式通過とG8着手
+
+**人間承認原文（2026-08-21 JST）**:
+
+> P3-4 G9正式通過判定（feature gate・旧分岐・旧session保存経路の削除、89ファイル・2196テスト、build・lint・型検査成功、過剰設計防止条件を含む）を承認し、G8人間試遊への着手を承認します。commit・tag・pushは禁止を維持します。
+
+この承認により、`productionWiringEnabled`、関連する旧分岐、旧session保存経路の削除が正式通過した。production経路は単一路となり、G8人間試遊が解禁された。commit・tag・pushは禁止されたままだった。
+
+### C1-4. G8 terminal presentation有限バンドル
+
+**人間承認原文（2026-08-24）**:
+
+> 有限バンドルの実装承認します
+
+上記承認が指す、直前提示済みの**承認対象全文**は次のとおり（2026-08-23T16:59:13ZにSuu_mot3からbrabit_mot3へ同一範囲を全文中継）:
+
+#### 目的
+
+`destructionTerminal`の最終stepに既に存在する`RunAccumulator`を表示専用に保持し、D03/D04/D06/D09の終端event・HUD・粒子・SE/loopを既存の単一出典から観測可能にする。
+
+#### production変更（exact 4ファイル）
+
+1. `src/store/gameStore.ts`
+   - 非永続・内部専用フィールド`_terminalPresentationAccumulator: RunAccumulator | null`を1個だけ追加。初期値`null`。
+   - `stepSim` / `stepTestRun` / `stepCourseRun`の`result.termination !== null`、すなわち`destructionTerminal`分岐だけで、`_runAccumulator`は従来どおり`null`にし、同じ`set`内で`result.accumulator`を退避する。
+   - 通常の`finished`/`stalled`等の物理終端では退避しない。ここは過剰設計防止の確定制限。
+   - successful new run startの`flickStart` / `finishAssembly` / `startTestRun` / `startCourseRun`、`resetSim` / `resetTestRun` / `resetCourseRun`、`setMode`で`null`化する。
+   - start失敗（`!started.ok`）では変更しない。pendingでは変更しない。manual abortでは生成せず、reset/setModeの既存終了入口で消去する。
+   - 退避フィールドを`canOperateRunEntry` / `finalizeActiveRunAsManualAbort` / `beginProductionRun` / outcome適用判定へ使わない。
+2. `src/components/DestructionHud.tsx`
+   - 表示入力を`_runAccumulator ?? _terminalPresentationAccumulator`とし、両方`null`の時だけ非表示。
+3. `src/render/RaceEffects.tsx`
+   - 同じ入力に限定して差し替える。両方`null`の時だけfield/cursorを消去。
+   - 既存`runRef`・`processedEventCount`によりterminal eventをexactly-once処理し、閾値からeventを再構築しない。
+4. `src/components/MotorAudioControl.tsx`
+   - 同じ入力に限定して差し替える。
+   - 既存schedulerの`runRef`・`processedEventCount`を維持し、one-shotをexactly-once、停止画面中の既存loopを継続させる。
+
+#### テスト変更（既存2ファイルのみ、新規テストファイル・新規fixture基盤は禁止）
+
+- `src/components/__tests__/destructionAudioWiring.test.ts`
+- `src/store/__tests__/destructionWiring.test.ts`
+
+最小4件:
+
+1. D03/D04/D06/D09のterminal eventが退避accumulatorに載ることを既存fixtureで1件にまとめて確認。
+2. 開始成功・reset・setModeで消え、start失敗は不変、manual abortでは生成されないlifecycle確認。
+3. 退避accumulatorを2フレーム連続で渡してもterminal one-shotが1回だけであること。
+4. 既存構造テストを、退避がない場合にのみfield/cursorを消す契約へ追随。
+
+通常の`finished`/`stalled`で退避しない負例も、上記最小件数内のassertへ含める。追加テストが必要なら編集を止めてexact理由を提示する。
+
+#### 明示的対象外・禁止
+
+- 「検死レポートへ」ボタン・画面遷移は別gap。今回実装しない。
+- engine、materials、物理式、較正値、公開action/type、save永続化、粒子数・色・寿命、SEパラメータ、docs、試遊票は変更しない。
+- D01/D05を含む非terminal破壊状態を通常の完走・失速後に保持する拡張はしない。
+- 新規component、asset、共有基盤を追加しない。
+- commit・tag・pushは禁止。
+
+#### 検証
+
+- 変更対象の既存テスト。
+- 全test、build、lint、型検査。
+- `git diff --check`。
+- 変更ファイルが上記production 4 + test 2の計6ファイル以内であること。
+
+### C1-5. G8条件付き通過とPhase 6への音響QA繰越
+
+**人間承認原文（2026-08-25）**:
+
+> D01/D03音響確認をPhase 6へ繰り越し、G8を条件付き通過として承認します。
+
+D01固有SEとD03破裂SE/duckingは未確認のままであり、PASSへ読み替えない。Phase 6計画の冒頭へ必須QAとして転記する。物理式・較正値・公開契約・production配線は変更せず、ゲームとしての完成ループを優先する。
+
+### C1充足後のarbiter正式最終レビュー判定発効
+
+arbiter_mot3は2026-08-25、source exact commit`2bf3a58ab25095b2e2aa03614f21a4325124f843` / tree`4454f08c085cf3df1463abeb5fac298be30ffd34`および外部docs 7件を独立照合し、90ファイル・2216テスト、build、lint、型検査、`git diff --check`、`AGENTS.md`/`CLAUDE.md`一致を再現した。そのうえで、P3-4を正式commit候補・タグ`p3-4-complete`付与可とする**条件付き承認**を発行し、ゲーム完成ループへの移行を妨げるPhase 3起因のblocking defectはないと判定した。
+
+**人間承認原文（2026-08-25）**:
+
+> P3-4 arbiter正式最終レビュー判定全文（条件付き承認、C1〜C4、Phase 6・次工程への申し送り、blocking defectなし、追加の物理・較正を要求しない条件を含む）を承認し、C1の台帳追記および正式commit構成案の作成に着手することを承認します。commit・tag・pushは別途承認まで禁止します。
+
+**C1のSuu_mot3照合結果**: 本節C1-1〜C1-5へ対象5区分の人間承認原文を追記専用で収録し、上記P3-4-G7節の履歴記述を改変していない。2026-08-25、Suu_mot3は承認履歴との全文照合を完了し、C1を充足と判定した。commit・tag・pushは未承認のため実施しない。
+
+### Phase 6・次工程への統合参照義務（blockingではない申し送り）
+
+1. D01固有SEとD03破裂SE/duckingの実耳確認をPhase 6の必須QAとする。
+2. CourseModeの無効化済みボタンに残る到達不能`onClick`とlegacy courseRun書込みactionは、「G9とV2 CourseMode retro置換の遅い方」という既裁定どおり、retro置換時に削除する。
+3. 図鑑報酬・素材価格・ガウスメーター800 G等の経済値は仮値であり、Phase 5で調整する。
+4. exact step回帰値はG時点の回帰証跡であってゲームバランスの目的値ではない。次工程では完成ループを優先し、物理精緻化を目的化しない。
+5. chassis選択を`chassisBaselineG`へ反映しない挙動は、補足裁定S-3/Q4で確定した**意図的な凍結契約**である。`chassisBaselineG`は電池セル選択から`resolveChassisBaselineG`で135 g/150 gを導出し、garageの`chassis.baseMassG`は使わない。これは未解決実装gapではなく、将来変更する場合だけ別計画・承認を要する。
