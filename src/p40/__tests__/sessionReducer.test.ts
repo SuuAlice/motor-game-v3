@@ -350,5 +350,10 @@ describe('runPhase4Race', () => {
     }
     // 走行以降は採用案II-B(semi)でのみ開く。他2案はG2の比較のまま巻線で終わる。
     expect(strip('../Phase4PrototypeScreen.tsx')).toMatch(/kind === 'semi' && session\.stage === 'winding'/);
+    // 巻き直し中の「ほかのNターン」は区間外ターン数(30-7=23)で、入力の進み具合に依存しない。
+    // previewRecordは既に区間外を含むため、区間長ではなく入力中のぶんを引く(旧式は二重減算)。
+    const screenSource = strip('../Phase4PrototypeScreen.tsx');
+    expect(screenSource).toMatch(/\{previewRecord\.length - state\.record\.length\}ターンは値そのままで変わりません。/);
+    expect(screenSource).not.toMatch(/previewRecord\.length - \(section\.end - section\.start\)/);
   });
 });

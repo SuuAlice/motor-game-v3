@@ -296,7 +296,7 @@ export function Phase4PrototypeScreen({ onExit, baseline }: { onExit: () => void
             {section !== null && (
               <p className="rounded-xl bg-white p-3 text-sm shadow-sm">
                 第{section.index + 1}区間(第{section.start + 1}〜{section.end}ターン)を巻き直しています。
-                ほかの{previewRecord.length - (section.end - section.start)}ターンは値そのままで変わりません。
+                ほかの{previewRecord.length - state.record.length}ターンは値そのままで変わりません。
               </p>
             )}
             {kind === 'raw' && <RawDragInput key={inputEpoch} {...inputProps} />}
