@@ -13,7 +13,7 @@ import { applyDirectCanvasBackingSize, computeDirectCanvasPhysicalCssSize } from
 import { selectOrientedResolution } from '../../retro/canvas/orientation';
 import { loadPixelFonts } from '../../retro/text/pixelFonts';
 import { generateDummyWindingRecord } from './dummyWindingRecord';
-import { drawWindingTrace } from './drawWindingTrace';
+import { drawWindingTrace } from '../../retro/winding/drawWindingTrace';
 import { drawGarageIllustration } from './drawGarageIllustration';
 import { drawPostMortemReport } from './drawPostMortemReport';
 import { CANDIDATES, DEFAULT_CANDIDATE_ID, type CandidateId } from './candidates';

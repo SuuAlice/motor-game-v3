@@ -3,15 +3,16 @@
 // 先取り実装はしない。描画検証専用)。逆巻き区間を意図的に混入させ、単発ノイズでなく
 // 「区間」として見えるようにする(実物工作の最頻出失敗の再現、spec §9.2)。
 
-export type WindingArm = 'left' | 'right' | 'straddle';
-export type WindingDirection = 1 | -1;
+// P4-0 G1b: 型の単一出典は`src/materials/windingRecord.ts`(alice所有の正典)である。
+// ここでローカル定義を持つと、prototypeとproductionで意味が静かに分岐する。
+import {
+  quantizeWindingValue,
+  type WindingArm,
+  type WindingDirection,
+  type WindingTurn,
+} from '../../materials/windingRecord';
 
-export interface WindingTurn {
-  position: number; // 0(端)〜1(端)、短冊上の巻き位置
-  arm: WindingArm;
-  direction: WindingDirection;
-  tension: number; // 0〜1、正規化した張力
-}
+export type { WindingArm, WindingDirection, WindingTurn };
 
 const DEFAULT_SEED = 20260721;
 const DEFAULT_TURN_COUNT = 150;
@@ -42,12 +43,12 @@ export function generateDummyWindingRecord(
     }
     const armRoll = rand();
     const arm: WindingArm = armRoll < 0.42 ? 'left' : armRoll < 0.84 ? 'right' : 'straddle';
-    turns.push({
-      position: rand(),
-      arm,
-      direction,
-      tension: 0.3 + rand() * 0.7,
-    });
+    // 正典の量子化格子(1/256)へ載せる。生成器は0〜1の値しか作らないため`null`にはならないが、
+    // 型として非nullを主張せず、格子外を混ぜないことをここで保証する。
+    const position = quantizeWindingValue(rand());
+    const tension = quantizeWindingValue(0.3 + rand() * 0.7);
+    if (position === null || tension === null) continue;
+    turns.push({ position, arm, direction, tension });
   }
 
   return turns;

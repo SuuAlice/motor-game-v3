@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { generateDummyWindingRecord } from '../dummyWindingRecord';
+// 記録fixtureはPhase 1試作の決定論的生成器を引き続き使う(見た目の回帰を保つため)。
+// 型の単一出典はalice正典`src/materials/windingRecord.ts`側にある。
+import { generateDummyWindingRecord } from '../../../retro-proto/resolutionHarness/dummyWindingRecord';
 import { computeWindingEnvelopeScale, computeWindingTraceGeometry } from '../windingTraceGeometry';
 
 // Unit D試作で実際に使用する4解像度案の内部解像度(worldまたはUI層)。

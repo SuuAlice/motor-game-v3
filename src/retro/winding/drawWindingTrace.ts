@@ -4,13 +4,13 @@
 // つぶれず「良い汚さ」に見えるかを検証する題材(PHASE1-PLAN-01-REV2【1】)。
 // 座標算出はwindingTraceGeometry.tsの純関数に分離済み(整数ピクセル規律、art-spec §2.2)。
 // このファイルはCanvas描画のみを行う。
-import { PALETTE } from '../../retro/palette';
+import { PALETTE } from '../palette';
 import { computeWindingTraceGeometry } from './windingTraceGeometry';
-import type { WindingTurn } from './dummyWindingRecord';
+import type { WindingTurn } from '../../materials/windingRecord';
 
 export function drawWindingTrace(
   ctx: CanvasRenderingContext2D,
-  turns: WindingTurn[],
+  turns: readonly WindingTurn[],
   contentWidthPx: number,
   contentHeightPx: number,
 ): void {

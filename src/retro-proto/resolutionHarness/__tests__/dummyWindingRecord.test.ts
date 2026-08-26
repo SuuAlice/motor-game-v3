@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { generateDummyWindingRecord } from '../dummyWindingRecord';
+import { isQuantizedWindingValue } from '../../../materials/windingRecord';
 
 describe('generateDummyWindingRecord', () => {
   it('既定で150ターンを生成する', () => {
@@ -24,6 +25,11 @@ describe('generateDummyWindingRecord', () => {
       expect(turn.position).toBeLessThanOrEqual(1);
       expect(turn.tension).toBeGreaterThanOrEqual(0.3);
       expect(turn.tension).toBeLessThanOrEqual(1);
+      // P4-0 G1b: 正典の量子化格子(1/256)上にあること。prototypeの生成値が
+      // 格子外のままだと、canonical型の意味契約(量子化済み)を破った記録が
+      // 描画検証へ流れ込む。
+      expect(isQuantizedWindingValue(turn.position)).toBe(true);
+      expect(isQuantizedWindingValue(turn.tension)).toBe(true);
     }
   });
 

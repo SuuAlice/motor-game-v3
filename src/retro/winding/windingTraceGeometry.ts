@@ -2,7 +2,7 @@
 // 乱巻き軌跡の座標算出をdrawWindingTrace.ts(canvas依存)から分離した純関数。
 // 曲線(quadraticCurveTo)の始点・制御点・終点も含め、返り値をすべて整数化する
 // (静止画・曲線描画も例外にしない、Suu判断)。
-import type { WindingTurn } from './dummyWindingRecord';
+import type { WindingTurn } from '../../materials/windingRecord';
 
 const ARM_OFFSET_RATIO = 0.018;
 
@@ -52,7 +52,7 @@ export function computeWindingEnvelopeScale(index: number, totalTurns: number): 
 }
 
 export function computeWindingTraceGeometry(
-  turns: WindingTurn[],
+  turns: readonly WindingTurn[],
   contentWidthPx: number,
   contentHeightPx: number,
 ): WindingTraceGeometry {
