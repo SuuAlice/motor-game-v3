@@ -570,7 +570,7 @@ describe('D1: 巻線ビューは子componentでmountされ、hookがcontainerと
   });
 
   it('親は案選択後にだけ子をmountし、recordを渡す', () => {
-    expect(code).toContain('<WindingTraceView record={previewRecord} />');
+    expect(code).toContain('<WindingTraceView record={previewRecord} jig={jigState} />');
   });
 
   it('共有hookは変更していない', () => {

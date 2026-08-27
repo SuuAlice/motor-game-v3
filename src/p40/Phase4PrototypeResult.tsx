@@ -33,14 +33,20 @@ function sectionSplitsOf(run: Phase4RunResult): readonly (number | null)[] {
   return computeSectionSplits(resolveSectionTimes(run.trace, PHASE4_SECTION_BOUNDARIES_M, resolveFinishInfo(run)));
 }
 
-/** 巻線クローズアップ。走行ビューと同じ480×270・整数拡大規律。 */
-function WindingCloseUp({ record, label }: { record: WindingRecord; label: string }) {
+/**
+ * 巻線クローズアップ。走行ビューと同じ480×270・整数拡大規律。
+ *
+ * **`drawWindingTrace`へ治具(jig)を渡さない**——ここは巻き終えた記録の観察であり、
+ * 「いまの保持状態」は存在しない。既定値で中立位置の治具を描くと、実際には誰も
+ * 操作していないのに操作中に見えてしまう。
+ */
+export function WindingCloseUp({ record, label }: { record: WindingRecord; label: string }) {
   const { containerRef, canvasRef, contentRes, scaleResult } = useRetroCanvasFrame();
   useEffect(() => {
     const context = canvasRef.current?.getContext('2d') ?? null;
     if (context === null || !scaleResult.fits) return;
     context.imageSmoothingEnabled = false;
-    drawWindingTrace(context, record, contentRes.w, contentRes.h);
+    drawWindingTrace(context, record, contentRes.w, contentRes.h); // jigは渡さない(上記コメント)
   }, [record, canvasRef, contentRes.w, contentRes.h, scaleResult.fits]);
 
   return (
@@ -222,6 +228,8 @@ export function Phase4ResultFacts({
       <div className="grid gap-2 rounded-xl bg-white p-4 shadow-sm">
         <h3 className="text-sm font-black">この走行の巻線</h3>
         <WindingCloseUp record={record} label="この走行に使った巻線の軌跡" />
+        {/* 凡例。良否・原因・推奨は書かず、tension→足の開きの生対応だけを述べる。 */}
+        <p className="text-sm">見方: 細く立つ軌跡は高い張力、広く寝る軌跡は低い張力の記録です。</p>
       </div>
 
       <div className="grid gap-3 rounded-xl bg-white p-4 shadow-sm sm:grid-cols-2">

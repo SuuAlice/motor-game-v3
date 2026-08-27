@@ -5,20 +5,62 @@
 // 座標算出はwindingTraceGeometry.tsの純関数に分離済み(整数ピクセル規律、art-spec §2.2)。
 // このファイルはCanvas描画のみを行う。
 import { PALETTE } from '../palette';
-import { computeWindingTraceGeometry } from './windingTraceGeometry';
+import { computeWindingTraceGeometry, type WindingJigGeometry, type WindingJigState } from './windingTraceGeometry';
 import type { WindingTurn } from '../../materials/windingRecord';
+
+/**
+ * 年代の階調(古い層→新しい層)。金属ウォーム系4色をそのまま段に使う。**新色は足さない**。
+ * art-spec §5.3「新しいターンほど手前(明色)、古いターンは1段暗色に沈める」の規則どおり、
+ * indexが大きいほど明るい。
+ */
+const AGE_COLORS = [PALETTE.M0, PALETTE.M1, PALETTE.M2, PALETTE.M3] as const;
+
+/**
+ * 巻線治具を描く。段ボール板・スロット・木の駒・輪ゴム・スイッチだけで、
+ * 目盛りも数値も評価語も出さない(art-spec §5.3の手作り質感)。
+ */
+function drawJig(ctx: CanvasRenderingContext2D, jig: WindingJigGeometry): void {
+  // 段ボール板
+  ctx.fillStyle = PALETTE.W1;
+  ctx.fillRect(jig.boardRect.x, jig.boardRect.y, jig.boardRect.widthPx, jig.boardRect.heightPx);
+
+  // 導線ガイドのスロット3つ。いま使っているスロットだけ一段暗く沈め、色以外に
+  // 「駒がそこに入っている」形でも分かるようにする。
+  jig.slotRects.forEach((slot, index) => {
+    ctx.fillStyle = index === jig.activeSlotIndex ? PALETTE.W0 : PALETTE.M4;
+    ctx.fillRect(slot.x, slot.y, slot.widthPx, slot.heightPx);
+  });
+
+  // 輪ゴム(張力の保持状態)。高い張力ほど短く張る。
+  ctx.fillStyle = PALETTE.N5;
+  ctx.fillRect(jig.rubberBandRect.x, jig.rubberBandRect.y, jig.rubberBandRect.widthPx, jig.rubberBandRect.heightPx);
+
+  // 導線ガイドの駒(木)
+  ctx.fillStyle = PALETTE.W2;
+  ctx.fillRect(jig.guideRect.x, jig.guideRect.y, jig.guideRect.widthPx, jig.guideRect.heightPx);
+  ctx.fillStyle = PALETTE.W3;
+  ctx.fillRect(jig.guideRect.x, jig.guideRect.y, jig.guideRect.widthPx, 1);
+
+  // 正転/逆転スイッチ。レバーの寄る向きがdirectionを表す(色に頼らない)。
+  ctx.fillStyle = PALETTE.N2;
+  ctx.fillRect(jig.switchBaseRect.x, jig.switchBaseRect.y, jig.switchBaseRect.widthPx, jig.switchBaseRect.heightPx);
+  ctx.fillStyle = PALETTE.N6;
+  ctx.fillRect(jig.switchLeverRect.x, jig.switchLeverRect.y, jig.switchLeverRect.widthPx, jig.switchLeverRect.heightPx);
+}
 
 export function drawWindingTrace(
   ctx: CanvasRenderingContext2D,
   turns: readonly WindingTurn[],
   contentWidthPx: number,
   contentHeightPx: number,
+  /** いまの保持状態。**省略時は治具を一切描かない**(巻き終えた記録の観察・静的比較題材)。 */
+  jig?: WindingJigState,
 ): void {
   ctx.clearRect(0, 0, contentWidthPx, contentHeightPx);
   ctx.fillStyle = PALETTE.N6;
   ctx.fillRect(0, 0, contentWidthPx, contentHeightPx);
 
-  const geo = computeWindingTraceGeometry(turns, contentWidthPx, contentHeightPx);
+  const geo = computeWindingTraceGeometry(turns, contentWidthPx, contentHeightPx, jig);
 
   // 台紙(短冊、段ボール想定)
   ctx.fillStyle = PALETTE.W1;
@@ -28,9 +70,12 @@ export function drawWindingTrace(
   ctx.fillStyle = PALETTE.W2;
   ctx.fillRect(geo.axisRect.x, geo.axisRect.y, geo.axisRect.widthPx, geo.axisRect.heightPx);
 
+  // 治具は軌跡より先に描く(軌跡が手前に積まれる)。
+  if (geo.jig !== undefined) drawJig(ctx, geo.jig);
+
   ctx.lineWidth = 1;
   for (const stroke of geo.strokes) {
-    ctx.strokeStyle = stroke.recent ? PALETTE.M2 : PALETTE.M1;
+    ctx.strokeStyle = AGE_COLORS[stroke.ageStep];
     ctx.beginPath();
     ctx.moveTo(stroke.startX, stroke.startY);
     ctx.quadraticCurveTo(stroke.controlX, stroke.controlY, stroke.endX, stroke.endY);

@@ -22,6 +22,7 @@ import { RawDragInput } from './inputs/RawDragInput';
 import { SemiAutoJigInput } from './inputs/SemiAutoJigInput';
 import { PatternInput } from './inputs/PatternInput';
 import { drawWindingTrace } from '../retro/winding/drawWindingTrace';
+import type { WindingJigState } from '../retro/winding/windingTraceGeometry';
 import type { WindingRecord } from '../materials/windingRecord';
 import { useRetroCanvasFrame } from '../components/useRetroCanvasFrame';
 import {
@@ -33,7 +34,7 @@ import {
 import { createPhase4RaceRunner, computeRepairSections, playerWon } from './sessionReducer';
 import type { MaterialCompositionBaseline } from '../materials/materialMapping';
 import { Phase4PrototypeRaceCanvas } from './Phase4PrototypeRaceCanvas';
-import { Phase4ResultCelebration, Phase4ResultFacts } from './Phase4PrototypeResult';
+import { Phase4ResultCelebration, Phase4ResultFacts, WindingCloseUp } from './Phase4PrototypeResult';
 import { prefersReducedMotion } from '../retro/destruction/reducedMotion';
 
 /** G2の比較は全案とも同じ30ターンで行う。 */
@@ -65,7 +66,7 @@ const ARM_LABEL = { left: '左腕', right: '右腕', straddle: '中央またぎ'
  * `{0,0}`のまま=fits=falseで警告が出続ける)。子ごとmountすれば、effectは必ず
  * containerが存在する状態で走る。
  */
-function WindingTraceView({ record }: { record: WindingRecord }) {
+function WindingTraceView({ record, jig }: { record: WindingRecord; jig: WindingJigState }) {
   const { containerRef, canvasRef, contentRes, scaleResult } = useRetroCanvasFrame();
 
   useEffect(() => {
@@ -73,8 +74,8 @@ function WindingTraceView({ record }: { record: WindingRecord }) {
     if (context === null || !scaleResult.fits) return;
     context.imageSmoothingEnabled = false;
     context.clearRect(0, 0, contentRes.w, contentRes.h);
-    drawWindingTrace(context, record, contentRes.w, contentRes.h);
-  }, [record, canvasRef, contentRes.w, contentRes.h, scaleResult.fits]);
+    drawWindingTrace(context, record, contentRes.w, contentRes.h, jig);
+  }, [record, jig, canvasRef, contentRes.w, contentRes.h, scaleResult.fits]);
 
   return (
     /* 480×270(縦向きは270×480)を**整数倍**で拡大し、余白はletterboxにする
@@ -250,6 +251,17 @@ export function Phase4PrototypeScreen({ onExit, baseline }: { onExit: () => void
    * 巻き直し中の表示用記録。区間外は`repairedRecord`の値をそのまま、区間内だけを
    * 入力中の記録に差し替える。**ロックされている範囲が見た目にも動かない**ことを示す。
    */
+  /**
+   * 治具の保持状態。**`state`をそのまま渡すだけ**で、派生状態も既定値も作らない——
+   * 入力3案が収束する`WindingInputState`が唯一の出典。
+   */
+  const jigState: WindingJigState = {
+    position: state.position,
+    arm: state.arm,
+    tension: state.tension,
+    direction: state.direction,
+  };
+
   const previewRecord: WindingRecord =
     session.stage === 'repairing' && section !== null && session.repairedRecord !== null
       ? [...session.repairedRecord.slice(0, section.start), ...state.record, ...session.repairedRecord.slice(section.end)]
@@ -292,7 +304,11 @@ export function Phase4PrototypeScreen({ onExit, baseline }: { onExit: () => void
         <section className="grid gap-4 lg:grid-cols-[2fr_1fr]">
           <div className="grid gap-3">
             {/* 巻き直し中は区間外のturnを値のまま重ねて見せる(ロック表示)。 */}
-            <WindingTraceView record={previewRecord} />
+            <WindingTraceView record={previewRecord} jig={jigState} />
+            {/* 凡例。良否・原因・推奨は書かず、tension→足の開きの生対応だけを述べる。 */}
+            <p className="rounded-xl bg-white p-3 text-sm shadow-sm">
+              見方: 細く立つ軌跡は高い張力、広く寝る軌跡は低い張力の記録です。
+            </p>
             {section !== null && (
               <p className="rounded-xl bg-white p-3 text-sm shadow-sm">
                 第{section.index + 1}区間(第{section.start + 1}〜{section.end}ターン)を巻き直しています。
@@ -431,7 +447,8 @@ export function Phase4PrototypeScreen({ onExit, baseline }: { onExit: () => void
                     : (session.secondOutcome.player.finishTimeS - session.secondOutcome.rival.finishTimeS).toFixed(3)}
                 </span> 秒
               </p>
-              <WindingTraceView record={session.repairedRecord} />
+              {/* 銘板は巻き終えた記録の観察。現在の保持状態が存在しないので治具を描かない。 */}
+              <WindingCloseUp record={session.repairedRecord} label="この機体の巻線の軌跡" />
               <p className="text-sm text-rose-700">この銘板は保存されません。画面を離れるか再読み込みすると消えます。</p>
               <button type="button" onClick={() => dispatch({ kind: 'finish' })}
                 className="min-h-[44px] rounded-lg bg-slate-200 px-3 py-2 font-bold text-slate-700">
