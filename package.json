@@ -12,7 +12,9 @@
     "sweep": "vite-node scripts/vehicleSweep.ts",
     "sweep:motor": "vite-node scripts/sweep.ts",
     "sweep:material": "vite-node scripts/materialSweep.ts",
-    "typecheck:material-sweep": "tsc -p tsconfig.material-sweep.json"
+    "typecheck:material-sweep": "tsc -p tsconfig.material-sweep.json",
+    "sweep:phase4": "vite-node scripts/phase4PrototypeSweep.ts",
+    "typecheck:phase4-sweep": "tsc -p tsconfig.phase4-sweep.json"
   },
   "dependencies": {
     "react": "^18.3.1",
