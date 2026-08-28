@@ -59,13 +59,36 @@ export interface WindingParams {
 // ---------------------------------------------------------------------------
 
 /**
+ * 1本(1 strand)あたりの巻き線長 [m]。`coilTurns × 2π × WINDING_MEAN_RADIUS_M`。
+ *
+ * **`computeWireVolumeM3`と`computeConsumedWireM`の共通出典**であり、両者が同じ半径規約を
+ * 使うことを構造的に保証する(片方だけ別の近似へ変えると、質量と在庫消費が静かに食い違う)。
+ * P4-1Cで実軌跡長へ置換予定(上記`WINDING_MEAN_RADIUS_M`のコメント参照)。
+ */
+export function computeWireLengthPerStrandM(coilTurns: number): number {
+  return coilTurns * 2 * Math.PI * WINDING_MEAN_RADIUS_M;
+}
+
+/**
+ * P4-1A(2026-08-28人間承認): 在庫から消費される導線長 [m]。
+ * `record.length × 2π × WINDING_MEAN_RADIUS_M × parallelStrands`。
+ *
+ * 並列本数を掛けるのは、n本それぞれが同じ長さぶん消費されるためで、
+ * `computeWireVolumeM3`が体積側で`parallelStrands`を掛けているのと同じ規約である。
+ * **新しい定数は導入しない**——既存の`WINDING_MEAN_RADIUS_M`(2026-07-22 Suu承認値)だけを使う。
+ */
+export function computeConsumedWireM(turnCount: number, parallelStrands: number): number {
+  return computeWireLengthPerStrandM(turnCount) * parallelStrands;
+}
+
+/**
  * 導線の巻き線体積 [m³]。
  * lengthM = coilTurns × 2π × WINDING_MEAN_RADIUS_M
  * crossSectionM2 = π × (wireGaugeMm / 1000 / 2)²(導体径として扱う設計仮定、被膜厚は含まない)
  * volumeM3 = lengthM × crossSectionM2 × parallelStrands
  */
 export function computeWireVolumeM3(params: WindingParams): number {
-  const lengthM = params.coilTurns * 2 * Math.PI * WINDING_MEAN_RADIUS_M;
+  const lengthM = computeWireLengthPerStrandM(params.coilTurns);
   const radiusM = params.wireGaugeMm / 1000 / 2;
   const crossSectionM2 = Math.PI * radiusM * radiusM;
   return lengthM * crossSectionM2 * params.parallelStrands;
