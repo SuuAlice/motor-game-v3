@@ -2188,7 +2188,7 @@ describe('runOutcomeApplication.ts: deriveMaterialSelectionFromEquipment(G1a′ 
 
   it('N-1(arbiter補足裁定負例仕様): sourceWireMaterialIdがnullのローター個体を防御的に拒否する(missingRole: rotor)。P6是正: 失敗分岐でも引数非破壊+同一入力同一出力を固定する', () => {
     const inventory = baseInventory();
-    const rotorWithNullWire: RotorAssemblyState = { assemblyId: 'r1', sourceWireMaterialId: null, consumedWireM: 1, collapsed: false, burnedOut: false };
+    const rotorWithNullWire: RotorAssemblyState = { assemblyId: 'r1', sourceWireMaterialId: null, consumedWireM: 1, collapsed: false, burnedOut: false, winding: { kind: 'legacy' }, coatingDamageFraction: 0 };
     const inventoryWithBrokenRotor: PlayerInventory = { ...inventory, rotorAssemblies: [rotorWithNullWire] };
     const loadout = { ...validatedInitialLoadout(), rotorAssemblyId: 'r1' };
     const loadoutSnapshot: typeof loadout = JSON.parse(JSON.stringify(loadout));

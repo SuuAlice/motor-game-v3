@@ -11,6 +11,7 @@
 import { BATTERY_MATERIALS, BODY_MATERIALS, BRUSH_MATERIALS, COATING_MATERIALS, GEAR_MATERIALS, MAGNET_MATERIALS, WIRE_MATERIALS } from './materials';
 import type { Material } from './materials';
 import { computeCompositeGearDamageFraction } from './degradationApplication';
+import type { WindingRecord } from './windingRecord';
 
 // materialMapping.tsが同型のID型(MagnetMaterialId等)を独自にexportしているが、
 // inventoryItem.tsは写像層へ依存させないため意図的に重複させる(層境界、v3レビュー)。
@@ -55,7 +56,31 @@ export interface RotorAssemblyState {
   consumedWireM: number;
   collapsed: boolean;
   burnedOut: boolean;
+  // P4-1A(2026-08-28人間承認)で追加。
+  winding: RotorWindingState;
+  /** 被膜損傷の恒久蓄積 [0,1]。P4-1Aでは常に0(増分の適用はP4-1C/Fの別delta)。 */
+  coatingDamageFraction: number;
 }
+
+/**
+ * ローター個体の巻線由来状態(P4-1A、入れ子判別union)。
+ *
+ * **平坦なnullable群にしない理由**: 「旧個体なのに記録がある」「記録付きなのに線径が無い」
+ * といった**表現不能であるべき状態を型で排除する**ため。平坦にすると不変条件を
+ * validatorの実行時検査でしか守れず、生成箇所ごとに守り忘れが起きうる。
+ *
+ * `legacy`はsave migrationで作られる旧個体で、**巻線記録を捏造しない**(存在しなかった
+ * 記録を`coilTurns`等から合成すると、レシピ・型紙・描画がすべて嘘の軌跡を参照する)。
+ */
+export type RotorWindingState =
+  | { readonly kind: 'legacy' }
+  | {
+      readonly kind: 'recorded';
+      readonly record: WindingRecord;
+      /** 巻き始めに固定した線径 [mm]。記録後は変更できない(P4-1A Q8)。 */
+      readonly wireGaugeMm: number;
+      readonly parallelStrands: 1 | 2;
+    };
 
 export interface BodyPartState {
   assemblyId: string;

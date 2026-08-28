@@ -183,7 +183,7 @@ export function createInitialPlayerInventoryAndLoadout(): { inventory: PlayerInv
         { family: 'wire', materialId: 'wire-copper-standard', quantityM: 5 },
         { family: 'coating', materialId: 'coating-polyester', quantityMl: 10 },
       ],
-      rotorAssemblies: [{ assemblyId: 'initial-rotor-01', sourceWireMaterialId: 'wire-copper-standard', consumedWireM: 1, collapsed: false, burnedOut: false }],
+      rotorAssemblies: [{ assemblyId: 'initial-rotor-01', sourceWireMaterialId: 'wire-copper-standard', consumedWireM: 1, collapsed: false, burnedOut: false, winding: { kind: 'legacy' }, coatingDamageFraction: 0 }],
       bodyParts: [],
       bearingAssemblies: [{ assemblyId: 'initial-bearing-01', gearItemId: 'initial-gear-01', seizureFraction: 0 }],
     },

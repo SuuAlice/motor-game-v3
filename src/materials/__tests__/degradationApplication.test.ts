@@ -96,13 +96,13 @@ describe('degradationApplication.ts: applyBrushDiff / applyRotorDiff / applyBody
 
   it('13. rotor collapseはcollapsedフラグをtrueにし、burnedOutは変更しない', () => {
     const diff: Extract<DegradationDiff, { role: 'rotor' }> = { role: 'rotor', kind: 'collapse' };
-    const current: RotorAssemblyState = { assemblyId: 'r1', sourceWireMaterialId: 'wire-copper-standard', consumedWireM: 1, collapsed: false, burnedOut: false };
+    const current: RotorAssemblyState = { assemblyId: 'r1', sourceWireMaterialId: 'wire-copper-standard', consumedWireM: 1, collapsed: false, burnedOut: false, winding: { kind: 'legacy' }, coatingDamageFraction: 0 };
     expect(applyRotorDiff(diff, current)).toEqual({ ...current, collapsed: true });
   });
 
   it('14. rotor burnoutはburnedOutフラグをtrueにする', () => {
     const diff: Extract<DegradationDiff, { role: 'rotor' }> = { role: 'rotor', kind: 'burnout' };
-    const current: RotorAssemblyState = { assemblyId: 'r1', sourceWireMaterialId: 'wire-copper-standard', consumedWireM: 1, collapsed: false, burnedOut: false };
+    const current: RotorAssemblyState = { assemblyId: 'r1', sourceWireMaterialId: 'wire-copper-standard', consumedWireM: 1, collapsed: false, burnedOut: false, winding: { kind: 'legacy' }, coatingDamageFraction: 0 };
     expect(applyRotorDiff(diff, current)).toEqual({ ...current, burnedOut: true });
   });
 
