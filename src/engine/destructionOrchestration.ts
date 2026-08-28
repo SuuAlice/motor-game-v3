@@ -4,7 +4,7 @@
 // stepMotorWithDestruction(motor-onlyラッパー)・stepTestRunWithDestruction(vehicle+test-run
 // ラッパー)を担う。`stepTrackRunWithDestruction`(track-run版)はP3-4以降で追加する(P3-0-Q2)。
 
-import { computeElectricalState, computeRCoil, didCollapseJustHappen, step } from './motorPhysics';
+import { computeElectricalState, computeRCoil, didCollapseJustHappen, isValidWindingTurnsRatio, resolveWindingTurnsRatio, step } from './motorPhysics';
 import type { MotorConfig, SimState } from './motorPhysics';
 import { CHATTER_BURST_FRAMES } from './constants';
 import { stepTestRun } from './vehiclePhysics';
@@ -699,6 +699,9 @@ function validateMotorConfigShape(raw: unknown): raw is MotorConfig {
   const optionalNumberFields = [
     'wireGaugeMm', 'wireResistivityRatio', 'wireDensityRatio', 'batteryInternalResistanceRatio', 'batteryCapacityRatio',
     'effectiveTurnsRatio', 'brushContactResistanceRatio', 'brushChatterProbabilityRatio',
+    // P4-1A: 巻線由来ratio。形状としては他のオプショナル乗数と同じ扱いで、
+    // base範囲(0,1]の制約はvalidateMaterialComposedBase / restoreRunSnapshot側が課す。
+    'windingTurnsRatio',
   ];
   for (const field of optionalNumberFields) {
     if (raw[field] !== undefined && !isFiniteNumber(raw[field])) return false;
@@ -1119,6 +1122,11 @@ export function restoreRunSnapshot(raw: unknown): RestoreRunSnapshotResult {
   if (motorConfigRaw.effectiveTurnsRatio !== undefined && motorConfigRaw.effectiveTurnsRatio !== 1) {
     return { ok: false, reason: 'invalidSchema', details: 'motorConfig.effectiveTurnsRatio must be undefined or 1 in a base (unmodified) config' };
   }
+  // P4-1A(2026-08-28人間承認): 巻線由来ratioはbase configが正当に1以外を取りうる唯一の
+  // 磁気結合係数であり、範囲は(0,1]。述語はmotorPhysics.tsを単一出典とする。
+  if (motorConfigRaw.windingTurnsRatio !== undefined && !isValidWindingTurnsRatio(motorConfigRaw.windingTurnsRatio)) {
+    return { ok: false, reason: 'invalidSchema', details: 'motorConfig.windingTurnsRatio must be undefined or in (0, 1]' };
+  }
 
   const carConfigRaw = raw.carConfig;
   if (carConfigRaw !== null && !validateCarConfigShape(carConfigRaw)) return { ok: false, reason: 'invalidSchema', details: 'carConfig' };
@@ -1426,10 +1434,17 @@ export function composeEffectiveMotorConfig(
   // 未崩壊時には常にeffectiveTurnsRatio===1へ評価され、composeは実質no-opになる。
   // backEmf/tMagへ同一係数を適用するのはエネルギー整合の要請(K_E=K_T相反性、
   // motorPhysics.ts側のコメント参照)。R_coil/Jは実coilTurnsのまま据え置く。
-  const effectiveTurnsRatio = Math.max(
+  //
+  // P4-1A(2026-08-28人間承認): 巻線由来ratioとの合成は**この1点だけ**で行う。
+  // `Math.max`の下限clampは**D01因子だけ**に掛け、積へは掛けない——下限は「D01劣化が
+  // どこまで進むか」の下限であって巻線品質の下限ではないため、積へ掛けると雑に巻いた
+  // ローターが下限で引き上げられて救済されてしまう。
+  // 将来D10の進行性低下を加える場合も、独自経路を作らずこの積の第3因子として追加する。
+  const d01Ratio = Math.max(
     destructionConfig.d01.minEffectiveTurnsRatio,
     1 - destructionState.modes.D01.decayExposureRad / destructionConfig.d01.decayExposureScaleRad,
   );
+  const effectiveTurnsRatio = resolveWindingTurnsRatio(baseMotorConfig) * d01Ratio;
   if (effectiveTurnsRatio !== 1) {
     effective = { ...effective, effectiveTurnsRatio };
   }

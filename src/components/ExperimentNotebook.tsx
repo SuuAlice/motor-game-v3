@@ -41,6 +41,7 @@ const CONFIG_LABELS: Record<keyof MotorConfig, [string, string]> = {
   batteryInternalResistanceRatio: ['電池内部抵抗', '比'],
   batteryCapacityRatio: ['電池容量', '比'],
   effectiveTurnsRatio: ['実効巻数(磁気結合率)', '比'],
+  windingTurnsRatio: ['巻線由来実効巻数', '比'],
   brushContactResistanceRatio: ['ブラシ接触抵抗', '比'],
   brushChatterProbabilityRatio: ['ブラシ接触不良確率', '比'],
 };

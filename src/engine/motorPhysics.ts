@@ -84,6 +84,16 @@ export interface MotorConfig {
   // nextChatterState内のチャタリング確率prob計算への乗数。式への実結線はP3-3ゲート4/
   // checkpoint4で完了済み(P35是正の最終prob [0,1] clamp込み)。
   brushChatterProbabilityRatio?: number;
+  // P4-1A(2026-08-28人間承認): 巻線記録由来の方向一貫性。`effectiveTurnsRatio`が
+  // **走行中の実効値**(破壊状態との合成結果)であるのに対し、こちらは**巻いた時点で
+  // 決まる入力**であり、base MotorConfigが正当に1以外を取りうる唯一の磁気結合係数である。
+  // 両者を1フィールドで兼ねない理由: `effectiveTurnsRatio`のbase契約は`undefined | 1`
+  // (P3-3-Q12/Q14・P-Q10-A5の3執行点+restoreRunSnapshotの計4点)で固定されており、
+  // 巻線由来の値をそこへ入れると「新品時は必ず1.0」という前提が崩れるため。
+  // 既定`undefined`は1.0。base範囲は`(0,1]`(0を除くのは磁気結合が消滅する退化値のため、
+  // `minEffectiveTurnsRatio`が0を除くのと同じ理由)。合成は
+  // `composeEffectiveMotorConfig`の単一乗算点だけで行う。
+  windingTurnsRatio?: number;
 }
 
 export interface SimState {
@@ -173,6 +183,28 @@ function resolveBatteryInternalResistanceRatio(config: MotorConfig): number {
 // 式への実結線(P3-3ゲート4/checkpoint4)。
 function resolveEffectiveTurnsRatio(config: MotorConfig): number {
   return config.effectiveTurnsRatio ?? 1;
+}
+
+/**
+ * P4-1A: 巻線由来ratioの解決。既定`undefined`は1.0。
+ *
+ * `resolveEffectiveTurnsRatio`と対になるが、**物理式へ直接は入らない**——
+ * `composeEffectiveMotorConfig`が`effectiveTurnsRatio`へ合成した結果だけが式へ届く
+ * (第二の適用経路を作らないため、本関数はengine内の物理式から呼ばない)。
+ */
+export function resolveWindingTurnsRatio(config: MotorConfig): number {
+  return config.windingTurnsRatio ?? 1;
+}
+
+/**
+ * P4-1A: `windingTurnsRatio`のbase範囲述語。**全validatorの単一出典**。
+ *
+ * `materials/`ではなく`engine/`に置くのは、engineが`materials/`を知る逆依存を作らないため
+ * (`validateMaterialComposedBase`・`restoreRunSnapshot`はengine側、save validatorはstore側で、
+ * いずれもengineへは依存できる)。
+ */
+export function isValidWindingTurnsRatio(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 && value <= 1;
 }
 
 // 正式Fable P3-3-Q6裁定(確定): ブラシ素材写像のMotorConfig層。式への実結線
