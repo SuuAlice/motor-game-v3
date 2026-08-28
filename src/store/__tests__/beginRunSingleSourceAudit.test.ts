@@ -85,7 +85,7 @@ describe('C-4(alice担当分): prepareDestructionRunの8段が単一の読取り
     const baseline = resolveProductionMaterialCompositionBaseline(raw, garageBuild);
     const composed = composeConfigFromMaterials(raw, garageBuild.carConfig, baseline, resolved.selection);
     if (!composed.ok) throw new Error('到達しない');
-    expect(result.recipeKey).toBe(computeRecipeKey(resolved.selection, composed.motorConfig, composed.carConfig));
+    expect(result.recipeKey).toBe(computeRecipeKey(resolved.selection, composed.motorConfig, composed.carConfig, null));
 
     // 非空虚性: Wear反映**後**のconfigから計算したkeyとは異なる(順序が逆なら落ちる)。
     const wornMotor = applyWearToMotorConfig(composed.motorConfig, {
@@ -95,7 +95,7 @@ describe('C-4(alice担当分): prepareDestructionRunの8段が単一の読取り
       magnetDemagnetizationFraction: 0.2, gearSeizureFraction: 0.1, brushWearFraction: 0.4, bearingSeizureFraction: 0.25,
     });
     if (!wornMotor.ok || !wornCar.ok) throw new Error('到達しない');
-    expect(result.recipeKey).not.toBe(computeRecipeKey(resolved.selection, wornMotor.motorConfig, wornCar.carConfig));
+    expect(result.recipeKey).not.toBe(computeRecipeKey(resolved.selection, wornMotor.motorConfig, wornCar.carConfig, null));
   });
 
   it('snapshotへ載る実効configはWear反映**後**の値である(4段が効いている)', () => {

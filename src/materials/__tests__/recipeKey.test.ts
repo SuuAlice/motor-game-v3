@@ -1,10 +1,11 @@
-// P3-4 G1a: computeRecipeKey(docs/phase3-p3-4-plan.md v12 §13.2、R2確定裁定)
+// P3-4 G1a: computeRecipeKey(docs/phase3-p3-4-plan.md v12 §13.2、R2確定裁定, null)
 
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { computeRecipeKey, RECIPE_KEY_VERSION, validateMaterialComposedBase } from '../recipeKey';
+import { encodeWindingRecordCanonical, type WindingRecord } from '../windingRecord';
 import type { MaterialSelection } from '../materialMapping';
 import type { MotorConfig } from '../../engine/motorPhysics';
 import type { CarConfig } from '../../engine/vehiclePhysics';
@@ -52,90 +53,90 @@ function goodCarConfig(overrides: Partial<CarConfig> = {}): CarConfig {
   };
 }
 
-describe('recipeKey.ts: computeRecipeKey(§13.2)', () => {
+describe('recipeKey.ts: computeRecipeKey(§13.2, null)', () => {
   it('同一構成では常に同一キーを返す(冪等性)', () => {
-    const key1 = computeRecipeKey(goodSelection(), goodMotorConfig(), goodCarConfig());
-    const key2 = computeRecipeKey(goodSelection(), goodMotorConfig(), goodCarConfig());
+    const key1 = computeRecipeKey(goodSelection(), goodMotorConfig(), goodCarConfig(), null);
+    const key2 = computeRecipeKey(goodSelection(), goodMotorConfig(), goodCarConfig(), null);
     expect(key1).toBe(key2);
   });
 
   it('envelope形式(v{n}|...)で始まる', () => {
-    const key = computeRecipeKey(goodSelection(), goodMotorConfig(), goodCarConfig());
+    const key = computeRecipeKey(goodSelection(), goodMotorConfig(), goodCarConfig(), null);
     expect(key.startsWith(`v${RECIPE_KEY_VERSION}|`)).toBe(true);
   });
 
   it('素材ID(R2確定)が異なると異なるキーになる(wireId違い)', () => {
-    const a = computeRecipeKey(goodSelection({ wireId: 'wire-copper-standard' }), goodMotorConfig(), goodCarConfig());
-    const b = computeRecipeKey(goodSelection({ wireId: 'wire-silver' }), goodMotorConfig(), goodCarConfig());
+    const a = computeRecipeKey(goodSelection({ wireId: 'wire-copper-standard' }), goodMotorConfig(), goodCarConfig(), null);
+    const b = computeRecipeKey(goodSelection({ wireId: 'wire-silver' }), goodMotorConfig(), goodCarConfig(), null);
     expect(a).not.toBe(b);
   });
 
   it('gearId(素材ID)が異なると異なるキーになる', () => {
-    const a = computeRecipeKey(goodSelection({ gearId: 'gear-pom' }), goodMotorConfig(), goodCarConfig());
-    const b = computeRecipeKey(goodSelection({ gearId: 'gear-titanium' }), goodMotorConfig(), goodCarConfig());
+    const a = computeRecipeKey(goodSelection({ gearId: 'gear-pom' }), goodMotorConfig(), goodCarConfig(), null);
+    const b = computeRecipeKey(goodSelection({ gearId: 'gear-titanium' }), goodMotorConfig(), goodCarConfig(), null);
     expect(a).not.toBe(b);
   });
 
   it('player-adjustable値(coilTurns)が異なると異なるキーになる', () => {
-    const a = computeRecipeKey(goodSelection(), goodMotorConfig({ coilTurns: 80 }), goodCarConfig());
-    const b = computeRecipeKey(goodSelection(), goodMotorConfig({ coilTurns: 81 }), goodCarConfig());
+    const a = computeRecipeKey(goodSelection(), goodMotorConfig({ coilTurns: 80 }), goodCarConfig(), null);
+    const b = computeRecipeKey(goodSelection(), goodMotorConfig({ coilTurns: 81 }), goodCarConfig(), null);
     expect(a).not.toBe(b);
   });
 
   it('brushContactResistanceRatio/brushChatterProbabilityRatio(D1是正で追加)が異なる2構成は異なるrecipeKeyを生成する', () => {
-    const a = computeRecipeKey(goodSelection(), goodMotorConfig({ brushContactResistanceRatio: 1.0 }), goodCarConfig());
-    const b = computeRecipeKey(goodSelection(), goodMotorConfig({ brushContactResistanceRatio: 1.3 }), goodCarConfig());
-    const c = computeRecipeKey(goodSelection(), goodMotorConfig({ brushChatterProbabilityRatio: 1.0 }), goodCarConfig());
-    const d = computeRecipeKey(goodSelection(), goodMotorConfig({ brushChatterProbabilityRatio: 0.7 }), goodCarConfig());
+    const a = computeRecipeKey(goodSelection(), goodMotorConfig({ brushContactResistanceRatio: 1.0 }), goodCarConfig(), null);
+    const b = computeRecipeKey(goodSelection(), goodMotorConfig({ brushContactResistanceRatio: 1.3 }), goodCarConfig(), null);
+    const c = computeRecipeKey(goodSelection(), goodMotorConfig({ brushChatterProbabilityRatio: 1.0 }), goodCarConfig(), null);
+    const d = computeRecipeKey(goodSelection(), goodMotorConfig({ brushChatterProbabilityRatio: 0.7 }), goodCarConfig(), null);
     expect(a).not.toBe(b);
     expect(c).not.toBe(d);
   });
 
   it('CarConfigの値(gearRatio)が異なると異なるキーになる', () => {
-    const a = computeRecipeKey(goodSelection(), goodMotorConfig(), goodCarConfig({ gearRatio: 4 }));
-    const b = computeRecipeKey(goodSelection(), goodMotorConfig(), goodCarConfig({ gearRatio: 8 }));
+    const a = computeRecipeKey(goodSelection(), goodMotorConfig(), goodCarConfig({ gearRatio: 4 }), null);
+    const b = computeRecipeKey(goodSelection(), goodMotorConfig(), goodCarConfig({ gearRatio: 8 }), null);
     expect(a).not.toBe(b);
   });
 
   it('optionalフィールド省略時は既定値で正規化され、明示的に既定値を渡した場合と同一キーになる', () => {
-    const omitted = computeRecipeKey(goodSelection(), goodMotorConfig({ wireGaugeMm: undefined, parallelStrands: undefined }), goodCarConfig());
-    const explicit = computeRecipeKey(goodSelection(), goodMotorConfig({ wireGaugeMm: 0.4, parallelStrands: 1 }), goodCarConfig());
+    const omitted = computeRecipeKey(goodSelection(), goodMotorConfig({ wireGaugeMm: undefined, parallelStrands: undefined }), goodCarConfig(), null);
+    const explicit = computeRecipeKey(goodSelection(), goodMotorConfig({ wireGaugeMm: 0.4, parallelStrands: 1 }), goodCarConfig(), null);
     expect(omitted).toBe(explicit);
   });
 
   it('varnished=false/trueで異なるキーになる(booleanの0/1正規化)', () => {
-    const a = computeRecipeKey(goodSelection(), goodMotorConfig({ varnished: true }), goodCarConfig());
-    const b = computeRecipeKey(goodSelection(), goodMotorConfig({ varnished: false }), goodCarConfig());
+    const a = computeRecipeKey(goodSelection(), goodMotorConfig({ varnished: true }), goodCarConfig(), null);
+    const b = computeRecipeKey(goodSelection(), goodMotorConfig({ varnished: false }), goodCarConfig(), null);
     expect(a).not.toBe(b);
   });
 
   it('-0と+0は同一キーになる(-0正規化)', () => {
-    const a = computeRecipeKey(goodSelection(), goodMotorConfig({ axisOffsetMm: 0 }), goodCarConfig());
-    const b = computeRecipeKey(goodSelection(), goodMotorConfig({ axisOffsetMm: -0 }), goodCarConfig());
+    const a = computeRecipeKey(goodSelection(), goodMotorConfig({ axisOffsetMm: 0 }), goodCarConfig(), null);
+    const b = computeRecipeKey(goodSelection(), goodMotorConfig({ axisOffsetMm: -0 }), goodCarConfig(), null);
     expect(a).toBe(b);
   });
 
   it('NaN/Infinityが混入するとthrowする(base configは§12検証済みのため理論上到達しない防御的コード)', () => {
-    expect(() => computeRecipeKey(goodSelection(), goodMotorConfig({ coilTurns: NaN }), goodCarConfig())).toThrow();
-    expect(() => computeRecipeKey(goodSelection(), goodMotorConfig(), goodCarConfig({ gearRatio: Infinity }))).toThrow();
+    expect(() => computeRecipeKey(goodSelection(), goodMotorConfig({ coilTurns: NaN }), goodCarConfig(), null)).toThrow();
+    expect(() => computeRecipeKey(goodSelection(), goodMotorConfig(), goodCarConfig({ gearRatio: Infinity }), null)).toThrow();
   });
 
   // Suu_mot3 G1a照合是正P1: gearReflectedInertiaKgM2(§13.2 10項目目、G3で`CarConfig`へ
-  // 追加予定)はG1a時点からexact設計どおり読み込む。RECIPE_KEY_VERSIONはR2確定裁定
-  // 「1のまま最終形で開始」により変更しない。
-  it('RECIPE_KEY_VERSIONは1で固定である(R2確定裁定「1のまま最終形で開始」)', () => {
-    expect(RECIPE_KEY_VERSION).toBe(1);
+  // 追加予定)はG1a時点からexact設計どおり読み込む。
+  // P4-1A(2026-08-28人間承認): windingTurnsRatio追加により1→2へ昇版した。
+  it('RECIPE_KEY_VERSIONは2である(P4-1Aで1→2へ昇版)', () => {
+    expect(RECIPE_KEY_VERSION).toBe(2);
   });
 
   it('gearReflectedInertiaKgM2未指定と明示0は同一キーになる(既定0への正規化)', () => {
-    const omitted = computeRecipeKey(goodSelection(), goodMotorConfig(), goodCarConfig());
-    const explicitZero = computeRecipeKey(goodSelection(), goodMotorConfig(), { ...goodCarConfig(), gearReflectedInertiaKgM2: 0 } as CarConfig);
+    const omitted = computeRecipeKey(goodSelection(), goodMotorConfig(), goodCarConfig(), null);
+    const explicitZero = computeRecipeKey(goodSelection(), goodMotorConfig(), { ...goodCarConfig(), gearReflectedInertiaKgM2: 0 } as CarConfig, null);
     expect(omitted).toBe(explicitZero);
   });
 
   it('gearReflectedInertiaKgM2が非zero値だと異なるキーになる(G1a時点からexact設計どおり読み込まれている証明)', () => {
-    const zero = computeRecipeKey(goodSelection(), goodMotorConfig(), goodCarConfig());
-    const nonZero = computeRecipeKey(goodSelection(), goodMotorConfig(), { ...goodCarConfig(), gearReflectedInertiaKgM2: 3.9e-10 } as CarConfig);
+    const zero = computeRecipeKey(goodSelection(), goodMotorConfig(), goodCarConfig(), null);
+    const nonZero = computeRecipeKey(goodSelection(), goodMotorConfig(), { ...goodCarConfig(), gearReflectedInertiaKgM2: 3.9e-10 } as CarConfig, null);
     expect(zero).not.toBe(nonZero);
   });
 });
@@ -146,13 +147,14 @@ describe('recipeKey.ts: computeRecipeKey(§13.2)', () => {
 // ---------------------------------------------------------------------------
 
 describe('recipeKey.ts: validateMaterialComposedBase(P3-4-Q10 §8)', () => {
-  // 27エントリの完全な列挙(設計v2 §3の契約: MotorConfig 17件+CarConfig 10件)。
+  // 28エントリの完全な列挙(MotorConfig 18件〈P4-1AでwindingTurnsRatio追加〉+CarConfig 10件)。
   // computeRecipeKeyが読む集合の「仕様側」の記述であり、実装側(非exportのcollector)とは
   // 独立にここへ書き下すことで、実装がこの集合から乖離した場合にテストが落ちる。
   //
-  // 検査の内訳(Suu_mot3独立レビューP2是正、2026-08-18): **数値入力26件のNaN双方向同期**
-  // + **varnished正規化domain 3件** + **公開API件数27**。27件全部をNaNへ差し替えるのではない
-  // ——27件目のmotorConfig.varnishedはboolean型で、collector内で0/1へ正規化されるため
+  // 検査の内訳(Suu_mot3独立レビューP2是正、2026-08-18。P4-1AでwindingTurnsRatio追加により
+  // 件数を更新): **数値入力27件のNaN双方向同期** + **varnished正規化domain 3件**
+  // + **公開API件数28**。28件全部をNaNへ差し替えるのではない
+  // ——残る1件のmotorConfig.varnishedはboolean型で、collector内で0/1へ正規化されるため
   // NaN差替えが型・意味の双方で実施不能である(設計v2 §2「varnishedは有限性の論点を持たない」)。
   // そのvarnishedについては、NaNの代わりにdomain全域(true/false/undefined)を明示的に固定する。
   const MOTOR_ENTRY_MUTATIONS: Array<[string, (v: number) => Partial<MotorConfig>]> = [
@@ -172,6 +174,9 @@ describe('recipeKey.ts: validateMaterialComposedBase(P3-4-Q10 §8)', () => {
     ['batteryCapacityRatio', (v) => ({ batteryCapacityRatio: v })],
     ['brushContactResistanceRatio', (v) => ({ brushContactResistanceRatio: v })],
     ['brushChatterProbabilityRatio', (v) => ({ brushChatterProbabilityRatio: v })],
+    // P4-1Aで追加。NaNは有限性検査(層1)で弾かれるため、他の乗数エントリと同じ扱いになる
+    // (範囲(0,1]の検査は層3で、専用のテストが別にある)。
+    ['windingTurnsRatio', (v) => ({ windingTurnsRatio: v })],
   ];
 
   const CAR_ENTRY_MUTATIONS: Array<[string, (v: number) => Partial<CarConfig>]> = [
@@ -188,7 +193,7 @@ describe('recipeKey.ts: validateMaterialComposedBase(P3-4-Q10 §8)', () => {
   ];
 
   // varnishedはbooleanを0/1へ正規化するエントリであり、非有限値を取り得ない(型上boolean)。
-  // したがってNaN差替えによる負例の対象外だが、27エントリの1件として件数には含まれる。
+  // したがってNaN差替えによる負例の対象外だが、28エントリの1件として件数には含まれる。
   const NON_MUTABLE_ENTRY_COUNT = 1; // motorConfig.varnished
   const TOTAL_ENTRY_COUNT = MOTOR_ENTRY_MUTATIONS.length + NON_MUTABLE_ENTRY_COUNT + CAR_ENTRY_MUTATIONS.length;
 
@@ -229,17 +234,21 @@ describe('recipeKey.ts: validateMaterialComposedBase(P3-4-Q10 §8)', () => {
   });
 
   // §9-4(必須): 件数固定。公開APIのみを用いる——computeRecipeKeyの出力書式
-  // `v{n}|{ids}|{numbers}` の第3セグメントの要素数が27であることを固定する。
+  // `v{n}|{ids}|{numbers}` の第3セグメントの要素数が28であることを固定する。
   // 非exportのcollectorへフィールドを足し忘れた/重複させた場合にここで検出される。
-  it('computeRecipeKeyの数値エントリ数は27である(件数固定、公開APIのみで検査)', () => {
-    const key = computeRecipeKey(goodSelection(), goodMotorConfig(), goodCarConfig());
+  // P4-1AでwindingTurnsRatioが加わり27→28。件数を固定する意味(collectorへの足し忘れ・
+  // 重複の検出)は変わらない。
+  it('computeRecipeKeyの数値エントリ数は28である(件数固定、公開APIのみで検査)', () => {
+    const key = computeRecipeKey(goodSelection(), goodMotorConfig(), goodCarConfig(), null);
     const segments = key.split('|');
-    expect(segments).toHaveLength(3);
-    expect(segments[2].split(',')).toHaveLength(27);
+    // P4-1Aで第4セグメント(canonical巻線記録、legacyは'none')が加わり3→4。
+    expect(segments).toHaveLength(4);
+    expect(segments[2].split(',')).toHaveLength(28);
+    expect(segments[3]).toBe('none');
   });
 
-  it('テスト側の27エントリ列挙が実装と一致している(仕様側の記述が実装から乖離していないことの固定)', () => {
-    expect(TOTAL_ENTRY_COUNT).toBe(27);
+  it('テスト側の28エントリ列挙が実装と一致している(仕様側の記述が実装から乖離していないことの固定)', () => {
+    expect(TOTAL_ENTRY_COUNT).toBe(28);
   });
 
   // §9-5(必須): 双方向同期。検査集合 ⊆ throw集合、および throw集合 ⊆ 検査集合。
@@ -249,7 +258,7 @@ describe('recipeKey.ts: validateMaterialComposedBase(P3-4-Q10 §8)', () => {
       const motorConfig = goodMotorConfig(mutate(NaN));
       const result = validateMaterialComposedBase(motorConfig, goodCarConfig());
       expect(result.ok).toBe(false); // 検査集合に含まれる
-      expect(() => computeRecipeKey(goodSelection(), motorConfig, goodCarConfig())).toThrow(); // throw集合にも含まれる
+      expect(() => computeRecipeKey(goodSelection(), motorConfig, goodCarConfig(), null)).toThrow(); // throw集合にも含まれる
       if (result.ok) throw new Error('到達しない');
       expect(result.reason).toContain(`motorConfig.${label}`);
     },
@@ -261,13 +270,13 @@ describe('recipeKey.ts: validateMaterialComposedBase(P3-4-Q10 §8)', () => {
       const carConfig = goodCarConfig(mutate(NaN));
       const result = validateMaterialComposedBase(goodMotorConfig(), carConfig);
       expect(result.ok).toBe(false);
-      expect(() => computeRecipeKey(goodSelection(), goodMotorConfig(), carConfig)).toThrow();
+      expect(() => computeRecipeKey(goodSelection(), goodMotorConfig(), carConfig, null)).toThrow();
       if (result.ok) throw new Error('到達しない');
       expect(result.reason).toContain(`carConfig.${label}`);
     },
   );
 
-  // varnished(27エントリ目)はboolean型でNaN差替えが型上不可能なため、NaN双方向同期の
+  // varnished(28エントリのうちNaN差替え不能な1件)はboolean型でNaN差替えが型上不可能なため、NaN双方向同期の
   // 代わりにdomain全域(true/false/undefined)をvalidator側・computeRecipeKey側の両方で
   // 明示的に閉包する(Suu_mot3独立レビューP2是正、2026-08-18)。
   it.each([[true], [false], [undefined]])(
@@ -280,7 +289,7 @@ describe('recipeKey.ts: validateMaterialComposedBase(P3-4-Q10 §8)', () => {
   it.each([[true], [false], [undefined]])(
     'varnished=%sのときcomputeRecipeKeyはthrowしない(同domainのthrow集合側の閉包)',
     (varnished) => {
-      expect(() => computeRecipeKey(goodSelection(), goodMotorConfig({ varnished }), goodCarConfig())).not.toThrow();
+      expect(() => computeRecipeKey(goodSelection(), goodMotorConfig({ varnished }), goodCarConfig(), null)).not.toThrow();
     },
   );
 
@@ -293,7 +302,7 @@ describe('recipeKey.ts: validateMaterialComposedBase(P3-4-Q10 §8)', () => {
     ];
     for (const [motorConfig, carConfig] of cases) {
       expect(validateMaterialComposedBase(motorConfig, carConfig)).toEqual({ ok: true });
-      expect(() => computeRecipeKey(goodSelection(), motorConfig, carConfig)).not.toThrow();
+      expect(() => computeRecipeKey(goodSelection(), motorConfig, carConfig, null)).not.toThrow();
     }
   });
 
@@ -446,5 +455,60 @@ describe('recipeKey.ts: 構造検査(P3-4-Q10 §8、G1a′作法の踏襲)', () 
     // export { ... } / export default による再公開も存在しないことを確認する。
     expect(RECIPE_KEY_SOURCE).not.toMatch(/^export\s*\{/mu);
     expect(RECIPE_KEY_SOURCE).not.toMatch(/^export\s+default\b/mu);
+  });
+});
+
+describe('P4-1A: 巻線記録のrecipeKey収載', () => {
+  const record: WindingRecord = Array.from({ length: 30 }, (_, i) => ({
+    position: 0.25, arm: 'left' as const, direction: (i === 10 ? -1 : 1) as 1 | -1, tension: 0.5,
+  }));
+
+  it('巻線記録なし(legacy)はnone、ありはcanonical文字列そのものが入る', () => {
+    const legacyKey = computeRecipeKey(goodSelection(), goodMotorConfig(), goodCarConfig(), null);
+    const recordedKey = computeRecipeKey(goodSelection(), goodMotorConfig(), goodCarConfig(), record);
+    expect(legacyKey.split('|')[3]).toBe('none');
+    expect(recordedKey.split('|')[3]).toBe(encodeWindingRecordCanonical(record));
+    expect(recordedKey).not.toBe(legacyKey);
+  });
+
+  it('巻線が1ターンでも違えば別のキーになる(要約・hashではない)', () => {
+    const other = record.map((t, i) => (i === 10 ? { ...t, direction: 1 as const } : t));
+    expect(computeRecipeKey(goodSelection(), goodMotorConfig(), goodCarConfig(), record))
+      .not.toBe(computeRecipeKey(goodSelection(), goodMotorConfig(), goodCarConfig(), other));
+  });
+
+  it('同一の記録は同一のキーになる(別実体でも一致)', () => {
+    const copy = record.map((t) => ({ ...t }));
+    expect(computeRecipeKey(goodSelection(), goodMotorConfig(), goodCarConfig(), copy))
+      .toBe(computeRecipeKey(goodSelection(), goodMotorConfig(), goodCarConfig(), record));
+  });
+
+  it('windingTurnsRatioはキーへ反映される(既定1.0で正規化)', () => {
+    const base = computeRecipeKey(goodSelection(), goodMotorConfig(), goodCarConfig(), null);
+    const explicitOne = computeRecipeKey(goodSelection(), { ...goodMotorConfig(), windingTurnsRatio: 1 }, goodCarConfig(), null);
+    const wound = computeRecipeKey(goodSelection(), { ...goodMotorConfig(), windingTurnsRatio: 0.8 }, goodCarConfig(), null);
+    expect(explicitOne).toBe(base);
+    expect(wound).not.toBe(base);
+  });
+});
+
+describe('P4-1A: validateMaterialComposedBaseの層3(windingTurnsRatio)', () => {
+  it('undefinedと(0,1]は受理する', () => {
+    for (const value of [undefined, 1, 0.9333, 1 / 256]) {
+      const result = validateMaterialComposedBase({ ...goodMotorConfig(), windingTurnsRatio: value }, goodCarConfig());
+      expect(result.ok, `value=${String(value)}`).toBe(true);
+    }
+  });
+
+  it('0・負・1超・非有限は拒否する', () => {
+    for (const value of [0, -0.1, 1.0001, Number.NaN, Number.POSITIVE_INFINITY]) {
+      const result = validateMaterialComposedBase({ ...goodMotorConfig(), windingTurnsRatio: value }, goodCarConfig());
+      expect(result.ok, `value=${String(value)}`).toBe(false);
+    }
+  });
+
+  it('effectiveTurnsRatioのbase禁止契約は変更されていない(同じ0.9333で挙動が分かれる)', () => {
+    expect(validateMaterialComposedBase({ ...goodMotorConfig(), effectiveTurnsRatio: 0.9333 }, goodCarConfig()).ok).toBe(false);
+    expect(validateMaterialComposedBase({ ...goodMotorConfig(), windingTurnsRatio: 0.9333 }, goodCarConfig()).ok).toBe(true);
   });
 });

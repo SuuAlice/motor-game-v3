@@ -4,6 +4,8 @@
 
 import type { MaterialSelection } from './materialMapping';
 import type { MotorConfig } from '../engine/motorPhysics';
+import { isValidWindingTurnsRatio } from '../engine/motorPhysics';
+import { encodeWindingRecordCanonical, type WindingRecord } from './windingRecord';
 import type { CarConfig } from '../engine/vehiclePhysics';
 
 // Suu_mot3 G1a照合是正P1: 計画v12 §13.2はcarConfig.gearReflectedInertiaKgM2をexact設計として
@@ -15,7 +17,11 @@ import type { CarConfig } from '../engine/vehiclePhysics';
 // (RECIPE_KEY_VERSIONは変更しない)。
 type CarConfigWithGearReflectedInertia = CarConfig & { readonly gearReflectedInertiaKgM2?: number };
 
-export const RECIPE_KEY_VERSION = 1;
+// P4-1A(2026-08-28人間承認): windingTurnsRatioの追加とcanonical巻線記録の収載により1→2。
+// **v1キーとv2キーは一致しない**——保存済みnotebook recordはv1キーを持ち、素材selectionを
+// 保存していないため再計算もできない。したがって過去記録は新しいv2 runのbaselineにならず、
+// UIは「比較可能な過去記録なし」と明示する(承認項目7)。
+export const RECIPE_KEY_VERSION = 2;
 
 /**
  * collectRecipeKeyNumericFieldsの1エントリ(非export)。
@@ -67,6 +73,8 @@ function collectRecipeKeyNumericFields(
     { label: 'motorConfig.batteryCapacityRatio', value: motorConfig.batteryCapacityRatio ?? 1.0 },
     { label: 'motorConfig.brushContactResistanceRatio', value: motorConfig.brushContactResistanceRatio ?? 1.0 },
     { label: 'motorConfig.brushChatterProbabilityRatio', value: motorConfig.brushChatterProbabilityRatio ?? 1.0 },
+    // P4-1A: 巻線由来ratio(既定1.0で正規化、undefinedと明示1.0を区別しない)。
+    { label: 'motorConfig.windingTurnsRatio', value: motorConfig.windingTurnsRatio ?? 1.0 },
     // CarConfig(§13.2のexact設計どおり10フィールド全て、P1是正)
     { label: 'carConfig.massG', value: carConfig.massG },
     { label: 'carConfig.gearRatio', value: carConfig.gearRatio },
@@ -86,7 +94,12 @@ function collectRecipeKeyNumericFields(
  * RunSnapshot capture前の値)から、性能に影響する値のみをcanonical文字列化する。
  * DestructionState等の動的run内状態、およびWearState由来の実効値は一切含めない。
  */
-export function computeRecipeKey(selection: MaterialSelection, motorConfig: MotorConfig, carConfig: CarConfig): string {
+export function computeRecipeKey(
+  selection: MaterialSelection,
+  motorConfig: MotorConfig,
+  carConfig: CarConfig,
+  windingRecord: WindingRecord | null,
+): string {
   // 素材ID5フィールド(R2確定、固定順)。文字列そのまま、正規化不要(列挙型IDのため
   // -0/NaN/Infinity等の懸念がない)。
   const materialIds: string[] = [selection.wireId, selection.magnetId, selection.gearId, selection.batteryId, selection.brushId];
@@ -103,7 +116,12 @@ export function computeRecipeKey(selection: MaterialSelection, motorConfig: Moto
     return v === 0 ? 0 : v; // -0を+0へ正規化(Object.is(-0,0)はfalseだが-0+0===0を利用)
   });
 
-  return `v${RECIPE_KEY_VERSION}|${materialIds.join(',')}|${normalized.join(',')}`;
+  // P4-1A(承認項目7): canonical巻線記録**そのもの**を第4セグメントへ含める。
+  // hash・要約は使わない——衝突しうる代替を鍵に使うと、別の巻線が同一レシピと見なされる。
+  // 巻線記録を持たないローター(legacy)は`none`。
+  const winding = windingRecord === null ? 'none' : encodeWindingRecordCanonical(windingRecord);
+
+  return `v${RECIPE_KEY_VERSION}|${materialIds.join(',')}|${normalized.join(',')}|${winding}`;
 }
 
 /**
@@ -157,6 +175,16 @@ export function validateMaterialComposedBase(
     return {
       ok: false,
       reason: `motorConfig.effectiveTurnsRatioが1以外のbase configはrun開始に使用できません(実行時の破壊状態合成値が混入しています): ${effectiveTurnsRatio}`,
+    };
+  }
+
+  // 層3(P4-1A、2026-08-28人間承認): windingTurnsRatioのbase範囲(0,1]。述語は
+  // motorPhysics.tsを単一出典とし、restoreRunSnapshot・save validatorと同じ意味を使う。
+  const { windingTurnsRatio } = motorConfig;
+  if (windingTurnsRatio !== undefined && !isValidWindingTurnsRatio(windingTurnsRatio)) {
+    return {
+      ok: false,
+      reason: `motorConfig.windingTurnsRatioは(0, 1]の有限値である必要があります: ${windingTurnsRatio}`,
     };
   }
 

@@ -335,7 +335,11 @@ export function prepareDestructionRun(
   // 3・5・6: recipeKey(exact1回)→ assembler → 初期DestructionState。
   // recipeKeyはWear反映**前**のmaterialComposedBaseから計算する(§14.2の3、レシピ同一性は
   // 個体の劣化状態に依存しない)。
-  const recipeKey = computeRecipeKey(resolved.selection, composed.motorConfig, composed.carConfig);
+  // P4-1A(承認項目7): 装備中ローターの巻線記録をrecipeKeyへ含める。legacy個体はnull。
+  // 記録の出典はローター個体1つだけで、ここで別途組み立てない(単一出典)。
+  const equippedRotor = inventory.rotorAssemblies.find((r) => r.assemblyId === loadout.rotorAssemblyId);
+  const windingRecord = equippedRotor?.winding.kind === 'recorded' ? equippedRotor.winding.record : null;
+  const recipeKey = computeRecipeKey(resolved.selection, composed.motorConfig, composed.carConfig, windingRecord);
 
   // 4: Wear反映(§14.1)。materialComposedBaseへ適用して実効configを得る。
   // 走行中の再評価は行わない(1回のみ)。歯欠け由来の効率因子はここでは掛からない——
