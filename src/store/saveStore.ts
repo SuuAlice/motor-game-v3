@@ -11,6 +11,7 @@
 import { create } from 'zustand';
 import { createJSONStorage, persist, type StateStorage } from 'zustand/middleware';
 import type { MotorConfig } from '../engine/motorPhysics';
+import { computeMaxTurns, isValidWindingTurnsRatio } from '../engine/motorPhysics';
 import type { CarConfig, EnergyBreakdown, VehicleSimState } from '../engine/vehiclePhysics';
 import { captureRunSnapshot, restoreRunSnapshot, type CaptureRunSnapshotInput, type RunSnapshot } from '../engine/destructionOrchestration';
 import type { DestructionModeId } from '../engine/destructionModes';
@@ -23,6 +24,8 @@ const DESTRUCTION_MODE_IDS: readonly DestructionModeId[] = ['D01', 'D02', 'D03',
 import type { DegradationDiff, RunOutcome } from '../engine/destructionOrchestration';
 import type { BearingAssemblyState, BodyPartState, EquipmentRole, InventoryItem, PlayerInventory, RotorAssemblyState, StackableStockEntry, WearState } from '../materials/inventoryItem';
 import { GEAR_TOTAL_TOOTH_COUNT } from '../materials/inventoryItem';
+import { resolveWindingRunnability, validateWindingRecord } from '../materials/windingRecord';
+import { resolveRotorAssemblyCompletion, type CompleteRotorAssemblyCommand, type CompleteRotorAssemblyFailure } from './rotorAssembly';
 import { BATTERY_MATERIALS, BODY_MATERIALS, BRUSH_MATERIALS, COATING_MATERIALS, GEAR_MATERIALS, MAGNET_MATERIALS, WIRE_MATERIALS } from '../materials/materials';
 import { DEFAULT_GARAGE_SELECTION, type GarageSelection } from '../data/partPresets';
 import type { CourseProgress, CourseRunRecord } from './gameStore';
@@ -214,9 +217,13 @@ export interface PersistedSaveState {
 // **同一migrationで**取り込むため1→2へ引き上げる。`SAVE_KEY`は変更しない——SAVE_KEYの
 // バージョン番号はv15→v16のような大規模な永続化形式変更を表す接頭辞であり、
 // フィールド追加はその粒度に当たらない。
-const SCHEMA_VERSION = 2;
-/** migration元のschemaVersion。`readLatestV16`がこの値を検出したときだけv2へ移行する。 */
+// P4-1A(2026-08-28人間承認): `RotorAssemblyState`へ`winding`/`coatingDamageFraction`を
+// 追加するため2→3へ引き上げる。`SAVE_KEY`は変更しない(フィールド追加はv15→v16のような
+// 永続化形式変更の粒度に当たらない、上記と同じ判断)。
+const SCHEMA_VERSION = 3;
+/** migration元のschemaVersion。v1は**v2を経由してv3へ**移行する(段階を飛ばさない)。 */
 const SCHEMA_VERSION_V1 = 1;
+const SCHEMA_VERSION_V2 = 2;
 const SAVE_KEY = 'v16:save';
 const V15_PROGRESS_KEY = 'v15:progress';
 const V15_NOTEBOOK_KEY = 'v15:notebook';
@@ -322,6 +329,10 @@ function isValidMotorConfig(v: unknown): v is MotorConfig {
   if (!optionalFinite.every((key) => c[key] === undefined || isFiniteNumber(c[key]))) return false;
   if (c.parallelStrands !== undefined && c.parallelStrands !== 1 && c.parallelStrands !== 2) return false;
   if (c.varnished !== undefined && typeof c.varnished !== 'boolean') return false;
+  // P4-1A: 巻線由来ratioのbase範囲(0,1]。**述語はmotorPhysics.tsが単一出典**で、ここに
+  // 独自の範囲式を書かない(2箇所に同じ不変条件を書くと片方だけ更新されて乖離する)。
+  // 上のoptionalFiniteへ足さないのは、有限性だけでは0・負・1超を通してしまうため。
+  if (c.windingTurnsRatio !== undefined && !isValidWindingTurnsRatio(c.windingTurnsRatio)) return false;
   return true;
 }
 
@@ -436,7 +447,10 @@ function isValidPlayerInventory(v: unknown): v is PlayerInventory {
     if (typeof rr.assemblyId !== 'string') return false;
     if (rr.sourceWireMaterialId !== null && !(typeof rr.sourceWireMaterialId === 'string' && WIRE_MATERIAL_ID_SET.has(rr.sourceWireMaterialId))) return false;
     if (!isFiniteNumber(rr.consumedWireM) || (rr.consumedWireM as number) < 0) return false;
-    return typeof rr.collapsed === 'boolean' && typeof rr.burnedOut === 'boolean';
+    if (typeof rr.collapsed !== 'boolean' || typeof rr.burnedOut !== 'boolean') return false;
+    // P4-1A: 被膜損傷は[0,1]。既存のisValidFraction(bodyParts.scorchFractionと同じ述語)を使う。
+    if (!isValidFraction(rr.coatingDamageFraction)) return false;
+    return isValidRotorWindingState(rr.winding);
   })) return false;
   const rotorIds = (c.rotorAssemblies as RotorAssemblyState[]).map((r) => r.assemblyId);
   if (new Set(rotorIds).size !== rotorIds.length) return false;
@@ -899,6 +913,40 @@ export type ReadLatestResult =
  * `instrumentOwnership: []`を補ってから新validatorへ通すことで表現する——**検証ロジックを
  * 二重に書かない**(同じ不変条件を2箇所に書くと、片方だけ更新されて乖離する)。
  */
+/**
+ * P4-1A: `RotorWindingState`(入れ子判別union)の深い検証。
+ *
+ * `kind`で分岐し、`recorded`のときだけ記録・線径・並列本数を検証する。記録本体の検証は
+ * `validateWindingRecord`(materials側の単一出典)へ委譲する——量子化・上限・arm/directionの
+ * 規則をsave側で書き直すと、二重定義が乖離する。
+ */
+function isValidRotorWindingState(v: unknown): boolean {
+  if (!v || typeof v !== 'object') return false;
+  const w = v as Record<string, unknown>;
+  if (w.kind === 'legacy') {
+    // legacy枝が余分なフィールドを持つのは不整合(判別unionの表現不能状態を復元境界でも拒否する、
+    // P3-3-Q15-4のnoPenalty枝と同じ規律)。
+    return Object.keys(w).length === 1;
+  }
+  if (w.kind !== 'recorded') return false;
+  // recorded枝もキー集合を厳密に固定する(legacy枝と同じfail-closed規律)。余分fieldを
+  // 受理すると、延期中の`coatingMaterialId`等を外部saveへ注入するだけで復元でき、
+  // 禁止境界を迂回できてしまう。
+  const RECORDED_KEYS = ['kind', 'record', 'wireGaugeMm', 'parallelStrands'];
+  if (Object.keys(w).length !== RECORDED_KEYS.length) return false;
+  if (!RECORDED_KEYS.every((key) => key in w)) return false;
+  if (!isFiniteNumber(w.wireGaugeMm) || (w.wireGaugeMm as number) <= 0) return false;
+  if (w.parallelStrands !== 1 && w.parallelStrands !== 2) return false;
+  const validated = validateWindingRecord(w.record);
+  if (!validated.ok) return false;
+  // P4-1A: **生成境界と同じ条件を復元境界でも課す**——recorded個体は10〜150ターンかつ
+  // 巻きスペースの物理上限以下でなければならない。ここを緩めると、外部化されたsaveを
+  // 書き換えるだけで生成境界を迂回でき、走行不可のローターが装備状態で復元される。
+  // 判定はどちらも既存の単一出典(`resolveWindingRunnability`・`computeMaxTurns`)を使う。
+  if (!resolveWindingRunnability(validated.value).runnable) return false;
+  return validated.value.length <= computeMaxTurns(w.wireGaugeMm as number, w.parallelStrands);
+}
+
 function isValidPersistedSaveStateV1(v: unknown): boolean {
   if (!v || typeof v !== 'object') return false;
   const c = v as Record<string, unknown>;
@@ -906,11 +954,35 @@ function isValidPersistedSaveStateV1(v: unknown): boolean {
   // v1 stateのschemaVersionは1である。新validatorは`schemaVersion === SCHEMA_VERSION`(=2)を
   // 要求するため、**移行後の姿**(schemaVersion=2+instrumentOwnership補完)を作って委譲する。
   if (c.schemaVersion !== SCHEMA_VERSION_V1) return false;
-  return isValidPersistedSaveState({
+  // P4-1A: 委譲先をv2 validatorへ変更した(v1→v2→v3の段階を飛ばさない)。
+  return isValidPersistedSaveStateV2({
     ...c,
-    schemaVersion: SCHEMA_VERSION,
+    schemaVersion: SCHEMA_VERSION_V2,
     instrumentOwnership: defaultInstrumentOwnership(),
   });
+}
+
+/**
+ * v2 stateの妥当性(P4-1A)。v2は`rotorAssemblies`に`winding`/`coatingDamageFraction`を
+ * 持たないため、新validatorをそのまま当てると既存セーブがすべて`corrupted`になる。
+ * v1と同じ規律で、**移行後の姿を作って新validatorへ委譲する**——検証ロジックを二重に書かない。
+ */
+function isValidPersistedSaveStateV2(v: unknown): boolean {
+  if (!v || typeof v !== 'object') return false;
+  const c = v as Record<string, unknown>;
+  if (c.schemaVersion !== SCHEMA_VERSION_V2) return false;
+  // v2が新フィールドを持つのは不整合(v1validatorがinstrumentOwnershipを拒否するのと同型)。
+  const inventory = c.inventory;
+  if (inventory && typeof inventory === 'object') {
+    const rotors = (inventory as Record<string, unknown>).rotorAssemblies;
+    if (Array.isArray(rotors)) {
+      for (const r of rotors) {
+        if (!r || typeof r !== 'object') continue; // 形の不正は新validatorが弾く
+        if ('winding' in r || 'coatingDamageFraction' in r) return false;
+      }
+    }
+  }
+  return isValidPersistedSaveState(migratePersistedSaveStateV2ToV3(c));
 }
 
 /**
@@ -918,11 +990,38 @@ function isValidPersistedSaveStateV1(v: unknown): boolean {
  * `codexRecords`のlegacyエントリは2フィールドを持たないまま残る——読み取り側(union)が
  * 受理するため、過去に発見済みのモード記録を失わない。
  */
-function migratePersistedSaveStateV1ToV2(state: Record<string, unknown>): PersistedSaveState {
+function migratePersistedSaveStateV1ToV2(state: Record<string, unknown>): Record<string, unknown> {
+  return {
+    ...state,
+    schemaVersion: SCHEMA_VERSION_V2,
+    instrumentOwnership: defaultInstrumentOwnership(),
+  };
+}
+
+/**
+ * v2 state → v3 stateへの移行(P4-1A)。**追加のみで既存フィールドは書き換えない**。
+ *
+ * 旧ローターは`winding: { kind: 'legacy' }`・`coatingDamageFraction: 0`とする。
+ * **存在しなかった巻線記録を`coilTurns`等から捏造しない**——捏造すると、型紙・レシピ・
+ * 描画がすべて実在しない軌跡を正として参照することになる。
+ */
+function migratePersistedSaveStateV2ToV3(state: Record<string, unknown>): PersistedSaveState {
+  const inventory = state.inventory;
+  const migratedInventory = inventory && typeof inventory === 'object'
+    ? {
+        ...(inventory as Record<string, unknown>),
+        rotorAssemblies: Array.isArray((inventory as Record<string, unknown>).rotorAssemblies)
+          ? ((inventory as Record<string, unknown>).rotorAssemblies as unknown[]).map((r) =>
+              r && typeof r === 'object'
+                ? { ...(r as Record<string, unknown>), winding: { kind: 'legacy' }, coatingDamageFraction: 0 }
+                : r)
+          : (inventory as Record<string, unknown>).rotorAssemblies,
+      }
+    : inventory;
   return {
     ...(state as unknown as PersistedSaveState),
     schemaVersion: SCHEMA_VERSION,
-    instrumentOwnership: defaultInstrumentOwnership(),
+    inventory: migratedInventory as PersistedSaveState['inventory'],
   };
 }
 
@@ -943,7 +1042,18 @@ function readLatestV16(): ReadLatestResult {
   //    振る舞う不整合が生じる。storageErrorを返せば次回起動で再試行され、冪等に収束する。
   if (parsed.wrapper.version === SCHEMA_VERSION_V1) {
     if (!isValidPersistedSaveStateV1(parsed.wrapper.state)) return { kind: 'corrupted' };
-    const migrated = migratePersistedSaveStateV1ToV2(parsed.wrapper.state as Record<string, unknown>);
+    // P4-1A: v1→v2→v3の順に適用する。段階を飛ばす専用経路を作らない(移行の分岐が増えるほど
+    // 「どの経路を通ったか」で結果が変わる余地ができる)。
+    const v2 = migratePersistedSaveStateV1ToV2(parsed.wrapper.state as Record<string, unknown>);
+    const migrated = migratePersistedSaveStateV2ToV3(v2);
+    if (!isValidPersistedSaveState(migrated)) return { kind: 'corrupted' };
+    if (writeV16(migrated) === 'ioError') return { kind: 'storageError' };
+    return { kind: 'ok', state: migrated };
+  }
+
+  if (parsed.wrapper.version === SCHEMA_VERSION_V2) {
+    if (!isValidPersistedSaveStateV2(parsed.wrapper.state)) return { kind: 'corrupted' };
+    const migrated = migratePersistedSaveStateV2ToV3(parsed.wrapper.state as Record<string, unknown>);
     if (!isValidPersistedSaveState(migrated)) return { kind: 'corrupted' };
     if (writeV16(migrated) === 'ioError') return { kind: 'storageError' };
     return { kind: 'ok', state: migrated };
@@ -1363,6 +1473,19 @@ export interface SaveStore {
     | { ok: false; reason: string };
   purchaseCartAction: (cartLines: readonly CartLine[]) => PurchaseResult;
   salvageAction: (itemId: string) => SalvageConfirmResult;
+  /**
+   * P4-1A(2026-08-28人間承認、承認項目8・9): 巻線完成 → ローター個体生成。
+   *
+   * UIが渡せるのは**意思入力だけ**(記録・線材ID・巻き始めに固定した線径/並列本数)で、
+   * 在庫・装備・ID採番はここが`get()`から読む。`assemblyId`もここで採番する——
+   * UIがIDを供給できると、重複IDや既存個体の上書きをUI側から起こせてしまう。
+   *
+   * 線材在庫の消費・ローター生成・装備更新・カウンタ更新は**1回の書込み**で行い、
+   * 書込みに失敗したら`persistFailed`を返して**メモリ上のstoreも更新しない**。
+   */
+  completeRotorAssemblyAction: (command: CompleteRotorAssemblyCommand) =>
+    | { ok: true; rotorAssemblyId: string }
+    | { ok: false; failure: CompleteRotorAssemblyFailure };
 }
 
 function toShopEconomyState(inventory: PlayerInventory, nextItemCounter: number): ShopEconomyState {
@@ -1764,6 +1887,37 @@ export const useSaveStore = create<SaveStore>()(
         if (!writeOrFail(set, nextState)) return { ok: false, reason: gateErrorToReasonJa({ kind: 'storageError' }) };
         applyFreshStateToStore(set, nextState);
         return { ok: true, state: toShopEconomyState(nextInventory, nextIdCounters.nextItemCounter) };
+      },
+
+      completeRotorAssemblyAction: (command) => {
+        const gate = readGatedFreshState(set, get, true);
+        if (!gate.ok) return { ok: false, failure: { kind: 'persistFailed', detail: gateErrorToReasonJa(gate.error) } };
+        const fresh = gate.fresh;
+        // ID採番はstoreの責務。既存のbearing採番と同じ`assembly-%04d`規約に合わせる。
+        const assemblyId = `assembly-${String(fresh.idCounters.nextAssemblyCounter).padStart(4, '0')}`;
+        const resolved = resolveRotorAssemblyCompletion({
+          command,
+          inventory: fresh.inventory,
+          loadout: fresh.equipmentLoadout,
+          assemblyId,
+        });
+        if (!resolved.ok) return { ok: false, failure: resolved.failure };
+        const nextState: PersistedSaveState = {
+          ...fresh,
+          // 承認項目9: configも同じ書込み境界に含める。`ProgressSlice.config`が永続正典であり、
+          // ここを別の書込みにすると「ローターは保存されたのにconfigが古い」状態が生まれる。
+          progress: { ...fresh.progress, config: resolved.config },
+          inventory: resolved.inventory,
+          equipmentLoadout: resolved.loadout,
+          idCounters: { ...fresh.idCounters, nextAssemblyCounter: fresh.idCounters.nextAssemblyCounter + 1 },
+        };
+        // 書込み失敗時はapplyFreshStateToStoreを呼ばない——メモリ上だけ成功扱いにすると、
+        // 次回起動で消えるローターを装備した状態で走れてしまう。
+        if (!writeOrFail(set, nextState)) {
+          return { ok: false, failure: { kind: 'persistFailed', detail: gateErrorToReasonJa({ kind: 'storageError' }) } };
+        }
+        applyFreshStateToStore(set, nextState);
+        return { ok: true, rotorAssemblyId: assemblyId };
       },
 
       purchaseInstrumentAction: (instrumentId) => {

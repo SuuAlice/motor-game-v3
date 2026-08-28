@@ -1664,13 +1664,39 @@ describe('P3-4 G1b beginRunActionWithPreparation(A3、Q10)', () => {
 //   書戻し失敗時にメモリ上だけ成功扱いにせず、次回起動で再試行できる冪等設計。
 // ---------------------------------------------------------------------------
 describe('P3-4 G7: SCHEMA_VERSION 1→2 migration(項目J・K同梱)', () => {
-  /** v1形状(instrumentOwnershipを持たない)のstateをSAVE_KEYへ直接書き込む。 */
+  /**
+   * v1形状のstateをSAVE_KEYへ直接書き込む。
+   * v1は`instrumentOwnership`(v2で追加)も、ローターの`winding`/`coatingDamageFraction`
+   * (P4-1Aのv3で追加)も持たない——現在のfreshBootstrapから両方を取り除いて再現する。
+   */
   function writeV1Save(mutate: (state: Record<string, unknown>) => void = () => {}): void {
     const fresh = __testOnly.freshBootstrap() as unknown as Record<string, unknown>;
     const { instrumentOwnership: _omitted, ...v1State } = fresh;
     v1State.schemaVersion = 1;
+    v1State.inventory = stripV3RotorFields(v1State.inventory);
     mutate(v1State);
     fakeStorage.setItem('v16:save', JSON.stringify({ state: v1State, version: 1 }));
+  }
+
+  /** v3で追加したローターfieldを取り除き、v1/v2時点の形へ戻す。 */
+  function stripV3RotorFields(inventory: unknown): unknown {
+    const inv = inventory as Record<string, unknown>;
+    if (!Array.isArray(inv.rotorAssemblies)) return inventory;
+    return {
+      ...inv,
+      rotorAssemblies: (inv.rotorAssemblies as Record<string, unknown>[]).map((r) => {
+        const { winding: _w, coatingDamageFraction: _c, ...rest } = r;
+        return rest;
+      }),
+    };
+  }
+
+  /** v2形状(instrumentOwnershipはあるが、v3のローターfieldは無い)。 */
+  function writeV2Save(mutate: (state: Record<string, unknown>) => void = () => {}): void {
+    const fresh = __testOnly.freshBootstrap() as unknown as Record<string, unknown>;
+    const v2State = { ...fresh, schemaVersion: 2, inventory: stripV3RotorFields(fresh.inventory) };
+    mutate(v2State);
+    fakeStorage.setItem('v16:save', JSON.stringify({ state: v2State, version: 2 }));
   }
 
   beforeEach(() => {
@@ -1686,7 +1712,7 @@ describe('P3-4 G7: SCHEMA_VERSION 1→2 migration(項目J・K同梱)', () => {
 
     expect(result.kind).toBe('ok');
     if (result.kind !== 'ok') throw new Error('unreachable');
-    expect(result.state.schemaVersion).toBe(2);
+    expect(result.state.schemaVersion).toBe(3);
     expect(result.state.instrumentOwnership).toEqual({ ownedInstrumentIds: [] });
   });
 
@@ -1694,10 +1720,10 @@ describe('P3-4 G7: SCHEMA_VERSION 1→2 migration(項目J・K同梱)', () => {
     writeV1Save();
     __testOnly.readLatestV16();
 
-    // 書き戻し後の生データはversion 2になっている
+    // 書き戻し後の生データは最新版(v3)になっている
     const raw = JSON.parse(fakeStorage.getItem('v16:save')!) as { version: number; state: { schemaVersion: number } };
-    expect(raw.version).toBe(2);
-    expect(raw.state.schemaVersion).toBe(2);
+    expect(raw.version).toBe(3);
+    expect(raw.state.schemaVersion).toBe(3);
     // 2回目の読み取りはmigrationを経ずそのまま成功する
     expect(__testOnly.readLatestV16().kind).toBe('ok');
   });
@@ -1735,7 +1761,7 @@ describe('P3-4 G7: SCHEMA_VERSION 1→2 migration(項目J・K同梱)', () => {
 
     expect(result.kind).toBe('storageError');
     fakeStorage.setItem = originalSetItem;
-    // 書けなかったのでストレージはv1のまま。次回起動で再試行され、成功すればv2へ収束する。
+    // 書けなかったのでストレージはv1のまま。次回起動で再試行され、成功すればv3へ収束する。
     const raw = JSON.parse(fakeStorage.getItem('v16:save')!) as { version: number };
     expect(raw.version).toBe(1);
     expect(__testOnly.readLatestV16().kind).toBe('ok');
@@ -1776,6 +1802,194 @@ describe('P3-4 G7: SCHEMA_VERSION 1→2 migration(項目J・K同梱)', () => {
 
     expect(__testOnly.readLatestV16().kind).toBe('corrupted');
   });
+
+  // -------------------------------------------------------------------------
+  // P4-1A(2026-08-28人間承認): SCHEMA_VERSION 2→3 migration。
+  // 旧ローターは winding:{kind:'legacy'} / coatingDamageFraction:0 とし、
+  // **存在しなかった巻線記録を捏造しない**。
+  // -------------------------------------------------------------------------
+
+  it('v2セーブはcorruptedにならず、旧ローターがlegacy由来として補完される', () => {
+    writeV2Save();
+
+    const result = __testOnly.readLatestV16();
+
+    expect(result.kind).toBe('ok');
+    if (result.kind !== 'ok') throw new Error('unreachable');
+    expect(result.state.schemaVersion).toBe(3);
+    for (const rotor of result.state.inventory.rotorAssemblies) {
+      expect(rotor.winding).toStrictEqual({ kind: 'legacy' });
+      expect(rotor.coatingDamageFraction).toBe(0);
+    }
+  });
+
+  it('v2→v3は追加のみで既存フィールドを書き換えない', () => {
+    writeV2Save((state) => {
+      (state.progress as Record<string, unknown>).selectedTrackId = 'hill-climb';
+    });
+
+    const result = __testOnly.readLatestV16();
+
+    expect(result.kind).toBe('ok');
+    if (result.kind !== 'ok') throw new Error('unreachable');
+    expect(result.state.progress.selectedTrackId).toBe('hill-climb');
+    const rotor = result.state.inventory.rotorAssemblies[0]!;
+    expect(rotor.assemblyId).toBe('initial-rotor-01');
+    expect(rotor.consumedWireM).toBe(1);
+  });
+
+  it('v1セーブはv2を経てv3まで一度に収束する', () => {
+    writeV1Save();
+
+    const result = __testOnly.readLatestV16();
+
+    expect(result.kind).toBe('ok');
+    if (result.kind !== 'ok') throw new Error('unreachable');
+    expect(result.state.schemaVersion).toBe(3);
+    expect(result.state.instrumentOwnership).toEqual({ ownedInstrumentIds: [] });
+    expect(result.state.inventory.rotorAssemblies[0]!.winding).toStrictEqual({ kind: 'legacy' });
+  });
+
+  it('v2が新フィールドを持っている場合は不整合としてcorrupted', () => {
+    writeV2Save((state) => {
+      const inv = state.inventory as Record<string, unknown>;
+      const rotors = inv.rotorAssemblies as Record<string, unknown>[];
+      rotors[0] = { ...rotors[0]!, coatingDamageFraction: 0 };
+    });
+
+    expect(__testOnly.readLatestV16().kind).toBe('corrupted');
+  });
+
+  it('v2→v3の書戻しI/O失敗はstorageError——メモリ上だけ成功扱いにしない', () => {
+    writeV2Save();
+    const originalSetItem = fakeStorage.setItem;
+    fakeStorage.setItem = () => { throw new Error('quota exceeded'); };
+
+    expect(__testOnly.readLatestV16().kind).toBe('storageError');
+
+    fakeStorage.setItem = originalSetItem;
+    const raw = JSON.parse(fakeStorage.getItem('v16:save')!) as { version: number };
+    expect(raw.version).toBe(2);
+    expect(__testOnly.readLatestV16().kind).toBe('ok');
+  });
+
+  it('v3のローターfieldが壊れているセーブはfail-closed(部分救済しない)', () => {
+    const cases: { readonly label: string; readonly winding: unknown; readonly damage: unknown }[] = [
+      { label: 'coatingDamageFraction=-0.01', winding: { kind: 'legacy' }, damage: -0.01 },
+      { label: 'coatingDamageFraction=1.01', winding: { kind: 'legacy' }, damage: 1.01 },
+      { label: 'legacy枝が余分なフィールドを持つ', winding: { kind: 'legacy', record: [] }, damage: 0 },
+      { label: '未知のkind', winding: { kind: 'wound' }, damage: 0 },
+      { label: 'recordedなのに記録が非量子化', winding: { kind: 'recorded', record: [{ position: 0.3, arm: 'left', direction: 1, tension: 0.5 }], wireGaugeMm: 0.4, parallelStrands: 1 }, damage: 0 },
+      { label: 'recordedなのにparallelStrandsが3', winding: { kind: 'recorded', record: [], wireGaugeMm: 0.4, parallelStrands: 3 }, damage: 0 },
+      { label: 'recordedが余分なfieldを持つ(coatingMaterialId注入)', winding: { kind: 'recorded', record: Array.from({ length: 30 }, () => ({ position: 0.5, arm: 'left', direction: 1, tension: 0.5 })), wireGaugeMm: 0.4, parallelStrands: 1, coatingMaterialId: 'coating-polyester' }, damage: 0 },
+      { label: 'recordedがfieldを欠く(parallelStrands不在)', winding: { kind: 'recorded', record: Array.from({ length: 30 }, () => ({ position: 0.5, arm: 'left', direction: 1, tension: 0.5 })), wireGaugeMm: 0.4 }, damage: 0 },
+      { label: 'recordedなのに記録が151ターン', winding: { kind: 'recorded', record: Array.from({ length: 151 }, () => ({ position: 0.5, arm: 'left', direction: 1, tension: 0.5 })), wireGaugeMm: 0.4, parallelStrands: 1 }, damage: 0 },
+    ];
+    for (const testCase of cases) {
+      fakeStorage = makeFakeLocalStorage();
+      // @ts-expect-error テスト用にglobalThis.localStorageを差し替える
+      globalThis.localStorage = fakeStorage;
+      const fresh = __testOnly.freshBootstrap() as unknown as Record<string, unknown>;
+      const inv = fresh.inventory as Record<string, unknown>;
+      const rotors = inv.rotorAssemblies as Record<string, unknown>[];
+      const broken = {
+        ...fresh,
+        inventory: { ...inv, rotorAssemblies: [{ ...rotors[0]!, winding: testCase.winding, coatingDamageFraction: testCase.damage }] },
+      };
+      fakeStorage.setItem('v16:save', JSON.stringify({ state: broken, version: 3 }));
+      expect(__testOnly.readLatestV16().kind, testCase.label).toBe('corrupted');
+    }
+  });
+
+  it('v3 saveのprogress.config.windingTurnsRatioは(0,1]だけを受理する', () => {
+    const rejected: unknown[] = [0, -0.1, 1.0001, '0.5', null, Number.NaN, Number.POSITIVE_INFINITY];
+    for (const value of rejected) {
+      fakeStorage = makeFakeLocalStorage();
+      // @ts-expect-error テスト用にglobalThis.localStorageを差し替える
+      globalThis.localStorage = fakeStorage;
+      const fresh = __testOnly.freshBootstrap() as unknown as Record<string, unknown>;
+      const progress = fresh.progress as Record<string, unknown>;
+      const state = { ...fresh, progress: { ...progress, config: { ...(progress.config as object), windingTurnsRatio: value } } };
+      fakeStorage.setItem('v16:save', JSON.stringify({ state, version: 3 }));
+      expect(__testOnly.readLatestV16().kind, `value=${String(value)}`).toBe('corrupted');
+    }
+
+    const accepted: (number | undefined)[] = [undefined, 1, 0.9333, 1 / 256];
+    for (const value of accepted) {
+      fakeStorage = makeFakeLocalStorage();
+      // @ts-expect-error テスト用にglobalThis.localStorageを差し替える
+      globalThis.localStorage = fakeStorage;
+      const fresh = __testOnly.freshBootstrap() as unknown as Record<string, unknown>;
+      const progress = fresh.progress as Record<string, unknown>;
+      const config = { ...(progress.config as object) } as Record<string, unknown>;
+      if (value === undefined) delete config.windingTurnsRatio; else config.windingTurnsRatio = value;
+      const state = { ...fresh, progress: { ...progress, config } };
+      fakeStorage.setItem('v16:save', JSON.stringify({ state, version: 3 }));
+      expect(__testOnly.readLatestV16().kind, `value=${String(value)}`).toBe('ok');
+    }
+  });
+
+  it('recorded個体は復元境界でも10〜150ターン・物理上限以下だけを受理する', () => {
+    function writeRecordedSave(turnCount: number, wireGaugeMm: number, parallelStrands: 1 | 2): void {
+      fakeStorage = makeFakeLocalStorage();
+      // @ts-expect-error テスト用にglobalThis.localStorageを差し替える
+      globalThis.localStorage = fakeStorage;
+      const fresh = __testOnly.freshBootstrap() as unknown as Record<string, unknown>;
+      const inv = fresh.inventory as Record<string, unknown>;
+      const rotors = inv.rotorAssemblies as Record<string, unknown>[];
+      const record = Array.from({ length: turnCount }, () => ({ position: 0.5, arm: 'left', direction: 1, tension: 0.5 }));
+      const state = {
+        ...fresh,
+        inventory: {
+          ...inv,
+          rotorAssemblies: [{ ...rotors[0]!, winding: { kind: 'recorded', record, wireGaugeMm, parallelStrands }, coatingDamageFraction: 0 }],
+        },
+      };
+      fakeStorage.setItem('v16:save', JSON.stringify({ state, version: 3 }));
+    }
+
+    // 走行不可のターン数は復元境界でも拒否する(生成境界を迂回させない)
+    for (const turnCount of [0, 1, 9]) {
+      writeRecordedSave(turnCount, 0.4, 1);
+      expect(__testOnly.readLatestV16().kind, `turns=${turnCount}`).toBe('corrupted');
+    }
+
+    // 受理境界(物理上限内)
+    for (const turnCount of [10, 150]) {
+      writeRecordedSave(turnCount, 0.4, 1);
+      expect(__testOnly.readLatestV16().kind, `turns=${turnCount}`).toBe('ok');
+    }
+
+    // 物理上限超過(線径0.8mmでは150ターン巻けない)
+    writeRecordedSave(150, 0.8, 1);
+    expect(__testOnly.readLatestV16().kind).toBe('corrupted');
+  });
+
+  it('recordedなローターを持つv3セーブはそのまま読める(往復)', () => {
+    const fresh = __testOnly.freshBootstrap() as unknown as Record<string, unknown>;
+    const inv = fresh.inventory as Record<string, unknown>;
+    const rotors = inv.rotorAssemblies as Record<string, unknown>[];
+    const record = Array.from({ length: 30 }, (_, i) => ({ position: 0.25, arm: 'left', direction: i === 10 ? -1 : 1, tension: 0.5 }));
+    const state = {
+      ...fresh,
+      inventory: {
+        ...inv,
+        rotorAssemblies: [{ ...rotors[0]!, winding: { kind: 'recorded', record, wireGaugeMm: 0.4, parallelStrands: 1 }, coatingDamageFraction: 0 }],
+      },
+    };
+    fakeStorage.setItem('v16:save', JSON.stringify({ state, version: 3 }));
+
+    const result = __testOnly.readLatestV16();
+
+    expect(result.kind).toBe('ok');
+    if (result.kind !== 'ok') throw new Error('unreachable');
+    const winding = result.state.inventory.rotorAssemblies[0]!.winding;
+    expect(winding.kind).toBe('recorded');
+    if (winding.kind !== 'recorded') throw new Error('unreachable');
+    expect(winding.record).toHaveLength(30);
+    expect(winding.record[10]!.direction).toBe(-1);
+  });
+
 });
 
 // ---------------------------------------------------------------------------
@@ -1862,5 +2076,159 @@ describe('P3-4 G7: purchaseInstrumentAction', () => {
 
     expect(result.ok).toBe(false);
     expect(useSaveStore.getState().inventory.cashG).toBe(799);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P4-1A(2026-08-28人間承認、承認項目9): completeRotorAssemblyActionの原子境界。
+// 在庫消費・ローター生成・装備更新・カウンタ更新を1回の書込みで行い、失敗時は
+// 何も変えない。
+// ---------------------------------------------------------------------------
+describe('P4-1A: completeRotorAssemblyActionの原子境界', () => {
+  function command(turnCount = 30) {
+    return {
+      record: Array.from({ length: turnCount }, (_, i) => ({
+        position: i < 21 ? 0.25 : 0.75,
+        arm: (i < 21 ? 'left' : 'right') as 'left' | 'right',
+        direction: (i === 10 ? -1 : 1) as 1 | -1,
+        tension: 0.5,
+      })),
+      wireMaterialId: 'wire-copper-standard',
+      windingWireGaugeMm: 0.4,
+      windingParallelStrands: 1 as const,
+      motorDraft: {
+        slitWidthMm: 1.5, sandingQuality: 0.9, brushPressure: 0.3, magnetStrength: 0.5,
+        magnetDistanceMm: 10, batteryVoltage: 1.5 as const, varnished: true,
+      },
+    };
+  }
+
+  it('成功時: 在庫消費・ローター生成・装備更新・カウンタ更新が一度に永続化される', () => {
+    acquireLease();
+    const before = useSaveStore.getState();
+    const beforeWireM = before.inventory.stackableStock.find((e) => e.family === 'wire')!;
+    const beforeCounter = before.idCounters.nextAssemblyCounter;
+
+    const result = useSaveStore.getState().completeRotorAssemblyAction(command());
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const after = useSaveStore.getState();
+    const afterWire = after.inventory.stackableStock.find((e) => e.family === 'wire')!;
+    expect(afterWire.family === 'wire' && beforeWireM.family === 'wire' && afterWire.quantityM < beforeWireM.quantityM).toBe(true);
+    expect(after.inventory.rotorAssemblies.some((r) => r.assemblyId === result.rotorAssemblyId)).toBe(true);
+    expect(after.equipmentLoadout.rotorAssemblyId).toBe(result.rotorAssemblyId);
+    expect(after.idCounters.nextAssemblyCounter).toBe(beforeCounter + 1);
+    // 永続実体にも同じ内容が入っている(メモリだけの更新ではない)
+    const persisted = readPersisted();
+    expect(persisted.equipmentLoadout.rotorAssemblyId).toBe(result.rotorAssemblyId);
+    expect(persisted.inventory.rotorAssemblies.some((r) => r.assemblyId === result.rotorAssemblyId)).toBe(true);
+  });
+
+  it('承認項目9: progress.configも同じ書込み境界で更新される', () => {
+    acquireLease();
+    const before = useSaveStore.getState().progress.config;
+
+    const result = useSaveStore.getState().completeRotorAssemblyAction(command());
+
+    expect(result.ok).toBe(true);
+    const after = useSaveStore.getState().progress.config;
+    expect(after.coilTurns).toBe(30);
+    expect(after.windingTurnsRatio).toBeCloseTo(28 / 30, 12);
+    expect(after.wireGaugeMm).toBe(0.4);
+    expect(after.parallelStrands).toBe(1);
+    expect(after).not.toBe(before);
+    // 永続実体にも同じconfigが入っている
+    const persisted = readPersisted();
+    expect(persisted.progress.config.coilTurns).toBe(30);
+    expect(persisted.progress.config.windingTurnsRatio).toBeCloseTo(28 / 30, 12);
+  });
+
+  it('生成されたローターはrecorded由来で、記録がそのまま保存される', () => {
+    acquireLease();
+    const result = useSaveStore.getState().completeRotorAssemblyAction(command());
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const rotor = readPersisted().inventory.rotorAssemblies.find((r) => r.assemblyId === result.rotorAssemblyId)!;
+    expect(rotor.winding.kind).toBe('recorded');
+    if (rotor.winding.kind !== 'recorded') return;
+    expect(rotor.winding.record).toHaveLength(30);
+    expect(rotor.winding.record[10]!.direction).toBe(-1);
+    expect(rotor.coatingDamageFraction).toBe(0);
+  });
+
+  it('失敗時(9ターン)は在庫・装備・カウンタのいずれも変化しない', () => {
+    acquireLease();
+    const before = useSaveStore.getState();
+    const beforeSnapshot = JSON.parse(JSON.stringify({
+      inventory: before.inventory, loadout: before.equipmentLoadout, counters: before.idCounters,
+    }));
+
+    const result = useSaveStore.getState().completeRotorAssemblyAction(command(9));
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.failure.kind).toBe('turnCountOutOfRange');
+    const after = useSaveStore.getState();
+    expect({ inventory: after.inventory, loadout: after.equipmentLoadout, counters: after.idCounters }).toStrictEqual(beforeSnapshot);
+  });
+
+  it('書込み失敗はpersistFailedで、in-memory stateも変化しない(configを含む)', () => {
+    acquireLease();
+    const beforeInventory = useSaveStore.getState().inventory;
+    const beforeProgress = useSaveStore.getState().progress;
+    const beforeConfig = beforeProgress.config;
+    fakeStorage.setItem = () => { throw new Error('quota'); };
+
+    const result = useSaveStore.getState().completeRotorAssemblyAction(command());
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.failure.kind).toBe('persistFailed');
+    expect(useSaveStore.getState().inventory).toBe(beforeInventory);
+    expect(useSaveStore.getState().progress).toBe(beforeProgress);
+    expect(useSaveStore.getState().progress.config).toBe(beforeConfig);
+  });
+
+  it('順逆同数の記録はinvalidRecordで拒否され、config/在庫/装備/カウンタが不変のまま書込みへ進まない', () => {
+    acquireLease();
+    const before = useSaveStore.getState();
+    const beforeSnapshot = JSON.parse(JSON.stringify({
+      inventory: before.inventory, loadout: before.equipmentLoadout,
+      counters: before.idCounters, config: before.progress.config,
+    }));
+    let wrote = false;
+    const originalSetItem = fakeStorage.setItem;
+    fakeStorage.setItem = (...args: Parameters<typeof originalSetItem>) => { wrote = true; return originalSetItem(...args); };
+
+    const result = useSaveStore.getState().completeRotorAssemblyAction({
+      ...command(),
+      record: Array.from({ length: 30 }, (_, i) => ({
+        position: 0.5, arm: 'straddle' as const, direction: (i < 15 ? 1 : -1) as 1 | -1, tension: 0.5,
+      })),
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.failure.kind).toBe('invalidRecord');
+    // 書込みへ進んでいない(persistFailedではなく、生成境界で止まっている)
+    expect(wrote).toBe(false);
+    fakeStorage.setItem = originalSetItem;
+    const after = useSaveStore.getState();
+    expect({
+      inventory: after.inventory, loadout: after.equipmentLoadout,
+      counters: after.idCounters, config: after.progress.config,
+    }).toStrictEqual(beforeSnapshot);
+  });
+
+  it('連続して完成させるとassemblyIdが重複しない', () => {
+    acquireLease();
+    const first = useSaveStore.getState().completeRotorAssemblyAction(command());
+    const second = useSaveStore.getState().completeRotorAssemblyAction(command());
+    expect(first.ok && second.ok).toBe(true);
+    if (!first.ok || !second.ok) return;
+    expect(second.rotorAssemblyId).not.toBe(first.rotorAssemblyId);
+    const ids = readPersisted().inventory.rotorAssemblies.map((r) => r.assemblyId);
+    expect(new Set(ids).size).toBe(ids.length);
   });
 });
