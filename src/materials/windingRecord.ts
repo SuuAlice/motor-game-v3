@@ -252,3 +252,116 @@ export function replaceWindingRange(
   }
   return { ok: true, value: next };
 }
+
+// ---------------------------------------------------------------------------
+// P4-1A(2026-08-28人間承認): canonical encoding(候補E2)。
+//
+// **同じ巻線記録は常に同じ文字列になり、decode後の再encodeも同じ文字列になる**ことを
+// 保証する。レシピ文字列(MC4)とrecipeKey v2がこの正規形をそのまま収載する——hash・要約・
+// 圧縮は使わない(衝突しうる代替を正規形にすると、別の記録が同一レシピと見なされる)。
+//
+// **1ターン=3バイト固定(big-endian)**の24bit word:
+//   bit23..15 = positionQ (0..256)   position × 256
+//   bit14..6  = tensionQ  (0..256)   tension  × 256
+//   bit5..4   = arm       (left=0 / right=1 / straddle=2、3は不正)
+//   bit3      = direction (+1 → 0 / -1 → 1)
+//   bit2..0   = 0 固定(非0は破損)
+// ターン順は記録順。ビット詰め(1ターン=21bit連続)より14%長いが、**ターン境界がバイト境界と
+// 一致するため破損位置をターン単位で特定できる**。
+// ---------------------------------------------------------------------------
+
+/** 1ターンあたりのバイト数(E2固定長)。 */
+export const WINDING_ENCODED_BYTES_PER_TURN = 3;
+
+const ARM_TO_CODE: Record<WindingArm, number> = { left: 0, right: 1, straddle: 2 };
+const CODE_TO_ARM: readonly (WindingArm | null)[] = ['left', 'right', 'straddle', null];
+
+/** 量子化値(0〜1、1/256格子)を整数0..256へ。呼出し前に量子化済みであること。 */
+function toQuantizedInt(value: number): number {
+  return Math.round(value * 256);
+}
+
+/**
+ * 記録をcanonicalなバイト列へ符号化する。**検証済みの記録だけを渡すこと**——
+ * 未量子化値や不正armが混じった記録を符号化すると、decodeできない文字列ができる。
+ * 呼出し側は`validateWindingRecord`を通した値を渡す(型では強制できないためコメントで契約化)。
+ */
+export function encodeWindingRecordBytes(record: WindingRecord): Uint8Array {
+  const bytes = new Uint8Array(record.length * WINDING_ENCODED_BYTES_PER_TURN);
+  record.forEach((turn, index) => {
+    const positionQ = toQuantizedInt(turn.position);
+    const tensionQ = toQuantizedInt(turn.tension);
+    const armCode = ARM_TO_CODE[turn.arm];
+    const directionCode = turn.direction === -1 ? 1 : 0;
+    const word = (positionQ << 15) | (tensionQ << 6) | (armCode << 4) | (directionCode << 3);
+    const offset = index * WINDING_ENCODED_BYTES_PER_TURN;
+    bytes[offset] = (word >>> 16) & 0xff;
+    bytes[offset + 1] = (word >>> 8) & 0xff;
+    bytes[offset + 2] = word & 0xff;
+  });
+  return bytes;
+}
+
+/**
+ * バイト列を記録へ復号する。**fail-closed**——padビットが0でない、armが3、量子化整数が
+ * 256を超える、長さが3の倍数でない、いずれも`{ok:false}`で返す。部分復元はしない。
+ */
+export function decodeWindingRecordBytes(bytes: Uint8Array): WindingValidationResult<WindingRecord> {
+  if (bytes.length % WINDING_ENCODED_BYTES_PER_TURN !== 0) {
+    return { ok: false, reason: `バイト長が${WINDING_ENCODED_BYTES_PER_TURN}の倍数ではありません: ${bytes.length}` };
+  }
+  const turnCount = bytes.length / WINDING_ENCODED_BYTES_PER_TURN;
+  if (turnCount > MAX_WINDING_TURNS) {
+    return { ok: false, reason: `記録が上限${MAX_WINDING_TURNS}ターンを超えています: ${turnCount}` };
+  }
+  const turns: WindingTurn[] = [];
+  for (let index = 0; index < turnCount; index += 1) {
+    const offset = index * WINDING_ENCODED_BYTES_PER_TURN;
+    const word = (bytes[offset]! << 16) | (bytes[offset + 1]! << 8) | bytes[offset + 2]!;
+    if ((word & 0b111) !== 0) return { ok: false, reason: `turns[${index}]: padビットが0ではありません` };
+    const positionQ = (word >>> 15) & 0x1ff;
+    const tensionQ = (word >>> 6) & 0x1ff;
+    if (positionQ > 256) return { ok: false, reason: `turns[${index}]: positionQが256を超えています: ${positionQ}` };
+    if (tensionQ > 256) return { ok: false, reason: `turns[${index}]: tensionQが256を超えています: ${tensionQ}` };
+    const arm = CODE_TO_ARM[(word >>> 4) & 0b11];
+    if (arm === null) return { ok: false, reason: `turns[${index}]: armコードが不正です(3)` };
+    turns.push({
+      position: positionQ / 256,
+      arm,
+      direction: ((word >>> 3) & 0b1) === 1 ? -1 : 1,
+      tension: tensionQ / 256,
+    });
+  }
+  return { ok: true, value: turns };
+}
+
+/**
+ * canonicalバイト列をbase64url(padなし)の文字列にする。**レシピ文字列とrecipeKeyが
+ * 共有する唯一の正規形**であり、hash・要約・圧縮ではない(可逆であり、衝突しない)。
+ */
+export function encodeWindingRecordCanonical(record: WindingRecord): string {
+  const bytes = encodeWindingRecordBytes(record);
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/u, '');
+}
+
+/**
+ * canonical文字列を記録へ戻す。**fail-closed**——base64url以外の文字、復号不能、
+ * バイト列としての破損(pad非0・arm=3・量子化整数>256・長さ不一致)はすべて`{ok:false}`。
+ */
+export function decodeWindingRecordCanonical(value: string): WindingValidationResult<WindingRecord> {
+  if (value.length === 0) return { ok: true, value: [] };
+  if (!/^[A-Za-z0-9_-]+$/u.test(value)) {
+    return { ok: false, reason: '巻線記録に使用できない文字が含まれています' };
+  }
+  const base64 = value.replaceAll('-', '+').replaceAll('_', '/').padEnd(Math.ceil(value.length / 4) * 4, '=');
+  let bytes: Uint8Array;
+  try {
+    const binary = atob(base64);
+    bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+  } catch {
+    return { ok: false, reason: '巻線記録を復号できません' };
+  }
+  return decodeWindingRecordBytes(bytes);
+}

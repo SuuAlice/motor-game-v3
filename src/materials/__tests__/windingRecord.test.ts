@@ -4,6 +4,8 @@ import { describe, expect, it } from 'vitest';
 import {
   aggregateWindingRecord,
   copyWindingRecord,
+  decodeWindingRecordBytes,
+  encodeWindingRecordBytes,
   isQuantizedWindingValue,
   quantizeWindingValue,
   replaceWindingRange,
@@ -12,6 +14,7 @@ import {
   validateWindingTurn,
   MAX_WINDING_TURNS,
   MIN_RUNNABLE_WINDING_TURNS,
+  WINDING_ENCODED_BYTES_PER_TURN,
   WINDING_QUANTIZATION_STEP,
   type WindingArm,
   type WindingDirection,
@@ -318,5 +321,107 @@ describe('windingRecord.ts: 部分修正(spec §9.6、半開区間)', () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.value[0]).not.toBe(turns[0]);
+  });
+});
+
+describe('canonical encoding(P4-1A、候補E2)', () => {
+  function turn(position: number, arm: WindingArm, direction: WindingDirection, tension: number): WindingTurn {
+    return { position, arm, direction, tension };
+  }
+
+  it('1ターン=3バイト固定', () => {
+    expect(WINDING_ENCODED_BYTES_PER_TURN).toBe(3);
+    expect(encodeWindingRecordBytes([turn(0.5, 'left', 1, 0.5)])).toHaveLength(3);
+    expect(encodeWindingRecordBytes(Array.from({ length: MAX_WINDING_TURNS }, () => turn(0, 'left', 1, 0)))).toHaveLength(450);
+  });
+
+  it('空記録は0バイトで、往復しても空のまま', () => {
+    const bytes = encodeWindingRecordBytes([]);
+    expect(bytes).toHaveLength(0);
+    const decoded = decodeWindingRecordBytes(bytes);
+    expect(decoded.ok && decoded.value).toStrictEqual([]);
+  });
+
+  it('bit配置が承認どおり(position bit23..15 / tension bit14..6 / arm bit5..4 / direction bit3 / pad bit2..0)', () => {
+    // position=1.0(256) / tension=0 / arm=straddle(2) / direction=-1(1)
+    const bytes = encodeWindingRecordBytes([turn(1, 'straddle', -1, 0)]);
+    const word = (bytes[0]! << 16) | (bytes[1]! << 8) | bytes[2]!;
+    expect((word >>> 15) & 0x1ff).toBe(256);
+    expect((word >>> 6) & 0x1ff).toBe(0);
+    expect((word >>> 4) & 0b11).toBe(2);
+    expect((word >>> 3) & 0b1).toBe(1);
+    expect(word & 0b111).toBe(0);
+  });
+
+  it('全arm・全directionと量子化の両端が往復する', () => {
+    const record: WindingRecord = [
+      turn(0, 'left', 1, 0),
+      turn(1, 'right', -1, 1),
+      turn(0.5, 'straddle', 1, 128 / 256),
+      turn(1 / 256, 'left', -1, 255 / 256),
+    ];
+    const decoded = decodeWindingRecordBytes(encodeWindingRecordBytes(record));
+    expect(decoded.ok, decoded.ok ? '' : decoded.reason).toBe(true);
+    if (!decoded.ok) return;
+    expect(decoded.value).toStrictEqual(record);
+  });
+
+  it('canonical性: decodeした記録を再encodeすると同一バイト列になる', () => {
+    const record: WindingRecord = Array.from({ length: 37 }, (_, i) =>
+      turn((i % 257) / 256, i % 3 === 0 ? 'left' : i % 3 === 1 ? 'right' : 'straddle', i % 2 === 0 ? 1 : -1, ((i * 7) % 257) / 256),
+    );
+    const first = encodeWindingRecordBytes(record);
+    const decoded = decodeWindingRecordBytes(first);
+    expect(decoded.ok).toBe(true);
+    if (!decoded.ok) return;
+    expect(encodeWindingRecordBytes(decoded.value)).toStrictEqual(first);
+  });
+
+  it('同じ記録は常に同じバイト列(別実体でも一致)', () => {
+    const a: WindingRecord = [turn(0.25, 'left', 1, 0.75)];
+    const b: WindingRecord = [{ position: 0.25, arm: 'left', direction: 1, tension: 0.75 }];
+    expect(encodeWindingRecordBytes(a)).toStrictEqual(encodeWindingRecordBytes(b));
+  });
+
+  describe('破損はfail-closed(部分復元しない)', () => {
+    it('バイト長が3の倍数でない', () => {
+      expect(decodeWindingRecordBytes(new Uint8Array([0, 0])).ok).toBe(false);
+    });
+
+    it('上限150ターンを超えるバイト長', () => {
+      expect(decodeWindingRecordBytes(new Uint8Array((MAX_WINDING_TURNS + 1) * 3)).ok).toBe(false);
+    });
+
+    it('padビットが0でない', () => {
+      const bytes = encodeWindingRecordBytes([turn(0.5, 'left', 1, 0.5)]);
+      bytes[2] = bytes[2]! | 0b1;
+      const result = decodeWindingRecordBytes(bytes);
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.reason).toContain('pad');
+    });
+
+    it('armコードが3', () => {
+      const bytes = encodeWindingRecordBytes([turn(0.5, 'left', 1, 0.5)]);
+      bytes[2] = bytes[2]! | 0b110000;
+      const result = decodeWindingRecordBytes(bytes);
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.reason).toContain('arm');
+    });
+
+    it('positionQが256を超える', () => {
+      // bit23..15を全て1(511)にする
+      const bytes = new Uint8Array([0xff, 0x80, 0x00]);
+      const result = decodeWindingRecordBytes(bytes);
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.reason).toContain('positionQ');
+    });
+
+    it('tensionQが256を超える', () => {
+      // positionQ=0、tensionQ=511(bit14..6を全て1)
+      const bytes = new Uint8Array([0x00, 0x7f, 0xc0]);
+      const result = decodeWindingRecordBytes(bytes);
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.reason).toContain('tensionQ');
+    });
   });
 });
