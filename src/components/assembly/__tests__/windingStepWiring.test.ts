@@ -179,3 +179,63 @@ describe('U2: 巻線ビューを持つ工程だけ広幅', () => {
     expect(mode).not.toMatch(/className="mx-auto flex max-w-md/);
   });
 });
+
+// P4-1B U2巻き数常設(2026-08-30人間承認): 巻きながら現在ターン数が読めること。
+//
+// 指摘は「何ターン巻いているか分からない」。下部のdlはスマホ縦では操作領域より
+// 約380px下へ押し出され、巻きながら見えなかった。
+describe('U2: 巻き数を操作パッド内に常設する', () => {
+  /** role="application"のパッド要素の中身だけを切り出す。 */
+  const pad = winding.slice(
+    winding.indexOf('role="application"'),
+    winding.indexOf('キーボード: A/D'),
+  );
+
+  it('パッド内にrecord.lengthとlimitの巻き数表示がある', () => {
+    expect(pad).toContain('巻き数');
+    expect(pad).toContain('{record.length} / {limit}');
+    expect(pad).toContain('ターン');
+  });
+
+  it('数値だけを太字・等幅数字にする', () => {
+    expect(pad).toContain('font-bold tabular-nums');
+  });
+
+  it('巻き数と状態文が同じ入れ子に同居する(パッド外へ出さない)', () => {
+    const stack = pad.slice(pad.indexOf('flex flex-col items-center'));
+    expect(stack).toContain('巻き数');
+    expect(stack).toContain('回転中。導線を動かしてください');
+    expect(stack).toContain('停止中。始動すると軸が回ります');
+    expect(stack).toContain('これ以上巻けません');
+  });
+
+  it('パッドの高さとaria-labelは変えない', () => {
+    expect(pad).toContain('h-56');
+    expect(pad).toContain('aria-label="巻線治具。');
+  });
+
+  it('パッド外の既存dlの巻き数行も残す(方向・ガイド位置・張力の置き場)', () => {
+    const below = winding.slice(winding.indexOf('キーボード: A/D'));
+    expect(below).toContain('巻き数 ');
+    expect(below).toContain('現在の方向');
+    expect(below).toContain('ガイド位置');
+    expect(below).toContain('張力');
+  });
+
+  it('role="status"を増やさない(1秒ごとの読み上げ割り込みを避ける)', () => {
+    // 既存は拒否理由と段階表示の2つだけ。
+    expect(winding.match(/role="status"/g)).toHaveLength(2);
+  });
+
+  it('新規state・派生値を増やしていない', () => {
+    // CoilWindingStep本体: useStateはinput/rejectReason/runningの3つ、
+    // useRefはtick/runStart/offset/working/onCommandsの5つ。
+    const body = winding.slice(0, winding.indexOf('function LotChooser'));
+    expect(body.match(/useState[<(]/g)).toHaveLength(3);
+    expect(body.match(/useRef[<(]/g)).toHaveLength(5);
+    // LotChooser(材料選択)は従来どおり3つ。巻き数表示のためにstateを足していない。
+    const chooser = winding.slice(winding.indexOf('function LotChooser'));
+    expect(chooser.match(/useState[<(]/g)).toHaveLength(3);
+    expect(chooser.match(/useRef[<(]/g)).toBeNull();
+  });
+});

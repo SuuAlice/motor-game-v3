@@ -212,9 +212,20 @@ export function CoilWindingStep({ winding, dispatchWinding }: AssemblyStepProps)
         }}
         className="relative flex h-56 touch-none items-center justify-center rounded-xl border-2 border-slate-400 bg-slate-50 text-center text-sm text-slate-600"
       >
-        {atLimit
-          ? `これ以上巻けません(上限${limit}ターン)`
-          : running ? '回転中。導線を動かしてください(1秒=1ターン)' : '停止中。始動すると軸が回ります'}
+        {/* 巻き数は**操作パッドの中**に置く。下部のdlはスマホ縦では操作領域より
+            約380px下へ押し出され、巻きながら現在ターン数を確認できなかった
+            (U2人間視認の指摘)。role="status"は付けない——1秒ごとに読み上げが
+            割り込み、操作そのものを妨げるため。 */}
+        <div className="flex flex-col items-center gap-1">
+          <span>
+            巻き数 <span className="font-bold tabular-nums">{record.length} / {limit}</span> ターン
+          </span>
+          <span>
+            {atLimit
+              ? `これ以上巻けません(上限${limit}ターン)`
+              : running ? '回転中。導線を動かしてください(1秒=1ターン)' : '停止中。始動すると軸が回ります'}
+          </span>
+        </div>
       </div>
 
       <p className="text-xs text-slate-500">
