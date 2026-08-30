@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from 'react';
 import type { AssemblyStepProps } from '../../modes/AssemblyMode';
 import { useFlickGesture } from './useFlickGesture';
 import { useGameStore } from '../../store/gameStore';
+import { useSaveStore } from '../../store/saveStore';
+import { canRequestCompletion, currentLot, currentRecord, describeCompletionFailure } from './windingStepState';
 import { drawMotor } from '../../render/drawMotor';
 import type { SimState } from '../../engine/motorPhysics';
 import { MotorCanvas } from '../../render/MotorCanvas';
@@ -27,10 +29,17 @@ const PREVIEW_REST_STATE: SimState = {
   highSpeedFrameCount: 0,
 };
 
-export function StartStep({ draft }: AssemblyStepProps) {
+export function StartStep({ draft, winding, dispatchWinding }: AssemblyStepProps) {
   const [started, setStarted] = useState(false);
   const finishAssembly = useGameStore((s) => s.finishAssembly);
+  const completeRotorAssemblyAction = useSaveStore((s) => s.completeRotorAssemblyAction);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const lot = currentLot(winding);
+  const record = currentRecord(winding);
+  // **`canRequestCompletion`を迂回しない**——`winding`のまま完成actionを呼べると、
+  // 「巻き終える」を経ずに下限未満でも保存を試せてしまう。
+  const ready = canRequestCompletion(winding);
+  const failure = winding.kind === 'failed' ? winding.failure : null;
 
   useEffect(() => {
     if (started) return;
@@ -41,7 +50,40 @@ export function StartStep({ draft }: AssemblyStepProps) {
   }, [draft, started]);
 
   const flickHandlers = useFlickGesture((velocityPxPerMs) => {
-    finishAssembly(draft, velocityPxPerMs * FLICK_VELOCITY_SCALE);
+    // 順序外(材料未確定・巻線中・下限未満)ではstore actionを呼ばない。
+    if (lot === null || !ready) return;
+    // P4-1B B2: ローターの生成・線材消費・装備更新は`completeRotorAssemblyAction`が
+    // **1回の書込みで**行う。**成功したときだけ**次(始動)へ進む——
+    // 旧実装は`finishAssembly`の失敗を握りつぶし、保存できていないのに
+    // 回転画面へ進んでいた。
+    const completed = completeRotorAssemblyAction({
+      record,
+      wireMaterialId: lot.wireMaterialId,
+      windingWireGaugeMm: lot.windingWireGaugeMm,
+      windingParallelStrands: lot.windingParallelStrands,
+      motorDraft: {
+        slitWidthMm: draft.slitWidthMm,
+        sandingQuality: draft.sandingQuality,
+        brushPressure: draft.brushPressure,
+        magnetStrength: draft.magnetStrength,
+        magnetDistanceMm: draft.magnetDistanceMm,
+        batteryVoltage: draft.batteryVoltage,
+        varnished: draft.varnished,
+        wireResistivityRatio: draft.wireResistivityRatio,
+        wireDensityRatio: draft.wireDensityRatio,
+        batteryInternalResistanceRatio: draft.batteryInternalResistanceRatio,
+        batteryCapacityRatio: draft.batteryCapacityRatio,
+        brushContactResistanceRatio: draft.brushContactResistanceRatio,
+        brushChatterProbabilityRatio: draft.brushChatterProbabilityRatio,
+      },
+    });
+    if (!completed.ok) {
+      dispatchWinding({ kind: 'completionFailed', failure: completed.failure });
+      return;
+    }
+    // 始動は別操作。configは完成actionが記録から導出して永続化済みなので、
+    // ここではstoreの現configで走行を始める。
+    finishAssembly(useGameStore.getState().config, velocityPxPerMs * FLICK_VELOCITY_SCALE);
     setStarted(true);
   });
 
@@ -52,6 +94,15 @@ export function StartStep({ draft }: AssemblyStepProps) {
           軸受けに軸を乗せ、モーターの準備ができた。指ではじいて回してみよう。
         </p>
         <p className="text-xs text-slate-400">逆向きに弾いてみよう。どっちに回る?</p>
+        {/* 失敗理由は常設ノード。記録は保持されたままなので、そのまま弾き直せる。 */}
+        <p role="status" className="min-h-[1.25rem] text-sm text-rose-700">
+          {failure === null ? '' : describeCompletionFailure(failure)}
+        </p>
+        {!ready && (
+          <p className="text-sm text-slate-600">
+            先にコイル巻き工程で「巻き終える」まで進めてください。
+          </p>
+        )}
         <canvas
           ref={canvasRef}
           width={320}

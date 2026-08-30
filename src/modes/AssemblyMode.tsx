@@ -1,5 +1,11 @@
 import { useState } from 'react';
 import type { MotorConfig } from '../engine/motorPhysics';
+import {
+  INITIAL_WINDING_STEP_STATE,
+  windingStepReducer,
+  type WindingStepAction,
+  type WindingStepState,
+} from '../components/assembly/windingStepState';
 import { CoilWindingStep } from '../components/assembly/CoilWindingStep';
 import { SandingStep } from '../components/assembly/SandingStep';
 import { SlitStep } from '../components/assembly/SlitStep';
@@ -15,6 +21,12 @@ import { VarnishStep } from '../components/assembly/VarnishStep';
 export interface AssemblyStepProps {
   draft: MotorConfig;
   setDraft: (updater: (prev: MotorConfig) => MotorConfig) => void;
+  /**
+   * P4-1B B2: 巻線工程の状態。`draft`(MotorConfig)では巻線記録を運べない——
+   * `coilTurns`はスカラーであり、位置・腕・方向・張力の列を持たないため。
+   */
+  winding: WindingStepState;
+  dispatchWinding: (action: WindingStepAction) => void;
 }
 
 interface StepDef {
@@ -52,6 +64,11 @@ const INITIAL_DRAFT: MotorConfig = {
 export function AssemblyMode() {
   const [stepIndex, setStepIndex] = useState(0);
   const [draft, setDraftState] = useState<MotorConfig>(INITIAL_DRAFT);
+  const [winding, setWinding] = useState<WindingStepState>(INITIAL_WINDING_STEP_STATE);
+
+  function dispatchWinding(action: WindingStepAction) {
+    setWinding((prev) => windingStepReducer(prev, action));
+  }
 
   function setDraft(updater: (prev: MotorConfig) => MotorConfig) {
     setDraftState((prev) => updater(prev));
@@ -68,7 +85,7 @@ export function AssemblyMode() {
         工程 {stepIndex + 1} / {STEPS.length}: {step.title}
       </p>
 
-      <step.Component draft={draft} setDraft={setDraft} />
+      <step.Component draft={draft} setDraft={setDraft} winding={winding} dispatchWinding={dispatchWinding} />
 
       <div className="flex gap-2">
         <button
