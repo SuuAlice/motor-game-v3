@@ -73,12 +73,35 @@ export function drawWindingTrace(
   // 治具は軌跡より先に描く(軌跡が手前に積まれる)。
   if (geo.jig !== undefined) drawJig(ctx, geo.jig);
 
+  // P4-1B B3: 外形輪郭。軌跡より先に、最も暗い段で敷く——輪郭は「全体の膨らみ」を
+  // 示す下地であり、個々のターンより手前に出ると軌跡そのものを読めなくする。
+  if (geo.outline.length > 1) {
+    ctx.strokeStyle = PALETTE.M0;
+    ctx.beginPath();
+    ctx.moveTo(geo.outline[0].x, geo.outline[0].topY);
+    for (const point of geo.outline) ctx.lineTo(point.x, point.topY);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(geo.outline[0].x, geo.outline[0].bottomY);
+    for (const point of geo.outline) ctx.lineTo(point.x, point.bottomY);
+    ctx.stroke();
+  }
+
   ctx.lineWidth = 1;
   for (const stroke of geo.strokes) {
     ctx.strokeStyle = AGE_COLORS[stroke.ageStep];
     ctx.beginPath();
     ctx.moveTo(stroke.startX, stroke.startY);
     ctx.quadraticCurveTo(stroke.controlX, stroke.controlY, stroke.endX, stroke.endY);
+    ctx.stroke();
+  }
+
+  // 中央またぎの渡り線。軸を横切る短い水平線で示す(色ではなく形で判別する)。
+  ctx.strokeStyle = PALETTE.M3;
+  for (const segment of geo.crossovers) {
+    ctx.beginPath();
+    ctx.moveTo(segment.startX, segment.y);
+    ctx.lineTo(segment.endX, segment.y);
     ctx.stroke();
   }
 }

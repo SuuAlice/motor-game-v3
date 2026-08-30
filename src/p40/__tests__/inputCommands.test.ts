@@ -579,9 +579,19 @@ describe('D1: 巻線ビューは子componentでmountされ、hookがcontainerと
     expect(code).toContain('<WindingTraceView record={previewRecord} jig={jigState} />');
   });
 
-  it('共有hookは変更していない', () => {
+  it('共有hookは測定済み判別だけを持ち、拡大規則は変えていない', () => {
+    // P4-1B B4(2026-08-30人間承認)で、未測定と実測fits=falseの区別を追加した。
+    // G2期はこのassertが`not.toContain('measured')`で凍結していたが、
+    // production必須画面の初回表示・再入場で「収まりません」が出る欠陥
+    // (D2)を恒久是正するため、同一deltaで改訂した。
     const hook = readFileSync(new URL('../../components/useRetroCanvasFrame.ts', import.meta.url), 'utf8');
-    expect(hook).not.toContain('measured');
+    expect(hook).toContain('measured');
+    // 内部解像度・整数拡大・letterboxの規則は不変であること。
+    expect(hook).toContain('const LANDSCAPE_CONTENT: ContentResolution = { w: 480, h: 270 }');
+    expect(hook).toContain('selectOrientedResolution(containerSize.w, containerSize.h, LANDSCAPE_CONTENT)');
+    expect(hook).toContain('computeIntegerScale(containerSize.w, containerSize.h, contentRes.w, contentRes.h)');
+    // 独自のscale計算・非整数拡大を持ち込んでいないこと。
+    expect(hook).not.toMatch(/devicePixelRatio|Math\.round\(scale/);
   });
 });
 

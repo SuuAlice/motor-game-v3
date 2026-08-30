@@ -7,6 +7,8 @@ import {
   computeWindingAgeStep,
   computeWindingEnvelopeScale,
   computeWindingTraceGeometry,
+  WINDING_OUTLINE_EXAGGERATION,
+  computeWindingOutlineThicknessRatios,
   type WindingJigState,
 } from '../windingTraceGeometry';
 
@@ -265,5 +267,172 @@ describe('年代と張力の出典が二重化していない', () => {
     });
     // 横方向(足の開き)だけが変わる。締めたほうが狭い。
     expect(taut[0].endX - taut[0].startX).toBeLessThan(slack[0].endX - slack[0].startX);
+  });
+});
+
+// P4-1B B3(2026-08-30人間承認): W1外形輪郭・中央またぎ・W2同縮尺比較。
+describe('W1 外形輪郭', () => {
+  const at = (position: number) => ({ position, arm: 'straddle' as const, direction: 1 as const, tension: 0.5 });
+
+  it('空記録では輪郭を描かない(存在しない形を作らない)', () => {
+    expect(computeWindingTraceGeometry([], 480, 270).outline).toEqual([]);
+  });
+
+  it('座標はすべて整数で、content内に収まる', () => {
+    const geo = computeWindingTraceGeometry(generateDummyWindingRecord(), 480, 270);
+    expect(geo.outline.length).toBeGreaterThan(1);
+    for (const point of geo.outline) {
+      expect(Number.isInteger(point.x)).toBe(true);
+      expect(Number.isInteger(point.topY)).toBe(true);
+      expect(Number.isInteger(point.bottomY)).toBe(true);
+      expect(point.topY).toBeGreaterThanOrEqual(0);
+      expect(point.bottomY).toBeLessThanOrEqual(270);
+    }
+  });
+
+  it('短冊中心に対して上下対称', () => {
+    const h = 270;
+    const stripY = Math.round(h * 0.5);
+    for (const point of computeWindingTraceGeometry(generateDummyWindingRecord(), 480, h).outline) {
+      expect(stripY - point.topY).toBe(point.bottomY - stripY);
+    }
+  });
+
+  it('密集した区間は外へ、空いた区間は内へ凹む', () => {
+    // 左端へ20ターン、右端へ2ターン。中央は空。
+    const record = [
+      ...Array.from({ length: 20 }, () => at(0.02)),
+      ...Array.from({ length: 2 }, () => at(0.98)),
+    ];
+    const geo = computeWindingTraceGeometry(record, 480, 270);
+    const thickness = geo.outline.map((p) => p.bottomY - p.topY);
+    const left = thickness[0];
+    const middle = thickness[Math.floor(thickness.length / 2)];
+    const right = thickness[thickness.length - 1];
+    expect(left).toBeGreaterThan(right);
+    expect(right).toBeGreaterThan(middle);
+  });
+
+  it('均一に巻けば輪郭は平ら(巻数が多いだけでは膨らまない)', () => {
+    const even = Array.from({ length: 128 }, (_, i) => at((i % 32) / 32 + 1 / 64));
+    const thickness = computeWindingTraceGeometry(even, 480, 270).outline.map((p) => p.bottomY - p.topY);
+    expect(Math.max(...thickness) - Math.min(...thickness)).toBeLessThanOrEqual(1);
+  });
+
+  it('最大包絡を超えない', () => {
+    const h = 270;
+    const maxRadius = Math.round(h * 0.5) - Math.round(h * 0.12);
+    const dense = Array.from({ length: 50 }, () => at(0.5));
+    for (const point of computeWindingTraceGeometry(dense, 480, h).outline) {
+      expect(Math.round(h * 0.5) - point.topY).toBeLessThanOrEqual(maxRadius);
+    }
+  });
+});
+
+// 誇張倍率が**実際に座標へ効く**ことの検証。定数値を見るだけでは、式の上で
+// 相殺されていても気づけない(実際に一度そうなっていた)。
+describe('W1 誇張倍率のふるまい', () => {
+  const at = (position: number) => ({ position, arm: 'straddle' as const, direction: 1 as const, tension: 0.5 });
+  // 平均より上の区間・平均ちょうど・平均より下、が混ざる分布。
+  const counts = [8, 4, 4, 4];
+
+  it('平均どおりの区間と密集区間のコントラストが、倍率とともに強くなる', () => {
+    const contrast = (ex: number) => {
+      const r = computeWindingOutlineThicknessRatios(counts, ex);
+      return Math.max(...r) - r[1];
+    };
+    // 倍率1(誇張なし)より、承認済み初期値3のほうが差が読める。
+    expect(contrast(WINDING_OUTLINE_EXAGGERATION)).toBeGreaterThan(contrast(1));
+    // 単調に強まる。
+    expect(contrast(2)).toBeGreaterThan(contrast(1));
+    expect(contrast(3)).toBeGreaterThan(contrast(2));
+    expect(contrast(5)).toBeGreaterThan(contrast(3));
+  });
+
+  it('倍率が変わっても最大は1のまま(最大包絡を超えない)', () => {
+    for (const ex of [1, 2, 3, 5, 10]) {
+      const r = computeWindingOutlineThicknessRatios(counts, ex);
+      expect(Math.max(...r)).toBeCloseTo(1, 10);
+      for (const value of r) {
+        expect(value).toBeGreaterThanOrEqual(0);
+        expect(value).toBeLessThanOrEqual(1);
+      }
+    }
+  });
+
+  it('均一な分布は倍率をいくつにしても平ら(巻数が多いだけでは膨らまない)', () => {
+    for (const ex of [1, 3, 10]) {
+      const r = computeWindingOutlineThicknessRatios([4, 4, 4, 4], ex);
+      expect(Math.max(...r) - Math.min(...r)).toBeCloseTo(0, 10);
+    }
+  });
+
+  it('倍率の違いが実際の描画座標の差になる', () => {
+    // 幾何側は既定倍率を使う。倍率1の比と比べて、平均区間の厚みが薄くなる。
+    const record = [
+      ...Array.from({ length: 16 }, () => at(0.02)),
+      ...Array.from({ length: 8 }, () => at(0.52)),
+    ];
+    const geo = computeWindingTraceGeometry(record, 480, 270);
+    const thickness = geo.outline.map((p) => p.bottomY - p.topY);
+    // 密集側が最大、空き側が最小、その差が実座標として現れる。
+    expect(Math.max(...thickness)).toBeGreaterThan(Math.min(...thickness) + 4);
+  });
+
+  it('空記録では比も0で、NaNを出さない', () => {
+    for (const value of computeWindingOutlineThicknessRatios([0, 0, 0], 3)) {
+      expect(Number.isFinite(value)).toBe(true);
+      expect(value).toBe(0);
+    }
+    expect(computeWindingOutlineThicknessRatios([], 3)).toEqual([]);
+  });
+});
+
+describe('中央またぎの渡り線', () => {
+  const turn = (arm: 'left' | 'right' | 'straddle') => ({ position: 0.5, arm, direction: 1 as const, tension: 0.5 });
+
+  it('straddleが無ければ空', () => {
+    const geo = computeWindingTraceGeometry([turn('left'), turn('right')], 480, 270);
+    expect(geo.crossovers).toEqual([]);
+  });
+
+  it('straddleの本数だけ生成し、軸を左右に跨ぐ', () => {
+    const record = [turn('left'), turn('straddle'), turn('right'), turn('straddle')];
+    const geo = computeWindingTraceGeometry(record, 480, 270);
+    expect(geo.crossovers).toHaveLength(2);
+    const axisX = Math.round(480 / 2);
+    for (const segment of geo.crossovers) {
+      expect(segment.startX).toBeLessThan(axisX);
+      expect(segment.endX).toBeGreaterThan(axisX);
+      expect(Number.isInteger(segment.startX)).toBe(true);
+      expect(Number.isInteger(segment.endX)).toBe(true);
+      expect(Number.isInteger(segment.y)).toBe(true);
+    }
+  });
+});
+
+describe('W2 修正前後の同縮尺比較', () => {
+  const base = Array.from({ length: 30 }, (_, i) => ({
+    position: i / 30, arm: 'straddle' as const, direction: 1 as const, tension: 0.5,
+  }));
+
+  it('同じ記録長・同じcontentなら、区間外のstrokeは1つも動かない', () => {
+    // 第2区間(index 8〜14)だけを別の値へ置き換える。
+    const edited = base.map((turn, i) => (i >= 8 && i < 15 ? { ...turn, tension: 0 } : turn));
+    const before = computeWindingTraceGeometry(base, 480, 270);
+    const after = computeWindingTraceGeometry(edited, 480, 270);
+    expect(after.strokes).toHaveLength(before.strokes.length);
+    before.strokes.forEach((stroke, i) => {
+      if (i >= 8 && i < 15) return;
+      expect(after.strokes[i], `index ${i}`).toEqual(stroke);
+    });
+  });
+
+  it('縮尺の基準(strip・axis)は前後で同一', () => {
+    const edited = base.map((turn, i) => (i === 10 ? { ...turn, direction: -1 as const } : turn));
+    const before = computeWindingTraceGeometry(base, 480, 270);
+    const after = computeWindingTraceGeometry(edited, 480, 270);
+    expect(after.stripRect).toEqual(before.stripRect);
+    expect(after.axisRect).toEqual(before.axisRect);
   });
 });

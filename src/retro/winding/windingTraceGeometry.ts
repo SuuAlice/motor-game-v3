@@ -20,6 +20,50 @@ const ARM_OFFSET_RATIO = 0.018;
 // 包絡(topY/bottomYそのもの)に一致させ、既存の外形を超えないようにする値。
 const WINDING_INNER_RADIUS_RATIO = 0.4;
 
+/**
+ * 輪郭を刻む区間数。短冊を横に等分し、各区間へ落ちたターン数で厚みを決める。
+ * 480px幅なら1区間15pxで、隣接ターン間隔(実測で中央値10px前後)より粗く、
+ * 手癖の偏りが「山」として見える粒度になる。
+ */
+const OUTLINE_BUCKET_COUNT = 32;
+
+/**
+ * 膨らみの誇張倍率(art-spec第一条3「実寸比の約3倍」)。**第一試作の初期値**であり、
+ * 最終値はU2視認試遊で決める。実値ではなく読み取りやすさのための誇張である。
+ *
+ * 効かせ方は`computeWindingOutlineThicknessRatios`のとおり「**平均からの偏差**を倍する」。
+ * 密度そのものを倍すると最大値で頭打ちになり、倍率を変えても絵が変わらない。
+ */
+export const WINDING_OUTLINE_EXAGGERATION = 3;
+
+/** 輪郭の最小厚み比。ターンが1本も無い区間でも軸が消えないように芯を残す。 */
+const OUTLINE_MIN_THICKNESS_RATIO = 0.12;
+
+/**
+ * 区間ごとのターン数から、0〜1の厚み比を作る。
+ *
+ * **平均密度を1として、そこからの偏差を`exaggeration`倍する**。art-spec第一条3の
+ * 「実寸比の約3倍で誇張」は「厚みそのものを3倍する」ではない——密度を直接倍すると
+ * 最大値でクランプされて頭打ちになり、倍率を上げても絵が変わらなくなる。
+ * 偏差を倍せば、均一な巻きは平らのまま、偏った巻きだけが強く凸凹する。
+ *
+ * 最後に最大値で正規化するので、**倍率をいくつにしても最大包絡は超えない**。
+ * 乱数・平滑化・補間は入れない(記録に無い凹凸を作らない)。
+ */
+export function computeWindingOutlineThicknessRatios(
+  counts: readonly number[],
+  exaggeration: number = WINDING_OUTLINE_EXAGGERATION,
+): number[] {
+  const total = counts.reduce((sum, count) => sum + count, 0);
+  if (total === 0 || counts.length === 0) return counts.map(() => 0);
+  const mean = total / counts.length;
+  // 平均で1、密集で1超、空きで1未満。偏差を倍してから負を切り落とす。
+  const raw = counts.map((count) => Math.max(0, 1 + (count / mean - 1) * exaggeration));
+  const peak = Math.max(...raw);
+  // 全区間が平均どおり(=偏差0)なら peak は1で、比はすべて1(平ら)になる。
+  return peak > 0 ? raw.map((value) => value / peak) : raw.map(() => 0);
+}
+
 export interface IntRect {
   x: number;
   y: number;
@@ -78,10 +122,37 @@ export interface WindingJigGeometry {
   switchLeverRect: IntRect;
 }
 
+/**
+ * P4-1B B3(2026-08-30人間承認): 外形輪郭の1点。art-spec第一条3
+ * 「**コイルの膨らみは実寸比の約3倍で誇張。乱巻きは輪郭の凸凹で表現**」の実装。
+ *
+ * 4段積層は「どのターンが手前か」を示すが、**どこが厚いか**は示さない。輪郭は
+ * 位置ヒストグラムの粗密をそのまま外形の凸凹に写すので、密集は外へ、空きは内へ凹む。
+ * 良否は言わない——形が出るだけで、どこを直すかはプレイヤーが決める。
+ */
+export interface WindingOutlinePoint {
+  readonly x: number;
+  /** 短冊中心から上側の輪郭y。 */
+  readonly topY: number;
+  /** 短冊中心から下側の輪郭y。上下対称。 */
+  readonly bottomY: number;
+}
+
+/** 中央またぎ(渡り線)の1本。軸を横切る形で示し、色に頼らず判別できるようにする。 */
+export interface WindingCrossoverSegment {
+  readonly startX: number;
+  readonly endX: number;
+  readonly y: number;
+}
+
 export interface WindingTraceGeometry {
   stripRect: IntRect;
   axisRect: IntRect;
   strokes: TurnStroke[];
+  /** 外形輪郭(左端→右端)。記録が空なら空配列。 */
+  outline: WindingOutlinePoint[];
+  /** 中央またぎのターンから作る渡り線。straddleが無ければ空配列。 */
+  crossovers: WindingCrossoverSegment[];
   /** `jig`を渡さない呼び出しでは**存在しない**。既存の絵は1pxも変わらない。 */
   jig?: WindingJigGeometry;
 }
@@ -237,7 +308,67 @@ export function computeWindingTraceGeometry(
     };
   });
 
+  const outline = computeWindingOutline(turns, w, stripY, maxRadius);
+  const crossovers = computeWindingCrossovers(turns, w, stripY, maxRadius, n);
+
   return jig === undefined
-    ? { stripRect, axisRect, strokes }
-    : { stripRect, axisRect, strokes, jig: computeWindingJigGeometry(jig, w, h) };
+    ? { stripRect, axisRect, strokes, outline, crossovers }
+    : { stripRect, axisRect, strokes, outline, crossovers, jig: computeWindingJigGeometry(jig, w, h) };
+}
+
+/**
+ * 外形輪郭。位置ヒストグラムの粗密を上下対称の包絡へ写す。
+ *
+ * **記録に無い凹凸を作らない**——各区間の厚みはその区間へ落ちたターン数だけで決まり、
+ * 平滑化も補間も乱数も入れない。空記録では空配列を返す(存在しない輪郭を描かない)。
+ */
+function computeWindingOutline(
+  turns: readonly WindingTurn[],
+  w: number,
+  stripY: number,
+  maxRadius: number,
+): WindingOutlinePoint[] {
+  if (turns.length === 0) return [];
+
+  const counts = new Array<number>(OUTLINE_BUCKET_COUNT).fill(0);
+  for (const turn of turns) {
+    const index = Math.min(OUTLINE_BUCKET_COUNT - 1, Math.floor(turn.position * OUTLINE_BUCKET_COUNT));
+    counts[index] += 1;
+  }
+  const ratios = computeWindingOutlineThicknessRatios(counts);
+  const minThickness = maxRadius * OUTLINE_MIN_THICKNESS_RATIO;
+  const span = maxRadius - minThickness;
+
+  return ratios.map((ratio, index) => {
+    const thickness = Math.round(minThickness + span * ratio);
+    return {
+      x: Math.round((w * (index + 0.5)) / OUTLINE_BUCKET_COUNT),
+      topY: stripY - thickness,
+      bottomY: stripY + thickness,
+    };
+  });
+}
+
+/**
+ * 中央またぎの渡り線。**軸を横切る水平線**として描くための座標を返す。
+ * arm='straddle'のターンだけが対象で、色ではなく形で判別できるようにする
+ * (art-spec §5.3「逆巻きは色で区別しない」と同じ態度)。
+ */
+function computeWindingCrossovers(
+  turns: readonly WindingTurn[],
+  w: number,
+  stripY: number,
+  maxRadius: number,
+  totalTurns: number,
+): WindingCrossoverSegment[] {
+  const half = Math.max(2, Math.round(w * ARM_OFFSET_RATIO * 2));
+  const segments: WindingCrossoverSegment[] = [];
+  turns.forEach((turn, i) => {
+    if (turn.arm !== 'straddle') return;
+    const cx = Math.round(turn.position * w);
+    // 年代と同じ半径方向の位置に置く。渡り線が軌跡と別の層に浮かないようにする。
+    const radius = Math.round(maxRadius * computeWindingEnvelopeScale(i, totalTurns));
+    segments.push({ startX: cx - half, endX: cx + half, y: stripY - radius });
+  });
+  return segments;
 }
