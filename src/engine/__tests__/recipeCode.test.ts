@@ -12,6 +12,8 @@ import {
   type CarRecipe,
 } from '../recipeCode';
 import { computeMaxTurns, type MotorConfig } from '../motorPhysics';
+import { encodeWindingRecordCanonical, type WindingRecord } from '../../materials/windingRecord';
+import { deriveWindingMotorFields } from '../../materials/windingMapping';
 import type { CarConfig } from '../vehiclePhysics';
 
 // Phase2 Step6(Fable承認済み): 新4フィールド(wireResistivityRatio/wireDensityRatio/
@@ -63,12 +65,24 @@ function fullAppearance(overrides: Partial<CarAppearance> = {}): CarAppearance {
   return { bodyColorId: 'blue', accentColorId: 'yellow', ...overrides };
 }
 
+/**
+ * P4-1B: MC4は巻線記録の収載を要求し、`coilTurns === record.length`も要求する。
+ * fixtureの既定は「fullMotorConfigのcoilTurnsと同じ長さの、全ターン正転・左腕の記録」。
+ */
+function fullWindingRecord(turnCount: number = fullMotorConfig().coilTurns): WindingRecord {
+  return Array.from({ length: turnCount }, () => ({
+    position: 0.25, arm: 'left' as const, direction: 1 as const, tension: 0.5,
+  }));
+}
+
 function fullRecipe(overrides: Partial<CarRecipe> = {}): CarRecipe {
+  const motorConfig = overrides.motorConfig ?? fullMotorConfig();
   return {
-    motorConfig: fullMotorConfig(),
+    motorConfig,
     carConfig: fullCarConfig(),
     appearance: fullAppearance(),
     seed: 0x12345678,
+    windingRecord: fullWindingRecord(motorConfig.coilTurns),
     ...overrides,
   };
 }
@@ -111,7 +125,7 @@ function testClamp(value: number, min: number, max: number): number {
 // decodeBase64Urlと同一アルゴリズムをテスト側で再実装して覗き見る。
 // 本番コードには影響しない)
 function extractPayloadKeys(code: string): { m: string[]; c: string[]; a: string[] } {
-  const withoutPrefix = code.replace(/^(MC3-|MC2-|M15-)/, '');
+  const withoutPrefix = code.replace(/^(MC4-|MC3-|MC2-|M15-)/, '');
   const body = withoutPrefix.slice(0, withoutPrefix.lastIndexOf('.'));
   const base64 = body.replaceAll('-', '+').replaceAll('_', '/').padEnd(Math.ceil(body.length / 4) * 4, '=');
   const binary = atob(base64);
@@ -155,10 +169,15 @@ const validRawFields = {
 };
 
 describe('recipeCode(MC3-/MC2-/M15-)', () => {
-  it('1. CarRecipe全体を同一値で往復できる', () => {
+  it('1. CarRecipe全体を同一値で往復できる(P4-1B: windingTurnsRatioはdecode時に記録から導出される)', () => {
     const recipe = fullRecipe();
     const decoded = decodeRecipe(encodeRecipe(recipe));
-    expect(decoded).toEqual(recipe);
+    // B1案A: payloadへ独立収載しないため、往復後は記録からの導出値が入る。
+    const derived = deriveWindingMotorFields(recipe.windingRecord!);
+    expect(decoded).toEqual({
+      ...recipe,
+      motorConfig: { ...recipe.motorConfig, windingTurnsRatio: derived.windingTurnsRatio },
+    });
   });
 
   it('2. 1文字の改竄をチェックサムで検出する(改変位置は固定: チェックサム直前の1文字)', () => {
@@ -169,13 +188,22 @@ describe('recipeCode(MC3-/MC2-/M15-)', () => {
     expect(() => decodeRecipe(tampered)).toThrow('チェックサム');
   });
 
-  it('3. 範囲外のモーター値を物理範囲・巻き数上限へクランプする', () => {
+  it('3. 範囲外のモーター値を物理範囲へクランプする(P4-1B: coilTurnsはclampではなく拒否になった)', () => {
+    // 巻き数は巻線記録の長さと一致していなければならないため、上限超過は**clampせず拒否**する
+    // (clampすると記録と巻数が食い違ったレシピができる、承認項目A1-3)。
+    const overLimit = fullRecipe({
+      motorConfig: fullMotorConfig({ coilTurns: 999, wireGaugeMm: 0.8, parallelStrands: 2 }),
+    });
+    expect(() => encodeRecipe(overLimit)).toThrow(RecipeCodeError);
+
+    // 巻き数以外のフィールドは従来どおりクランプされる。
+    const withinLimit = computeMaxTurns(0.8, 2);
     const recipe = fullRecipe({
-      motorConfig: fullMotorConfig({ coilTurns: 999, wireGaugeMm: 0.8, parallelStrands: 2, magnetDistanceMm: -10 }),
+      motorConfig: fullMotorConfig({ coilTurns: withinLimit, wireGaugeMm: 0.8, parallelStrands: 2, magnetDistanceMm: -10 }),
     });
     const decoded = decodeRecipe(encodeRecipe(recipe));
-    expect(decoded.motorConfig.coilTurns).toBe(computeMaxTurns(0.8, 2));
-    expect(decoded.motorConfig.coilTurns).toBe(18);
+    expect(decoded.motorConfig.coilTurns).toBe(withinLimit);
+    expect(withinLimit).toBe(18);
     expect(decoded.motorConfig.magnetDistanceMm).toBe(2);
   });
 
@@ -222,10 +250,21 @@ describe('recipeCode(MC3-/MC2-/M15-)', () => {
     expect(decodedFromV15.motorConfig.wireDensityRatio).toBe(1);
     expect(decodedFromV15.motorConfig.batteryInternalResistanceRatio).toBe(1);
     expect(decodedFromV15.motorConfig.batteryCapacityRatio).toBe(1);
-    const rewritten = encodeRecipe(decodedFromV15);
-    expect(rewritten.startsWith('MC3-')).toBe(true);
+    // P4-1B: 旧コードのdecode結果は`windingRecord: null`なので、**そのままでは再書き出しできない**
+    // (MC4は記録の収載を要求する)。記録なしのまま書き出せると、記録のないMC4が生まれる。
+    expect(() => encodeRecipe(decodedFromV15)).toThrow(RecipeCodeError);
+
+    // 記録を伴えばMC4として書き出し直せ、再度往復する(巻線以外の値は保持される)。
+    const withRecord: CarRecipe = {
+      ...decodedFromV15,
+      windingRecord: fullWindingRecord(decodedFromV15.motorConfig.coilTurns),
+    };
+    const rewritten = encodeRecipe(withRecord);
+    expect(rewritten.startsWith('MC4-')).toBe(true);
     const decodedAgain = decodeRecipe(rewritten);
-    expect(decodedAgain).toEqual(decodedFromV15);
+    expect(decodedAgain.motorConfig.magnetDistanceMm).toBe(decodedFromV15.motorConfig.magnetDistanceMm);
+    expect(decodedAgain.motorConfig.wireResistivityRatio).toBe(1);
+    expect(decodedAgain.windingRecord).toEqual(withRecord.windingRecord);
   });
 
   it('7. 異常なappearanceの値はエンジン内蔵既定IDへフォールバックする', () => {
@@ -363,7 +402,8 @@ describe('recipeCode(MC3-/MC2-/M15-)', () => {
     const v15Code = buildV15Code(fullMotorConfig({ magnetDistanceMm: 3 }), 1);
     const decodedFromV15 = decodeRecipe(v15Code);
     expect(decodedFromV15.motorConfig.magnetDistanceMm).toBe(3);
-    const rewritten = encodeRecipe(decodedFromV15);
+    // P4-1B: 再書き出しには巻線記録が要る(記録なしのdecode結果はそのまま書き出せない)。
+    const rewritten = encodeRecipe({ ...decodedFromV15, windingRecord: fullWindingRecord(decodedFromV15.motorConfig.coilTurns) });
     const decodedAfterRewrite = decodeRecipe(rewritten);
     expect(decodedAfterRewrite.motorConfig.magnetDistanceMm).toBe(3);
   });
@@ -401,13 +441,18 @@ describe('recipeCode(MC3-/MC2-/M15-)', () => {
       }),
     });
     const code = encodeRecipe(recipe);
-    expect(code.startsWith('MC3-')).toBe(true);
+    // P4-1B: encodeRecipeは最新版(MC4)だけを生成する。導線・電池4フィールドの往復保持は不変。
+    expect(code.startsWith('MC4-')).toBe(true);
     const decoded = decodeRecipe(code);
     expect(decoded.motorConfig.wireResistivityRatio).toBe(2);
     expect(decoded.motorConfig.wireDensityRatio).toBe(1.2);
     expect(decoded.motorConfig.batteryInternalResistanceRatio).toBe(0.5);
     expect(decoded.motorConfig.batteryCapacityRatio).toBe(3);
-    expect(decoded).toEqual(recipe);
+    // windingTurnsRatioはdecode時に記録から導出されるため、往復比較では明示的に足す(B1案A)。
+    expect(decoded).toEqual({
+      ...recipe,
+      motorConfig: { ...recipe.motorConfig, windingTurnsRatio: deriveWindingMotorFields(recipe.windingRecord!).windingTurnsRatio },
+    });
   });
 
   describe('16. 新4フィールドのクランプ境界', () => {
@@ -678,6 +723,146 @@ describe('recipeCode(MC3-/MC2-/M15-)', () => {
       const decoded = decodeRecipe(encodeRecipe(recipe));
       expect(decoded.motorConfig.brushContactResistanceRatio).toBe(0.6);
       expect(decoded.motorConfig.brushChatterProbabilityRatio).toBe(2.0);
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P4-1B(2026-08-30人間承認、担当A1・A3): MC4のexact契約。
+// ---------------------------------------------------------------------------
+describe('P4-1B: MC4(巻線記録の収載)', () => {
+  /** MC4のpayloadをdecodeせずに覗く(テスト専用)。 */
+  function extractMc4Payload(code: string): Record<string, unknown> {
+    const body = code.replace(/^MC4-/, '');
+    const encoded = body.slice(0, body.lastIndexOf('.'));
+    const base64 = encoded.replaceAll('-', '+').replaceAll('_', '/').padEnd(Math.ceil(encoded.length / 4) * 4, '=');
+    const bytes = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
+    return JSON.parse(new TextDecoder('utf-8').decode(bytes)) as Record<string, unknown>;
+  }
+
+  /** 破損MC4を組み立てる(payloadを直接いじってchecksumを付け直す)。 */
+  function buildRawMc4Code(mutate: (payload: Record<string, unknown>) => void): string {
+    const payload = extractMc4Payload(encodeRecipe(fullRecipe()));
+    mutate(payload);
+    const json = JSON.stringify(payload);
+    const bytes = new TextEncoder().encode(json);
+    let binary = '';
+    for (const byte of bytes) binary += String.fromCharCode(byte);
+    const encoded = btoa(binary).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/u, '');
+    return `MC4-${encoded}.${testChecksum(encoded)}`;
+  }
+
+  it('encodeはMC4のみを生成する', () => {
+    expect(encodeRecipe(fullRecipe()).startsWith('MC4-')).toBe(true);
+  });
+
+  it('canonical E2で往復し、padding無しのbase64urlである', () => {
+    const record = fullWindingRecord(80).map((t, i) => ({ ...t, direction: (i === 3 ? -1 : 1) as 1 | -1, arm: (i % 2 === 0 ? 'left' : 'right') as 'left' | 'right' }));
+    const recipe = fullRecipe({ motorConfig: fullMotorConfig({ coilTurns: 80 }), windingRecord: record });
+    const code = encodeRecipe(recipe);
+    const payload = extractMc4Payload(code);
+    const w = payload.w as { n: number; b: string };
+    expect(w.n).toBe(80);
+    expect(w.b).toBe(encodeWindingRecordCanonical(record));
+    expect(w.b).not.toContain('=');
+    expect(decodeRecipe(code).windingRecord).toEqual(record);
+  });
+
+  it('MC4 payloadにwindingTurnsRatioの独立fieldが存在しない(B1案A)', () => {
+    const payload = extractMc4Payload(encodeRecipe(fullRecipe()));
+    const m = payload.m as Record<string, unknown>;
+    expect('wtr' in m).toBe(false);
+    expect(Object.keys(m).some((k) => k.toLowerCase().includes('winding'))).toBe(false);
+    expect('windingTurnsRatio' in m).toBe(false);
+  });
+
+  it('decode結果のwindingTurnsRatioは記録からの導出値と一致する', () => {
+    const record = fullWindingRecord(30).map((t, i) => ({ ...t, direction: (i < 4 ? -1 : 1) as 1 | -1 }));
+    const recipe = fullRecipe({ motorConfig: fullMotorConfig({ coilTurns: 30 }), windingRecord: record });
+    const decoded = decodeRecipe(encodeRecipe(recipe));
+    expect(decoded.motorConfig.windingTurnsRatio).toBe(deriveWindingMotorFields(record).windingTurnsRatio);
+    expect(decoded.motorConfig.windingTurnsRatio).toBeCloseTo(22 / 30, 12);
+  });
+
+  it('MC2/MC3/M15のdecode結果はwindingRecord=nullで、記録を逆生成しない', () => {
+    const v15 = decodeRecipe(buildV15Code(fullMotorConfig(), 5));
+    expect(v15.windingRecord).toBeNull();
+    expect(v15.motorConfig.coilTurns).toBeGreaterThan(0); // coilTurnsはあるが記録は作らない
+    // MC3も同様。
+    const mc3 = decodeRecipe(buildRawMc3Code(JSON.stringify({ v: 3, ...validRawFields, sd: 1 })));
+    expect(mc3.windingRecord).toBeNull();
+  });
+
+  describe('ターン数の境界(clamp・切り詰め・部分救済なし)', () => {
+    it.each([9, 151])('encode時に%iターンは拒否される', (turnCount) => {
+      const recipe = fullRecipe({ motorConfig: fullMotorConfig({ coilTurns: turnCount }), windingRecord: fullWindingRecord(turnCount) });
+      expect(() => encodeRecipe(recipe)).toThrow(RecipeCodeError);
+    });
+
+    it.each([10, 150])('encode時に%iターンは受理される', (turnCount) => {
+      const recipe = fullRecipe({ motorConfig: fullMotorConfig({ coilTurns: turnCount, wireGaugeMm: 0.2, parallelStrands: 1 }), windingRecord: fullWindingRecord(turnCount) });
+      expect(decodeRecipe(encodeRecipe(recipe)).windingRecord).toHaveLength(turnCount);
+    });
+
+    it('物理上限ちょうどは受理し、1本超過は拒否する', () => {
+      const limit = computeMaxTurns(0.8, 2); // 18
+      const atLimit = fullRecipe({ motorConfig: fullMotorConfig({ coilTurns: limit, wireGaugeMm: 0.8, parallelStrands: 2 }), windingRecord: fullWindingRecord(limit) });
+      expect(() => encodeRecipe(atLimit)).not.toThrow();
+      const over = fullRecipe({ motorConfig: fullMotorConfig({ coilTurns: limit + 1, wireGaugeMm: 0.8, parallelStrands: 2 }), windingRecord: fullWindingRecord(limit + 1) });
+      expect(() => encodeRecipe(over)).toThrow(RecipeCodeError);
+    });
+
+    it('coilTurnsと記録長の不一致はencode時に拒否される', () => {
+      const recipe = fullRecipe({ motorConfig: fullMotorConfig({ coilTurns: 40 }), windingRecord: fullWindingRecord(41) });
+      expect(() => encodeRecipe(recipe)).toThrow(RecipeCodeError);
+    });
+
+    it('巻線記録なしのCarRecipeはencodeできない', () => {
+      expect(() => encodeRecipe(fullRecipe({ windingRecord: null }))).toThrow(RecipeCodeError);
+    });
+  });
+
+  describe('decode側のfail-closed(部分救済しない)', () => {
+    it('wが欠落したMC4は拒否される', () => {
+      const code = buildRawMc4Code((p) => { delete p.w; });
+      expect(() => decodeRecipe(code)).toThrow(RecipeCodeError);
+    });
+
+    it.each([-1, 1.5, 151, Number.NaN])('nが%sのMC4は拒否される', (n) => {
+      const code = buildRawMc4Code((p) => { (p.w as Record<string, unknown>).n = n; });
+      expect(() => decodeRecipe(code)).toThrow(RecipeCodeError);
+    });
+
+    it('nと本体の長さが食い違うMC4は拒否される', () => {
+      const code = buildRawMc4Code((p) => { (p.w as Record<string, unknown>).n = 79; });
+      expect(() => decodeRecipe(code)).toThrow(RecipeCodeError);
+    });
+
+    it('bが非文字列・不正文字のMC4は拒否される', () => {
+      expect(() => decodeRecipe(buildRawMc4Code((p) => { (p.w as Record<string, unknown>).b = 123; }))).toThrow(RecipeCodeError);
+      expect(() => decodeRecipe(buildRawMc4Code((p) => { (p.w as Record<string, unknown>).b = '###'; }))).toThrow(RecipeCodeError);
+    });
+
+    it('coilTurnsだけを書き換えたMC4は拒否される(記録と食い違う)', () => {
+      const code = buildRawMc4Code((p) => { (p.m as Record<string, unknown>).ct = 40; });
+      expect(() => decodeRecipe(code)).toThrow(RecipeCodeError);
+    });
+
+    it('未知バージョンのMC4は拒否される', () => {
+      const code = buildRawMc4Code((p) => { p.v = 5; });
+      expect(() => decodeRecipe(code)).toThrow(RecipeCodeError);
+      expect(() => decodeRecipe(code)).toThrow('バージョン');
+    });
+
+    it('改竄はchecksumで検出される(既存防御が効く)', () => {
+      const code = encodeRecipe(fullRecipe());
+      const index = code.indexOf('.') - 1;
+      const tampered = `${code.slice(0, index)}${code[index] === 'A' ? 'B' : 'A'}${code.slice(index + 1)}`;
+      expect(() => decodeRecipe(tampered)).toThrow('チェックサム');
+    });
+
+    it('巨大入力の既存防御が効く', () => {
+      expect(() => decodeRecipe(`MC4-${'A'.repeat(5000)}.zz`)).toThrow('長すぎ');
     });
   });
 });

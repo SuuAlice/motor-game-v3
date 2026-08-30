@@ -70,6 +70,7 @@ import {
   type EquipmentLoadout,
   type PendingNotebookRecord,
 } from './runOutcomeApplication';
+import { selectEquippedWindingRecord } from './equippedWinding';
 
 const REST_STATE: SimState = {
   theta: 0,
@@ -336,9 +337,8 @@ export function prepareDestructionRun(
   // recipeKeyはWear反映**前**のmaterialComposedBaseから計算する(§14.2の3、レシピ同一性は
   // 個体の劣化状態に依存しない)。
   // P4-1A(承認項目7): 装備中ローターの巻線記録をrecipeKeyへ含める。legacy個体はnull。
-  // 記録の出典はローター個体1つだけで、ここで別途組み立てない(単一出典)。
-  const equippedRotor = inventory.rotorAssemblies.find((r) => r.assemblyId === loadout.rotorAssemblyId);
-  const windingRecord = equippedRotor?.winding.kind === 'recorded' ? equippedRotor.winding.record : null;
+  // P4-1B(担当A2): 突合せを`selectEquippedWindingRecord`へ閉じ、レシピ共有UIと同じ出典にした。
+  const windingRecord = selectEquippedWindingRecord(inventory, loadout);
   const recipeKey = computeRecipeKey(resolved.selection, composed.motorConfig, composed.carConfig, windingRecord);
 
   // 4: Wear反映(§14.1)。materialComposedBaseへ適用して実効configを得る。
@@ -592,6 +592,12 @@ export const useGameStore = create<GameStore>()(
       },
 
       loadCarRecipe: (recipe) => {
+        // P4-1B(担当A2-3): 巻線記録を持つMC4レシピは**何も変更せずに無視する**。
+        // 記録はローター個体に属し、生成には線材消費を伴う(P4-1A)。configだけ取り込むと
+        // 「記録のない巻数」が入って`record.length === coilTurns`の単一出典が崩れ、
+        // 記録ごと取り込むと線材を消費しないローターができる。どちらも採らず、
+        // 適用はP4-1G(型紙)へ送る。新しい公開Result/actionは足さない——理由表示はUIが行う。
+        if (recipe.windingRecord !== null) return;
         const config = clampToCoilWindow({ ...recipe.motorConfig });
         const carConfig = { ...recipe.carConfig };
         const garageSelection = resolveGarageSelectionFromRecipe(

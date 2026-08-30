@@ -239,6 +239,8 @@ describe('テスト走行store', () => {
       carConfig,
       appearance: { bodyColorId: 'unknown-body', accentColorId: 'unknown-accent' },
       seed: 123,
+      // P4-1B: 巻線記録なしのレシピ(MC2/MC3由来)は従来どおり読み込まれる。
+      windingRecord: null,
     });
     const state = useGameStore.getState();
     expect(state.carConfig).toEqual(carConfig);
@@ -263,6 +265,10 @@ describe('テスト走行store', () => {
         accentColorId: loaded.garageSelection.accentColorId,
       },
       seed: loaded.recipeSeed,
+      // P4-1B: MC4は巻線記録を要求するため、coilTurnsと同じ長さの記録を添える。
+      windingRecord: Array.from({ length: loaded.config.coilTurns }, () => ({
+        position: 0.25, arm: 'left' as const, direction: 1 as const, tension: 0.5,
+      })),
     });
     expect(decodeRecipe(rewritten).motorConfig.magnetDistanceMm).toBe(3);
   });
@@ -343,5 +349,72 @@ describe('テスト走行store', () => {
     } finally {
       updateProgressSpy.mockRestore();
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P4-1B(2026-08-30人間承認、担当A2-3): 巻線記録を持つMC4レシピは、loadCarRecipeが
+// **何も変更せずに無視する**。記録はローター個体に属し生成には線材消費を伴うため、
+// configだけ取り込むと`record.length === coilTurns`の単一出典が崩れる。
+// ---------------------------------------------------------------------------
+describe('P4-1B: MC4レシピのloadCarRecipe防御', () => {
+  it('windingRecordを持つレシピでは全関連sliceが不変のまま', () => {
+    const before = useGameStore.getState();
+    const snapshot = {
+      config: before.config,
+      carConfig: before.carConfig,
+      garageSelection: before.garageSelection,
+      recipeSeed: before.recipeSeed,
+    };
+
+    useGameStore.getState().loadCarRecipe({
+      motorConfig: { ...before.config, coilTurns: 30, magnetDistanceMm: 7 },
+      carConfig: { ...before.carConfig, massG: 999 },
+      appearance: { bodyColorId: 'unknown-body', accentColorId: 'unknown-accent' },
+      seed: 4242,
+      windingRecord: Array.from({ length: 30 }, () => ({
+        position: 0.25, arm: 'left' as const, direction: 1 as const, tension: 0.5,
+      })),
+    });
+
+    const after = useGameStore.getState();
+    expect(after.config).toBe(snapshot.config);
+    expect(after.carConfig).toBe(snapshot.carConfig);
+    expect(after.garageSelection).toBe(snapshot.garageSelection);
+    expect(after.recipeSeed).toBe(snapshot.recipeSeed);
+  });
+
+  it('windingRecordがnullのレシピは従来どおり読み込まれる(旧レシピの互換)', () => {
+    const before = useGameStore.getState();
+    useGameStore.getState().loadCarRecipe({
+      motorConfig: { ...before.config, magnetDistanceMm: 7 },
+      carConfig: before.carConfig,
+      appearance: { bodyColorId: 'unknown-body', accentColorId: 'unknown-accent' },
+      seed: 4242,
+      windingRecord: null,
+    });
+    expect(useGameStore.getState().config.magnetDistanceMm).toBe(7);
+    expect(useGameStore.getState().recipeSeed).toBe(4242);
+  });
+
+  it('MC4コードをdecodeしてloadしても在庫・装備は変化しない', () => {
+    const record = Array.from({ length: 30 }, () => ({
+      position: 0.25, arm: 'left' as const, direction: 1 as const, tension: 0.5,
+    }));
+    const code = encodeRecipe({
+      motorConfig: { ...useGameStore.getState().config, coilTurns: 30 },
+      carConfig: useGameStore.getState().carConfig,
+      appearance: { bodyColorId: 'blue', accentColorId: 'yellow' },
+      seed: 1,
+      windingRecord: record,
+    });
+    const decoded = decodeRecipe(code);
+    expect(decoded.windingRecord).toHaveLength(30);
+
+    const inventoryBefore = useSaveStore.getState().inventory;
+    const loadoutBefore = useSaveStore.getState().equipmentLoadout;
+    useGameStore.getState().loadCarRecipe(decoded);
+    expect(useSaveStore.getState().inventory).toBe(inventoryBefore);
+    expect(useSaveStore.getState().equipmentLoadout).toBe(loadoutBefore);
   });
 });

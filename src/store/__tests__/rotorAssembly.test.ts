@@ -10,6 +10,7 @@ import {
   type RotorAssemblyMotorDraft,
 } from '../rotorAssembly';
 import type { EquipmentLoadout } from '../runOutcomeApplication';
+import { selectEquippedWindingRecord } from '../equippedWinding';
 import type { PlayerInventory } from '../../materials/inventoryItem';
 import { computeConsumedWireM } from '../../materials/assumedGeometry';
 import { MAX_WINDING_TURNS, MIN_RUNNABLE_WINDING_TURNS, type WindingRecord } from '../../materials/windingRecord';
@@ -349,5 +350,34 @@ describe('順逆同数の記録は生成境界で拒否する(windingTurnsRatio=
     const before = JSON.parse(JSON.stringify({ inventory: input.inventory, loadout: input.loadout, record: input.command.record }));
     resolveRotorAssemblyCompletion(input);
     expect({ inventory: input.inventory, loadout: input.loadout, record: input.command.record }).toStrictEqual(before);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P4-1B(2026-08-30人間承認、担当A2-2): 完成configの`record.length === coilTurns`を
+// **selectorと同じ出典**で固定する。ここが崩れると、レシピ共有・recipeKey・走行構築が
+// それぞれ別の巻数を見ることになる。
+// ---------------------------------------------------------------------------
+describe('P4-1B: 完成configとselectorの単一出典', () => {
+  it('生成したローターをselectorで引くと、その記録長がconfig.coilTurnsと一致する', () => {
+    const input = makeInput();
+    const result = resolveRotorAssemblyCompletion(input);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    const selected = selectEquippedWindingRecord(result.inventory, result.loadout);
+    expect(selected).not.toBeNull();
+    expect(selected).toHaveLength(result.config.coilTurns);
+    expect(result.config.coilTurns).toBe(input.command.record.length);
+  });
+
+  it('別のターン数で完成させても一致は保たれる', () => {
+    for (const turnCount of [10, 30, 100]) {
+      const input = makeInput({ record: record(turnCount) }, baseInventory(1000));
+      const result = resolveRotorAssemblyCompletion(input);
+      expect(result.ok, `turns=${turnCount}`).toBe(true);
+      if (!result.ok) continue;
+      expect(selectEquippedWindingRecord(result.inventory, result.loadout)).toHaveLength(result.config.coilTurns);
+    }
   });
 });

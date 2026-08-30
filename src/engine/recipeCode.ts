@@ -1,4 +1,12 @@
 import { computeMaxTurns, type MotorConfig } from './motorPhysics';
+import {
+  decodeWindingRecordCanonical,
+  encodeWindingRecordCanonical,
+  resolveWindingRunnability,
+  MAX_WINDING_TURNS,
+  type WindingRecord,
+} from '../materials/windingRecord';
+import { deriveWindingMotorFields } from '../materials/windingMapping';
 import type { CarConfig } from './vehiclePhysics';
 
 // spec.md §6.4: 車体・外観込みのレシピコード(v2)。
@@ -8,6 +16,7 @@ import type { CarConfig } from './vehiclePhysics';
 
 const PREFIX_V2 = 'MC2-';
 const PREFIX_V3 = 'MC3-';
+const PREFIX_V4 = 'MC4-';
 const PREFIX_V15 = 'M15-';
 
 // 悪意ある巨大入力によるbase64復号・JSON.parseコストを、処理前に排除する
@@ -78,6 +87,23 @@ interface RecipePayloadV2 {
   sd: number;
 }
 
+/**
+ * P4-1B(2026-08-30人間承認、担当A1): MC4のpayload。
+ *
+ * **`m`はMC3と同一で、`windingTurnsRatio`を含めない**(B1案A)。方向一貫性は`w`のcanonical
+ * recordから既存純関数で必ず導出する——独立値として持つと、記録と派生値が食い違ったレシピを
+ * 作れてしまい、「どちらが正か」を許容差で判断する羽目になる。
+ */
+interface RecipePayloadV4 {
+  v: 4;
+  m: RecipePayloadV3['m'];
+  c: RecipePayloadV3['c'];
+  a: RecipePayloadV3['a'];
+  sd: number;
+  /** canonical巻線記録。`n`=ターン数、`b`=base64url(1ターン3バイト、E2、padなし)。 */
+  w: { n: number; b: string };
+}
+
 interface RecipePayloadV3 {
   v: 3;
   m: RecipePayloadV2['m'] & { wr: number; wz: number; br: number; bc: number; bcr: number; bpr: number };
@@ -100,6 +126,14 @@ export interface CarRecipe {
   carConfig: CarConfig;
   appearance: CarAppearance;
   seed: number;
+  /**
+   * P4-1B(担当A1): 巻線記録。**有無を型で運ぶ**。
+   *
+   * MC2/MC3/M15をdecodeした結果は必ず`null`——旧レシピには記録が存在しなかったという事実を
+   * そのまま表す。`coilTurns`等の集計値から記録を逆生成しない(逆生成すると、型紙・描画・
+   * recipeKeyがすべて実在しない軌跡を正として参照する)。
+   */
+  windingRecord: WindingRecord | null;
 }
 
 export class RecipeCodeError extends Error {
@@ -302,9 +336,9 @@ function resolveDefaultAppearance(defaultAppearance?: CarAppearance): CarAppeara
   return normalizeAppearanceFields(appearanceToFields(defaultAppearance ?? BUILT_IN_FALLBACK_APPEARANCE));
 }
 
-// Phase2 Step6(Fable承認済み): encodeRecipeは常にMC3-(v:3)を出力する。
-// MC2-を出力する経路は残さない(decodeRecipeはMC2-/M15-の読み込みのみ後方互換で
-// 維持する。生成は常に最新版数)。
+// Phase2 Step6(Fable承認済み)以来の規律: encodeRecipeは常に最新版だけを出力する。
+// P4-1B(2026-08-30人間承認、担当A1)でMC4-(v:4)へ更新した。MC2-/MC3-/M15-はdecodeのみ
+// 後方互換で維持し、生成経路は残さない。
 export function encodeRecipe(recipe: CarRecipe): string {
   // 正式Fable P3-3-Q14裁定(確定、候補c): effectiveTurnsRatioはrecipeへ意図的に追従しない
   // (base値は素材によらず常に1.0のため符号化する情報がない、6.4節)。誤って
@@ -320,8 +354,31 @@ export function encodeRecipe(recipe: CarRecipe): string {
   const motorConfig = normalizeMotorFields(motorConfigToFields(recipe.motorConfig));
   const carConfig = normalizeCarFields(carConfigToFields(recipe.carConfig));
   const appearance = normalizeAppearanceFields(appearanceToFields(recipe.appearance));
-  const payload: RecipePayloadV3 = {
-    v: 3,
+  // P4-1B: MC4は完全なWindingRecordを収載する。収載前に、レシピとして配れる記録かを
+  // すべて確認する——**不一致はコード全体を拒否**し、clamp・切り詰め・部分救済はしない
+  // (走らせられない記録や、記録と巻数が食い違うレシピを配ると受け取った側が再現できない)。
+  const windingRecord = recipe.windingRecord;
+  if (windingRecord === null) {
+    throw new RecipeCodeError('P4-1B: MC4レシピには巻線記録が必要です(記録のないローターは共有できません)。');
+  }
+  const runnability = resolveWindingRunnability(windingRecord);
+  if (!runnability.runnable) {
+    throw new RecipeCodeError(`P4-1B: レシピへ収載できる巻線記録ではありません: ${runnability.reason}`);
+  }
+  if (recipe.motorConfig.coilTurns !== windingRecord.length) {
+    throw new RecipeCodeError(
+      `P4-1B: motorConfig.coilTurns(${recipe.motorConfig.coilTurns})と巻線記録の長さ(${windingRecord.length})が一致しません。`,
+    );
+  }
+  const physicalMaxTurns = computeMaxTurns(recipe.motorConfig.wireGaugeMm ?? 0.4, recipe.motorConfig.parallelStrands ?? 1);
+  if (windingRecord.length > physicalMaxTurns) {
+    throw new RecipeCodeError(
+      `P4-1B: 巻線記録が巻きスペースの上限(${physicalMaxTurns}ターン)を超えています: ${windingRecord.length}`,
+    );
+  }
+
+  const payload: RecipePayloadV4 = {
+    v: 4,
     m: {
       ct: motorConfig.coilTurns,
       sw: motorConfig.slitWidthMm,
@@ -354,9 +411,71 @@ export function encodeRecipe(recipe: CarRecipe): string {
     },
     a: { bc: appearance.bodyColorId, ac: appearance.accentColorId },
     sd: normalizeSeed(recipe.seed),
+    w: { n: windingRecord.length, b: encodeWindingRecordCanonical(windingRecord) },
   };
   const encodedPayload = encodeBase64Url(JSON.stringify(payload));
-  return `${PREFIX_V3}${encodedPayload}.${checksum(encodedPayload)}`;
+  return `${PREFIX_V4}${encodedPayload}.${checksum(encodedPayload)}`;
+}
+
+/**
+ * MC4のcanonical巻線記録を復号し、deep validationを行う(P4-1B、担当A1)。
+ *
+ * **すべてfail-closed**——`w`の欠落・構造不正、`n`が整数0〜150の外、`b`が非文字列、
+ * canonical復号の失敗(pad非0・arm=3・量子化整数>256・バイト長不一致)、宣言ターン数と
+ * 実体の不一致、走行不可(10ターン未満)、巻きスペース上限超過、`coilTurns`との不一致は
+ * いずれも`RecipeCodeError`でコード全体を拒否する。部分救済・fallbackはしない。
+ */
+function decodeWindingPayload(raw: unknown, motorConfig: MotorConfig): WindingRecord {
+  if (!isPlainRecord(raw)) throw new RecipeCodeError('巻線記録の構造が不正です。');
+  const { n, b } = raw;
+  if (typeof n !== 'number' || !Number.isInteger(n) || n < 0 || n > MAX_WINDING_TURNS) {
+    throw new RecipeCodeError('巻線記録のターン数が不正です。');
+  }
+  if (typeof b !== 'string') throw new RecipeCodeError('巻線記録の本体が不正です。');
+  const decoded = decodeWindingRecordCanonical(b);
+  if (!decoded.ok) throw new RecipeCodeError(`巻線記録を読み取れません: ${decoded.reason}`);
+  // 宣言されたターン数と実体が食い違うレシピは破損として扱う(片方を信じて丸めない)。
+  if (decoded.value.length !== n) throw new RecipeCodeError('巻線記録のターン数と本体が一致しません。');
+  const runnability = resolveWindingRunnability(decoded.value);
+  if (!runnability.runnable) throw new RecipeCodeError(`巻線記録が走行できません: ${runnability.reason}`);
+  if (motorConfig.coilTurns !== decoded.value.length) {
+    throw new RecipeCodeError('巻線記録の長さとcoilTurnsが一致しません。');
+  }
+  const physicalMaxTurns = computeMaxTurns(motorConfig.wireGaugeMm ?? 0.4, motorConfig.parallelStrands ?? 1);
+  if (decoded.value.length > physicalMaxTurns) {
+    throw new RecipeCodeError('巻線記録が巻きスペースの上限を超えています。');
+  }
+  return decoded.value;
+}
+
+/**
+ * MC4のdecode(P4-1B、担当A1)。
+ *
+ * **B1案A**: `windingTurnsRatio`はpayloadに存在しない。ここでcanonical recordから
+ * `deriveWindingMotorFields`(既存純関数)を使って必ず導出し、返すbase configへ反映する。
+ * 独立値・fallback・許容差比較は作らない。
+ */
+function decodeV4(trimmed: string): CarRecipe {
+  const payload = decodeChecksummedBody(PREFIX_V4, trimmed);
+  const parsed = parsePayloadJson(payload);
+  if (!isPlainRecord(parsed)) throw new RecipeCodeError('レシピデータの構造が不正です。');
+  if (parsed.v !== 4) throw new RecipeCodeError('対応していないレシピバージョンです。');
+  const m = parsed.m;
+  const c = parsed.c;
+  const a = parsed.a;
+  if (!isPlainRecord(m)) throw new RecipeCodeError('モーター設定の構造が不正です。');
+  if (!isPlainRecord(c)) throw new RecipeCodeError('車体設定の構造が不正です。');
+  if (!isPlainRecord(a)) throw new RecipeCodeError('外観設定の構造が不正です。');
+  const motorConfig = normalizeMotorFields(m);
+  const windingRecord = decodeWindingPayload(parsed.w, motorConfig);
+  const derived = deriveWindingMotorFields(windingRecord);
+  return {
+    motorConfig: { ...motorConfig, windingTurnsRatio: derived.windingTurnsRatio },
+    carConfig: normalizeCarFields(c),
+    appearance: normalizeAppearanceFields(a),
+    seed: normalizeSeed(parsed.sd),
+    windingRecord,
+  };
 }
 
 function decodeChecksummedBody(prefix: string, trimmed: string): string {
@@ -398,6 +517,8 @@ function decodeV2(trimmed: string): CarRecipe {
     carConfig: normalizeCarFields(c),
     appearance: normalizeAppearanceFields(a),
     seed: normalizeSeed(parsed.sd),
+    // P4-1B: 旧レシピに巻線記録は存在しない。捏造せずnullで「記録なし」を明示する。
+    windingRecord: null,
   };
 }
 
@@ -422,6 +543,8 @@ function decodeV3(trimmed: string): CarRecipe {
     carConfig: normalizeCarFields(c),
     appearance: normalizeAppearanceFields(a),
     seed: normalizeSeed(parsed.sd),
+    // P4-1B: 旧レシピに巻線記録は存在しない。捏造せずnullで「記録なし」を明示する。
+    windingRecord: null,
   };
 }
 
@@ -455,6 +578,8 @@ function decodeV15(trimmed: string, defaultCarConfig?: CarConfig, defaultAppeara
     carConfig: resolveDefaultCarConfig(defaultCarConfig),
     appearance: resolveDefaultAppearance(defaultAppearance),
     seed: normalizeSeed(values[12]),
+    // P4-1B: 旧レシピに巻線記録は存在しない。捏造せずnullで「記録なし」を明示する。
+    windingRecord: null,
   };
 }
 
@@ -463,8 +588,9 @@ export function decodeRecipe(code: string, defaultCarConfig?: CarConfig, default
   if (trimmed.length > MAX_RECIPE_CODE_LENGTH) {
     throw new RecipeCodeError('レシピコードが長すぎます。');
   }
+  if (trimmed.startsWith(PREFIX_V4)) return decodeV4(trimmed);
   if (trimmed.startsWith(PREFIX_V3)) return decodeV3(trimmed);
   if (trimmed.startsWith(PREFIX_V2)) return decodeV2(trimmed);
   if (trimmed.startsWith(PREFIX_V15)) return decodeV15(trimmed, defaultCarConfig, defaultAppearance);
-  throw new RecipeCodeError('レシピコードはMC3-、MC2-またはM15-で始まる必要があります。');
+  throw new RecipeCodeError('レシピコードはMC4-、MC3-、MC2-またはM15-で始まる必要があります。');
 }

@@ -55,14 +55,15 @@ describe('範囲述語(単一出典)', () => {
 
 describe('既存4執行点は変更されていない(同じ0.9333で挙動が分かれる)', () => {
   it('執行点1: encodeRecipeはeffectiveTurnsRatioでthrowし、windingTurnsRatioではthrowしない', () => {
-    // MC4(巻線記録の収載)はP4-1Bへ延期済み。ここで確かめるのは既存MC3契約の不変性である。
+    // P4-1B: MC4は巻線記録を要求するため、coilTurnsと同じ長さの記録を添える。
+    const record = Array.from({ length: 80 }, () => ({ position: 0.25, arm: 'left' as const, direction: 1 as const, tension: 0.5 }));
     expect(() => encodeRecipe({
       motorConfig: motorConfig({ effectiveTurnsRatio: WOUND_RATIO }), carConfig: carConfig(),
-      appearance: { bodyColorId: 'b', accentColorId: 'a' }, seed: 1,
+      appearance: { bodyColorId: 'b', accentColorId: 'a' }, seed: 1, windingRecord: record,
     })).toThrow(RecipeCodeError);
     expect(() => encodeRecipe({
       motorConfig: motorConfig({ windingTurnsRatio: WOUND_RATIO }), carConfig: carConfig(),
-      appearance: { bodyColorId: 'b', accentColorId: 'a' }, seed: 1,
+      appearance: { bodyColorId: 'b', accentColorId: 'a' }, seed: 1, windingRecord: record,
     })).not.toThrow();
   });
 
