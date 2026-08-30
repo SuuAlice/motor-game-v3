@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 // 記録fixtureはPhase 1試作の決定論的生成器を引き続き使う(見た目の回帰を保つため)。
 // 型の単一出典はalice正典`src/materials/windingRecord.ts`側にある。
 import { generateDummyWindingRecord } from '../../../retro-proto/resolutionHarness/dummyWindingRecord';
+import type { WindingRecord } from '../../../materials/windingRecord';
 import {
   WINDING_AGE_STEPS,
   computeWindingAgeStep,
@@ -367,6 +368,23 @@ describe('W1 誇張倍率のふるまい', () => {
     }
   });
 
+  it('平均から±1本の差はノイズとして平坦に扱う(整数平均でも破れない)', () => {
+    // 区間あたりの本数は整数なので、均一に巻いても隣が1本ずれる。
+    // 平均が整数(4.0)でも、3・4・5はすべて偏差0になる。
+    for (const counts of [[3, 4, 5, 4], [4, 5, 4, 5], [1, 2, 1, 2], [2, 2, 2, 2]]) {
+      const r = computeWindingOutlineThicknessRatios(counts);
+      expect(Math.max(...r) - Math.min(...r), JSON.stringify(counts)).toBeCloseTo(0, 10);
+    }
+  });
+
+  it('±1本を超えた分だけが誇張される', () => {
+    // mean=4。count 6 は超過1、count 2 は超過-1。
+    const r = computeWindingOutlineThicknessRatios([6, 4, 4, 2]);
+    expect(r[1]).toBeCloseTo(r[2], 10);   // 平均どおりの2区間は同じ厚み
+    expect(r[0]).toBeGreaterThan(r[1]);   // 密集は外へ
+    expect(r[3]).toBeLessThan(r[1]);      // 空きは内へ
+  });
+
   it('倍率の違いが実際の描画座標の差になる', () => {
     // 幾何側は既定倍率を使う。倍率1の比と比べて、平均区間の厚みが薄くなる。
     const record = [
@@ -434,5 +452,71 @@ describe('W2 修正前後の同縮尺比較', () => {
     const after = computeWindingTraceGeometry(edited, 480, 270);
     expect(after.stripRect).toEqual(before.stripRect);
     expect(after.axisRect).toEqual(before.axisRect);
+  });
+});
+
+// P4-1B U2表示是正(2026-08-30人間承認、A改+D2): 到達可能な巻数で偽の縞が出ないこと、
+// 意図的な偏りは実座標で残ること。
+//
+// **均等配置は`position = i / n`で全幅を覆う**。0.05〜0.95のような内側寄せにすると
+// 両端に部分的にしか埋まらない区間ができ、それが偏りとして正しく検出されるため、
+// 式が正しくてもtestが落ちる(試算時に誤検出しかけた)。
+describe('U2: 到達可能な巻数で偽の縞が出ない', () => {
+  const H = 270;
+  const REACHABLE_TURNS = [10, 30, 32, 40, 50, 64, 96, 128, 150];
+
+  /** 全幅を覆う均等配置。 */
+  const evenRecord = (n: number): WindingRecord =>
+    Array.from({ length: n }, (_, i) => ({
+      position: i / n, arm: 'straddle' as const, direction: 1 as const, tension: 0.5,
+    }));
+
+  const thickness = (record: WindingRecord) =>
+    computeWindingTraceGeometry(record, 480, H).outline.map((p) => p.bottomY - p.topY);
+
+  it.each(REACHABLE_TURNS)('%iターンの均等配置は実座標で平坦', (n) => {
+    const t = thickness(evenRecord(n));
+    expect(t.length).toBeGreaterThan(0);
+    expect(Math.max(...t) - Math.min(...t), `n=${n}`).toBe(0);
+  });
+
+  it.each(REACHABLE_TURNS)('%iターンでも意図的な左寄せは実座標で4px以上残る', (n) => {
+    const biased: WindingRecord = Array.from({ length: n }, (_, i) => ({
+      position: (i % 6) * 0.02, arm: 'left' as const, direction: 1 as const, tension: 0.5,
+    }));
+    const t = thickness(biased);
+    expect(Math.max(...t) - Math.min(...t), `n=${n}`).toBeGreaterThanOrEqual(4);
+  });
+
+  it('左寄せ・中央集中・二山は互いに判別できる', () => {
+    const make = (xf: (i: number) => number, arm: 'left' | 'right' | 'straddle'): WindingRecord =>
+      Array.from({ length: 64 }, (_, i) => ({
+        position: xf(i), arm, direction: 1 as const, tension: 0.5,
+      }));
+    const left = thickness(make((i) => (i % 6) * 0.02, 'left'));
+    const center = thickness(make((i) => 0.46 + (i % 5) * 0.02, 'straddle'));
+    const twin = thickness(make((i) => (i % 2 === 0 ? (i % 6) * 0.01 : 0.94 + (i % 6) * 0.01), 'left'));
+
+    const peakIndex = (t: number[]) => t.indexOf(Math.max(...t));
+    // 山の位置が異なる。
+    expect(peakIndex(left)).toBeLessThan(peakIndex(center));
+    // 二山は左右両端が厚く、中央が薄い。
+    const mid = Math.floor(twin.length / 2);
+    expect(twin[0] + twin[twin.length - 1]).toBeGreaterThan(twin[mid] * 2);
+    // いずれも4px以上の起伏がある。
+    for (const [name, t] of [['left', left], ['center', center], ['twin', twin]] as const) {
+      expect(Math.max(...t) - Math.min(...t), name).toBeGreaterThanOrEqual(4);
+    }
+  });
+
+  it('最大包絡を超えない(誇張してもクリップしない)', () => {
+    const maxRadius = Math.round(H * 0.5) - Math.round(H * 0.12);
+    for (const n of REACHABLE_TURNS) {
+      for (const p of computeWindingTraceGeometry(evenRecord(n), 480, H).outline) {
+        expect(Math.round(H * 0.5) - p.topY, `n=${n}`).toBeLessThanOrEqual(maxRadius);
+        expect(p.topY).toBeGreaterThanOrEqual(0);
+        expect(p.bottomY).toBeLessThanOrEqual(H);
+      }
+    }
   });
 });

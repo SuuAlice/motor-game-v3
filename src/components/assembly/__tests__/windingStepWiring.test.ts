@@ -13,6 +13,7 @@ function strip(source: string): string {
 
 const winding = strip(readFileSync(new URL('../CoilWindingStep.tsx', import.meta.url), 'utf8'));
 const start = strip(readFileSync(new URL('../StartStep.tsx', import.meta.url), 'utf8'));
+const mode = strip(readFileSync(new URL('../../../modes/AssemblyMode.tsx', import.meta.url), 'utf8'));
 
 describe('B-F1: 記録の破棄は必ず確認を経る', () => {
   it('changeLotのdispatchは1箇所だけ', () => {
@@ -141,5 +142,40 @@ describe('production巻線UIはcoilTurnsを独立編集しない', () => {
     expect(winding).toContain('resolveDisplayTurnLimit');
     expect(winding).not.toContain('computeMaxTurns(');
     expect(winding).not.toContain('Math.min(prev.coilTurns');
+  });
+});
+
+// P4-1B U2表示是正(2026-08-30人間承認、A改): 巻線ビューを持つ工程だけ容器を広げる。
+//
+// 既定の max-w-md(448px)では 480×270 が等倍でも収まらず、PC横長・スマホ横で
+// 「収まりません」が出続けていた(実測)。他工程はスライダー中心なので既定のまま。
+describe('U2: 巻線ビューを持つ工程だけ広幅', () => {
+  it('広幅にするのは工程0(コイル巻き)と工程6(組立確認)だけ', () => {
+    const steps = mode.slice(mode.indexOf('const STEPS'), mode.indexOf('const INITIAL_DRAFT'));
+    const lines = steps.split('\n').filter((line) => line.includes('Component:'));
+    expect(lines).toHaveLength(8);
+    lines.forEach((line, index) => {
+      const isWide = line.includes('wide: true');
+      expect(isWide, `工程${index}: ${line.trim()}`).toBe(index === 0 || index === 6);
+    });
+  });
+
+  it('広幅な工程はCoilWindingStepとAssemblyReviewStep(WindingTraceViewを持つ2つ)', () => {
+    const steps = mode.slice(mode.indexOf('const STEPS'), mode.indexOf('const INITIAL_DRAFT'));
+    for (const line of steps.split('\n')) {
+      if (!line.includes('wide: true')) continue;
+      expect(line).toMatch(/CoilWindingStep|AssemblyReviewStep/);
+    }
+    // その2componentだけがWindingTraceViewを使う。
+    const review = strip(readFileSync(new URL('../AssemblyReviewStep.tsx', import.meta.url), 'utf8'));
+    expect(winding).toContain('<WindingTraceView');
+    expect(review).toContain('<WindingTraceView');
+    expect(start).not.toContain('<WindingTraceView');
+  });
+
+  it('容器幅はwideで切り替え、他工程はmax-w-mdのまま', () => {
+    expect(mode).toContain("step.wide === true ? 'max-w-3xl' : 'max-w-md'");
+    // 固定のmax-w-mdが残っていない(切替を迂回する経路を作らない)。
+    expect(mode).not.toMatch(/className="mx-auto flex max-w-md/);
   });
 });

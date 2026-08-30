@@ -32,16 +32,23 @@ export interface AssemblyStepProps {
 interface StepDef {
   title: string;
   Component: (props: AssemblyStepProps) => React.ReactElement;
+  /**
+   * 巻線ビュー(480×270)を含む工程。**この工程だけ容器を広げる**——
+   * 既定の`max-w-md`(448px)では等倍でも収まらず、`fits=false`で
+   * 「収まりません」が出続ける(PC横長・スマホ横で実測)。
+   * 他工程はスライダー中心で、広げると却って操作が散るため既定のままにする。
+   */
+  wide?: true;
 }
 
 const STEPS: StepDef[] = [
-  { title: '① コイル巻き', Component: CoilWindingStep },
+  { title: '① コイル巻き', Component: CoilWindingStep, wide: true },
   { title: '② ワニス固め', Component: VarnishStep },
   { title: '③ 軸の固定', Component: AxisStep },
   { title: '③ 整流子作り(やすりがけ)', Component: SandingStep },
   { title: '③ 整流子作り(スリット調整)', Component: SlitStep },
   { title: '④ 台座作り', Component: ClipStep },
-  { title: '⑤ 組み立て', Component: AssemblyReviewStep },
+  { title: '⑤ 組み立て', Component: AssemblyReviewStep, wide: true },
   { title: '⑥ 始動', Component: StartStep },
 ];
 
@@ -79,7 +86,7 @@ export function AssemblyMode() {
   const isLast = stepIndex === STEPS.length - 1;
 
   return (
-    <div className="mx-auto flex max-w-md flex-col gap-4 p-4">
+    <div className={`mx-auto flex ${step.wide === true ? 'max-w-3xl' : 'max-w-md'} flex-col gap-4 p-4`}>
       <h2 className="text-lg font-bold text-slate-800">組み立てモード</h2>
       <p className="text-sm text-slate-500">
         工程 {stepIndex + 1} / {STEPS.length}: {step.title}

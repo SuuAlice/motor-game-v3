@@ -42,10 +42,10 @@ const OUTLINE_MIN_THICKNESS_RATIO = 0.12;
 /**
  * 区間ごとのターン数から、0〜1の厚み比を作る。
  *
- * **平均密度を1として、そこからの偏差を`exaggeration`倍する**。art-spec第一条3の
+ * **平均から±1本を超えた分だけを`exaggeration`倍する**。art-spec第一条3の
  * 「実寸比の約3倍で誇張」は「厚みそのものを3倍する」ではない——密度を直接倍すると
  * 最大値でクランプされて頭打ちになり、倍率を上げても絵が変わらなくなる。
- * 偏差を倍せば、均一な巻きは平らのまま、偏った巻きだけが強く凸凹する。
+ * 超過分だけを倍せば、均一な巻きは平らのまま、偏った巻きだけが強く凸凹する。
  *
  * 最後に最大値で正規化するので、**倍率をいくつにしても最大包絡は超えない**。
  * 乱数・平滑化・補間は入れない(記録に無い凹凸を作らない)。
@@ -57,10 +57,17 @@ export function computeWindingOutlineThicknessRatios(
   const total = counts.reduce((sum, count) => sum + count, 0);
   if (total === 0 || counts.length === 0) return counts.map(() => 0);
   const mean = total / counts.length;
-  // 平均で1、密集で1超、空きで1未満。偏差を倍してから負を切り落とす。
-  const raw = counts.map((count) => Math.max(0, 1 + (count / mean - 1) * exaggeration));
+  const raw = counts.map((count) => {
+    const deviation = count - mean;
+    // **平均から±1本以内は量子化ノイズとみなして偏差0**にする(2026-08-30人間承認)。
+    // 区間あたりの本数は整数なので、均一に巻いても隣り合う区間が1本ずれる。その
+    // ±1本を誇張すると、均一な巻きが規則正しい縞に見えてしまう(実測で確認した)。
+    // 平均が整数のときも±1本の幅が残るので、巻数が区間数の倍数でも破れない。
+    const excess = Math.sign(deviation) * Math.max(0, Math.abs(deviation) - 1);
+    return Math.max(0, 1 + (excess / mean) * exaggeration);
+  });
   const peak = Math.max(...raw);
-  // 全区間が平均どおり(=偏差0)なら peak は1で、比はすべて1(平ら)になる。
+  // 全区間がノイズ幅に収まれば peak は1で、比はすべて1(平ら)になる。
   return peak > 0 ? raw.map((value) => value / peak) : raw.map(() => 0);
 }
 
