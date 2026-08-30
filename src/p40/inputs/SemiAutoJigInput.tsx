@@ -13,7 +13,7 @@ import {
   type TickState,
   type WindingCommand,
   type WindingInputProps,
-} from './inputCommands';
+} from '../../retro/winding/inputCommands';
 
 export function SemiAutoJigInput(props: WindingInputProps) {
   const [running, setRunning] = useState(false);

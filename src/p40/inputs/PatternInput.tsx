@@ -11,9 +11,11 @@ import {
   type PatternDesign,
   type PatternPoint,
   type PatternSegment,
+} from './inputCommands';
+import {
   type WindingCommand,
   type WindingInputProps,
-} from './inputCommands';
+} from '../../retro/winding/inputCommands';
 
 const ARM_LABEL: Record<WindingArm, string> = { left: '左腕', right: '右腕', straddle: '中央またぎ' };
 

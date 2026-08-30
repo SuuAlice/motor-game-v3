@@ -8,12 +8,14 @@ import {
   advanceRotation,
   INITIAL_ROTATION_STATE,
   releaseRotation,
-  resolveGuideFromX,
   resolveKeyCommand,
-  type PadPoint,
   type RotationState,
-  type WindingInputProps,
 } from './inputCommands';
+import {
+  resolveGuideFromX,
+  type PadPoint,
+  type WindingInputProps,
+} from '../../retro/winding/inputCommands';
 
 export function RawDragInput(props: WindingInputProps) {
   const rotationRef = useRef<RotationState>(INITIAL_ROTATION_STATE);

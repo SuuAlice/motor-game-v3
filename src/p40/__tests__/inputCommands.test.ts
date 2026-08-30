@@ -7,7 +7,7 @@ import {
   INITIAL_WINDING_INPUT_STATE,
   type WindingCommand,
   type WindingInputState,
-} from '../inputs/inputCommands';
+} from '../../retro/winding/inputCommands';
 import { MAX_WINDING_TURNS, WINDING_QUANTIZATION_STEP, type WindingRecord } from '../../materials/windingRecord';
 
 function ok(result: ReturnType<typeof applyWindingCommands>): WindingInputState {
@@ -215,10 +215,13 @@ describe('拒否時のstate不変', () => {
 // ---------------------------------------------------------------------------
 import { readFileSync } from 'node:fs';
 import {
-  advanceRotation, INITIAL_ROTATION_STATE, releaseRotation, resolveGuideFromX, resolveKeyCommand,
-  advanceTicks, INITIAL_TICK_STATE, resolveJigKeyCommand, resolvePadInput, SEMI_AUTO_TICK_MS,
+  advanceRotation, INITIAL_ROTATION_STATE, releaseRotation, resolveKeyCommand,
   DEFAULT_PATTERN, expandPatternToCommands, PATTERN_POINT_COUNT,
 } from '../inputs/inputCommands';
+import {
+  resolveGuideFromX,
+  advanceTicks, INITIAL_TICK_STATE, resolveJigKeyCommand, resolvePadInput, SEMI_AUTO_TICK_MS,
+} from '../../retro/winding/inputCommands';
 import { PROTOTYPE_TURN_COUNT } from '../Phase4PrototypeScreen';
 
 /** 円周上の点。角度から正規化座標へ。 */
@@ -431,7 +434,10 @@ describe('3案が共通commandだけを出力する構造', () => {
     for (const [name, source] of Object.entries(sources)) {
       // 親へはonCommand(=WindingCommand)経由でのみ渡す。
       expect(source, name).toMatch(/onCommand|onExpand/);
-      expect(source, name).toContain("from './inputCommands'");
+      // P4-1B B1: 半自動治具の入力規則は`src/retro/winding/inputCommands.ts`へ移設した。
+      // 選外案専用kernelは`./inputCommands`に残るため、どちらの経路でもよい
+      // (意図は「componentが入力規則を自前で持たない」ことであり、path自体ではない)。
+      expect(source, name).toMatch(/from '(\.\/|\.\.\/\.\.\/retro\/winding\/)inputCommands'/);
       // storeや永続化へ触れていないこと。
       expect(source, name).not.toContain('useGameStore');
       expect(source, name).not.toContain('useSaveStore');

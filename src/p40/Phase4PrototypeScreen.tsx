@@ -17,7 +17,7 @@ import {
   INITIAL_WINDING_INPUT_STATE,
   type WindingCommand,
   type WindingInputState,
-} from './inputs/inputCommands';
+} from '../retro/winding/inputCommands';
 import { RawDragInput } from './inputs/RawDragInput';
 import { SemiAutoJigInput } from './inputs/SemiAutoJigInput';
 import { PatternInput } from './inputs/PatternInput';

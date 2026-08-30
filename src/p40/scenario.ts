@@ -17,7 +17,7 @@ import type { ValidatedTrackDefinition } from '../engine/trackPhysics';
 import { composeConfigFromMaterials, type MaterialCompositionBaseline, type MaterialSelection } from '../materials/materialMapping';
 import { resolveGarageBuild, DEFAULT_GARAGE_SELECTION } from '../data/partPresets';
 import type { WindingArm, WindingDirection, WindingRecord, WindingValidationResult } from '../materials/windingRecord';
-import { INITIAL_WINDING_INPUT_STATE, applyWindingCommand, applyWindingCommands, type WindingCommand } from './inputs/inputCommands';
+import { INITIAL_WINDING_INPUT_STATE, applyWindingCommand, applyWindingCommands, type WindingCommand } from '../retro/winding/inputCommands';
 
 /**
  * コース(§7.1)。**検証済みブランド型を`TRACK_BY_ID`から取得する**——生の`TrackDefinition`から
