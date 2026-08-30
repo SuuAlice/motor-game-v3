@@ -8,7 +8,7 @@
 
 UI計画: `docs/phase4-p4-1-ui-plan.md`
 
-状態: **P4-1Aは2026-08-28にexact契約の人間承認・実装・Suu_mot3正式受入を通過し、2026-08-29に実装6件+文書1件の正式7commit作成まで完了した。先端は`364111f8`、99ファイル・2554テスト、build・lint・型検査が成功している。P4-1Bは2026-08-30に人間事前承認、arbiter条件付き承認、blocking B1案Aとnon-blocking N1〜N5の人間再承認を完了し、担当別実装を解禁した。同日、正典の修正前recordがP4-1Bに存在しないことを受け、W2利用者向け前後切替をP4-1Gへ延期し、P4-1Bは同一縮尺・同一色・区間外stroke・`stripRect`・`axisRect`不変の幾何回帰だけを維持する閉包deltaを人間承認した。spec/art-spec確定変更、物理・較正・D10・被膜・RunSnapshot 4、commit・tag・push・deployは禁止する。**
+状態: **P4-1Aは正式7commit（先端`364111f8`）を作成済み。P4-1Bは2026-08-30に人間事前承認・arbiter条件付き承認・人間再承認・担当実装・Suu_mot3正式受入・人間視認・正式7commitまで完了した。先端は`ae8f5f4c2031f9ad0197172201556c5d583160a2`で、105ファイル・2695テスト、build・lint・通常型検査・Phase 4 sweep型検査・禁止差分監査が成功している。次はP4-1Cの実装前詳細化と別途人間承認である。P4-1A/P4-1Bのtag・push・deploy、P4-1C以降、spec/art-spec確定変更、物理・較正、D10、被膜、RunSnapshot 4は未承認であり、承認まで行わない。**
 
 ## 1. 要約
 
@@ -516,3 +516,21 @@ arbiter_mot3は2026-08-30、本節をblocking B1 1件付きで条件付き承認
 - 新色、font、asset、package、汎用描画/E2E基盤、品質点、ヒートマップ
 - 物理、較正、D10、被膜、RunSnapshot 4、P4-1C以降の先取り
 - commit、tag、push、deploy
+
+## 16. P4-1B完了記録（2026-08-30人間承認・受入済み）
+
+P4-1Bはproduction半自動治具、手続き巻線描画、MC4生成・厳密解析、W2幾何回帰を承認範囲内で実装した。正典の修正前recordを必要とする利用者向けW2切替はP4-1Gへ延期し、物理・較正・D10・被膜・RunSnapshot 4は先取りしていない。
+
+正式commit列は次のとおり。
+
+1. `17b6dfc` `refactor(winding): 半自動治具入力をproduction共通化 [brabit_mot3]`
+2. `07d12d0` `feat(render): production巻線描画と表示枠を実装 [brabit_mot3]`
+3. `555da28` `feat(recipe): MC4巻線レシピ境界を実装 [alice_mot3+brabit_mot3]`
+4. `2a5c587` `feat(ui): production巻線工程を半自動治具へ接続 [brabit_mot3]`
+5. `82f56c3` `docs(phase4): P4-1B計画と運用状態を同期 [Suu_mot3]`
+6. `6bac5aa` `fix(ui): 巻線ビューの表示枠と外形輪郭の偽縞を是正 [brabit_mot3]`
+7. `ae8f5f4` `feat(ui): 巻線工程の操作パッドへ巻き数を常設 [brabit_mot3]`
+
+U2人間視認では、スマホで巻線形状・不均一さ・均一巻きの偽縞解消・画面収まりを承認した。追加指摘「何ターン巻いているか分からない」は、操作パッド内へ既存`record.length` / `limit`だけを使う「巻き数 N / M ターン」を常設して解消し、数値が巻線中に増加することも人間確認済みである。新規state・action・型、パッド高さ変更、物理・較正の追加はない。
+
+最終先端`ae8f5f4c2031f9ad0197172201556c5d583160a2`は105ファイル・2695テスト、build、lint、通常型検査、Phase 4 sweep型検査、palette、productionから`src/p40`への非import、禁止差分監査を通過した。最終tree `40b8682eb9e964ac694037bf2fe5ce1500c111ab`は受入済み作業ツリーと一致する。P4-1A/P4-1Bのtag・push・deployは未実施である。
