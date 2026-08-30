@@ -1,10 +1,10 @@
-# Phase 4詳細計画 v6（P4-1A受入完了）: 15分の面白さ証明からガレージ深化へ
+# Phase 4詳細計画 v8（P4-1B実装解禁）: 15分の面白さ証明からガレージ深化へ
 
 作成: Suu_mot3（2026-08-25）
 
-基点: `develop` / `c54c0f1d42c6969360952b2c1cfd7350bd1a99e7` / tag `p4-0-complete`
+基点: `phase4-plan` / `364111f8b3ca6dc15f695fa6b797f8c87d11e864`（P4-1A正式7commit先端）
 
-状態: **P4-0は2026-08-28に正式commit・タグ`p4-0-complete`・developへのpushまで完了した。P4-1Aはexact契約の人間承認・実装・正式受入まで完了した。次はP4-1Bのexact計画・承認であり、P4-1Aの正式commit、tag、push、deployおよびP4-1B実装は未承認。**
+状態: **P4-0は2026-08-28に正式commit・tag `p4-0-complete`・developへのpushまで完了した。P4-1Aはexact契約の人間承認・実装・正式受入・正式7commit作成まで完了し、先端は`364111f8`である。P4-1Bは2026-08-30に人間事前承認、arbiter条件付き承認、B1案AとN1〜N5の人間再承認を完了し、担当別実装を解禁した。spec/art-spec確定変更、物理・較正・D10・被膜・RunSnapshot 4、commit・tag・push・deployは禁止する。**
 
 ## 1. 目的
 
@@ -30,9 +30,9 @@ Phase 4の第一目的は、巻線物理を精密化することではない。�
 - 任意の三走目でD01を確認する場合も、既存のD01物理・確定較正・破壊wrapperだけを使う。新しい物理式・閾値・較正軸は追加しない。
 - 人間試遊の5条件で合否を決める。自動テスト数は代替にならない。
 
-### 2.2 P4-1: ガレージ深化（P4-1A受入完了、次はP4-1B）
+### 2.2 P4-1: ガレージ深化（P4-1A正式commit完了、P4-1B arbiterレビュー待ち）
 
-P4-0で半自動治具が確定した。P4-1Aでは巻線記録のcanonical符号化、ローター個体、save schema 3、recipeKey 2、原子的完成actionまでを凍結・実装し、2026-08-28に正式受入を通過した。P4-1B以降の詳細契約・依存閉包・承認ゲートは`docs/phase4-p4-1-plan.md`と`docs/phase4-p4-1-ui-plan.md`で扱う。
+P4-0で半自動治具が確定した。P4-1Aでは巻線記録のcanonical符号化、ローター個体、save schema 3、recipeKey 2、原子的完成actionまでを凍結・実装し、2026-08-28に正式受入、2026-08-29に正式7commit作成まで完了した。P4-1Bのproduction半自動治具・視覚・MC4有限境界は2026-08-30に人間事前承認済みで、詳細契約・依存閉包・arbiterレビュー条件は`docs/phase4-p4-1-plan.md`と`docs/phase4-p4-1-ui-plan.md`で扱う。
 
 - 確定した入力方式による巻線記録の本実装
 - 記録から物理パラメータへの全写像

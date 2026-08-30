@@ -1,16 +1,16 @@
-# Phase 4 P4-1 UI詳細計画 v2（P4-1A完了・P4-1B計画中）
+# Phase 4 P4-1 UI詳細計画 v5（P4-1B W2閉包delta反映）
 
 作成: Suu_mot3（2026-08-28）
 
-基点: `develop` / `c54c0f1d42c6969360952b2c1cfd7350bd1a99e7` / tag `p4-0-complete`
+基点: `phase4-plan` / `364111f8b3ca6dc15f695fa6b797f8c87d11e864`（P4-1A正式7commit先端）
 
 上位計画: `docs/phase4-p4-1-plan.md`
 
-状態: **P4-1Aの型・validator・migration・原子的完成actionは2026-08-28に人間承認、実装、正式受入まで完了した。UI変更は`ExperimentNotebook.tsx`の型網羅ラベル1行だけで、production半自動治具と手続き描画は未実装。次はP4-1Bのexact計画・承認であり、P4-1Aの正式commit、tag、push、deployおよびP4-1B実装は禁止する。**
+状態: **P4-1Aの型・validator・migration・原子的完成actionは2026-08-28に人間承認・実装・正式受入を通過し、2026-08-29に正式7commit作成まで完了した。UI変更は`ExperimentNotebook.tsx`の型網羅ラベル1行だけで、production半自動治具と手続き描画は未実装。P4-1Bは2026-08-30に人間事前承認、arbiter条件付き承認、B1案AとN1〜N5の人間再承認を完了し、担当別実装を解禁した。同日、正典の修正前recordがP4-1Bに存在しないことを受け、W2利用者向け前後切替をP4-1Gへ延期し、P4-1Bは同一縮尺・同一色・区間外stroke・`stripRect`・`axisRect`不変の幾何回帰だけを維持する閉包deltaを人間承認した。spec/art-spec確定変更、物理・較正・D10・被膜・RunSnapshot 4、commit・tag・push・deployは禁止する。**
 
 ## 1. UIの目的
 
-P4-1のUIは、P4-0で採用した半自動治具を通常の8工程組み立てへ接続し、プレイヤーが数値表を見る前に巻線の出来と修正効果を読めるようにする。
+P4-1のUIは、P4-0で採用した半自動治具を通常の8工程組み立てへ接続し、プレイヤーが数値表を見る前に巻線の出来を読み、P4-1Gの正典部分修正では修正効果も読めるようにする。
 
 成功は「操作量を増やすこと」ではなく、次の循環が成立することで判定する。
 
@@ -23,14 +23,14 @@ P4-1のUIは、P4-0で採用した半自動治具を通常の8工程組み立て
 
 - productionへ採用するのは半自動治具だけとする。
 - 生ドラッグとパターン設計は`src/p40/`の比較証跡として凍結し、productionからimportしない。
-- P4-0の画面全体を通常画面へ移植しない。共通入力コマンド、確定した半自動治具規則、`src/retro/winding/`の純粋描画だけを必要最小限で再利用する。
+- P4-0の画面全体を通常画面へ移植しない。`src/p40/inputs/inputCommands.ts`のうち半自動治具の純粋入力コマンドだけを`src/retro/winding/inputCommands.ts`へ移し、P4-0とproductionが同じ規則をimportする。生ドラッグ・パターン設計専用kernelは移さない。
 - `src/p40/`の削除要否はP4-1末に別途判断し、途中で整理目的の削除を行わない。
 
 ## 3. productionの画面遷移
 
 現行`AssemblyMode`の8工程を維持し、巻線工程を次の状態へ置き換える。
 
-1. 巻線開始前に線径、並列本数、線材、被膜材を確定する。
+1. 巻線開始前に線径、並列本数、線材を確定する。被膜材の保存・消費はP4-1Fまで追加しない。
 2. 1ターン記録後は、線径と並列本数を変更できない。変更する場合は確認後に現在の巻線記録を破棄する。
 3. 半自動治具で位置、腕、方向、張力を連続入力する。
 4. productionの`computeMaxTurns(wireGauge, parallelStrands)`を上限の単一出典とする。
@@ -38,13 +38,13 @@ P4-1のUIは、P4-0で採用した半自動治具を通常の8工程組み立て
 6. 完成actionが成功した場合だけ、在庫消費・ローター生成・装備更新を反映する。
 7. 失敗時は入力記録を保持し、理由を日本語で示して再試行できる。
 
-巻線UIが`coilTurns`を独立編集することは禁止し、巻数は`WindingRecord`の長さから導出する。
+巻線UIが`coilTurns`を独立編集することは禁止し、巻数は`WindingRecord`の長さから導出する。画面状態は`lotPending`、`lotFixed`、`winding`、`review`、`failed`の判別unionとし、`failed`でもrecordを保持する。
 
 ## 4. 巻線の視覚表現
 
 ### 4.1 完成形を読む主表示
 
-推奨案W1として、位置ヒストグラムからローター外周の輪郭を生成する。第一試作の3倍強調を上限候補とし、実値と表示強調を混同しない注記を添える。
+採用案W1として、位置ヒストグラムからローター外周の輪郭を生成する。既承認`art-spec.md`の実寸比約3倍を初期値とし、実値と表示強調を混同しない注記を添える。
 
 - 4段の巻線層とターンの前後関係を整数座標で描く。
 - 左腕、右腕、中央またぎ、渡り線を形で区別する。
@@ -54,10 +54,12 @@ P4-1のUIは、P4-0で採用した半自動治具を通常の8工程組み立て
 
 ### 4.2 修正前後
 
-推奨案W2として、修正前と修正後を同一縮尺・同一色規則で切り替える。差分専用色やヒートマップは使わず、形そのものを比較させる。
+採用案W2として、修正前と修正後を同一縮尺・同一色規則で切り替える。差分専用色やヒートマップは使わず、形そのものを比較させる。利用者向け切替は、正典の修正前recordが生成されるP4-1Gで接続する。
 
 - 選択区間外は同じ位置に同じ形で残す。
 - 修正区間だけを置換し、完成前に前後を切り替えられる。
+- P4-1Bでは同一縮尺・同一色規則、区間外stroke不変、`stripRect`・`axisRect`不変の幾何回帰だけを固定し、前後切替UIや比較用stateを追加しない。
+- 「装備中record対作業中record」は修正前後と意味が異なるため代替にしない。
 - レース画面の巻線クローズアップ拡充はP4-1の必須範囲にせず、通常組み立てで読めることを先に通す。
 
 ## 5. 張力の操作とフィードバック
@@ -130,7 +132,8 @@ UI担当の主な変更候補:
 
 ### U2: 完成形と修正差
 
-- W1輪郭とW2前後切替を実装し、数値を見る前の視認試遊を通す。
+- P4-1BではW1輪郭を実装し、数値を見る前の完成形の視認試遊を通す。
+- W2前後切替と修正差の視認試遊は、正典の部分修正を実装するP4-1Gで通す。
 - 視認できない場合、品質ゲージを足さず描画の形・倍率・配置だけを再検討する。
 
 ### U3: 張力症状
@@ -160,7 +163,7 @@ UI担当の主な変更候補:
 ## 12. 人間試遊票
 
 1. 完成形だけを見て、偏り・重なり・緩み・張りのうち一つを指摘できる。
-2. 修正前後を切り替え、変更した区間を数値なしで見分けられる。
+2. P4-1Gで修正前後を切り替え、変更した区間を数値なしで見分けられる。
 3. 高張力の利益と負担を、線と治具の動きから感じられる。
 4. 危険の原因を断定表示されなくても、計測・再走の仮説を持てる。
 5. 半自動治具を3回使っても苦役に感じない。
@@ -180,9 +183,64 @@ UI担当の主な変更候補:
 ## 14. 現在の未確定事項
 
 - 実線材破断を採るか、連続損傷だけに留めるか。
-- legacyローターの巻線表示と由来文言。
 - 型紙の保存位置、上限、削除時の扱い。
-- W1輪郭の最終倍率。3倍は第一試作候補であり確定値ではない。
 - 被膜損傷の症状表現はD10契約と同時に`docs/art-spec.md`へ確定追記する。
 
 これらは推測で確定せず、担当報告・arbiter裁定・人間承認を経る。
+
+## 15. P4-1B UI exact delta（2026-08-30人間事前承認）
+
+### 15.1 状態・素材固定・失敗表示
+
+```ts
+type WindingPhase =
+  | { kind: 'lotPending' }
+  | { kind: 'lotFixed'; lot: WindingLot }
+  | { kind: 'winding'; lot: WindingLot; record: WindingRecord }
+  | { kind: 'review'; lot: WindingLot; record: WindingRecord }
+  | { kind: 'failed'; lot: WindingLot; record: WindingRecord; failure: CompleteRotorAssemblyFailure };
+```
+
+- `WindingLot`は線材ID、線径、並列本数だけを持つ。0ターンでは変更自由、1ターン以上では確認後にrecord全体を破棄する。clamp・部分切り詰めはしない。
+- 完成は`completeRotorAssemblyAction`だけへ渡す。成功時だけ次工程へ進み、失敗時はrecordを保持する。`finishAssembly`は別の走行開始操作のまま変更しない。
+- 失敗文言は次で固定する。
+  - 巻線の記録が壊れています
+  - 巻き数がNターンです（M〜Kターンで完成できます）
+  - この線径では最大Nターンまでです
+  - 線材が足りません（必要Nメートル / 残りMメートル）
+  - 選んだ線材が見つかりません
+  - ローターの採番が重複しました
+  - 保存できませんでした
+
+### 15.2 半自動治具の共有範囲
+
+production共通位置へ移すのは`applyWindingCommand`、`applyWindingCommands`、`INITIAL_WINDING_INPUT_STATE`、`WindingInputState`、`resolveGuideFromX`、`resolvePadInput`、`resolveJigKeyCommand`、`SEMI_AUTO_TICK_MS`、`advanceTicks`と、その直接依存support contract（`WindingCommand`、`WindingInputProps`、`PadPoint`、`WindingCurrentValues`、`KEY_STEP`、`TickState`、`INITIAL_TICK_STATE`）だけとする。生ドラッグ・パターン設計のkernelは`src/p40`へ残す。re-export shimは置かず、`SemiAutoJigInput.tsx`、`RawDragInput.tsx`、`PatternInput.tsx`、`Phase4PrototypeScreen.tsx`、`scenario.ts`、`inputCommands.test.ts`、旧`inputCommands.ts`のimportを明示更新する。productionから`src/p40/**`をimportせず、P4-0側が共有層をimportする。既存の同一コマンド列・tick決定論assertは変更しない。
+
+### 15.3 視覚・操作・fits
+
+- W1は既存palette・整数座標・約3倍の外形包絡線を追加する。中央またぎは軸を横切る形で示す。
+- 張力は既存の線の開きだけを使い、第二の幾何・色・品質点を追加しない。
+- P4-1BではW2の同一縮尺・同一色・区間外stroke・`stripRect`・`axisRect`不変だけを幾何回帰で固定する。利用者向け前後切替はP4-1Gへ延期し、差分色・ヒートマップや比較用stateを追加しない。
+- `useRetroCanvasFrame`は未測定と実測`fits=false`を区別する最小変更だけを許可し、衝突するP4-0構造assertを同一deltaで更新する。
+- touch、keyboard、44 px、横縦、reduced motion、色以外の二重符号化を既存規律のまま回帰固定する。
+
+### 15.4 RecipePanelとlegacy
+
+- 装備中ローターのrecordはloadoutとinventoryを突き合わせる純粋selector/helperを単一出典とする。新規store state/action/typeは作らない。
+- recordedは「巻線の記録あり（Nターン）」を表示してMC4生成を許可する。
+- legacyは「巻線の記録はありません（この機体を作った時点では記録していませんでした）」を表示し、MC4書き出しを理由付きdisabledにする。
+- MC2/MC3は解析できるがrecordを持たない。`coilTurns`からrecordを捏造しない。
+- MC4へ`windingTurnsRatio`を独立収載せず、decode時にcanonical recordから導出する。
+- MC4はP4-1Bでは生成・解析だけとし、「この設定を読み込む」による在庫・装備変更は「このレシピの巻線記録の再現は、型紙機能の実装後に対応します」と理由付きで拒否する。正当なMC4を破損分類せず、P4-1Gまでローター生成・線材消費を先取りしない。
+- production Assemblyのconfig、recipeKey経路、RecipePanelは同じ装備record selectorを使い、`record.length === config.coilTurns`をテストで固定する。
+
+### 15.5 直接編集と依存閉包
+
+- LabModeの`ParamPanel.coilTurns`は現行どおり残す。production Assemblyに直接巻数スライダー・UI clampは置かない。
+- 組立challengeは追加せず`restrictions: null`を維持する。DiagnosisMode状態を流用しない。
+- production候補は`CoilWindingStep.tsx`、`AssemblyReviewStep.tsx`、`StartStep.tsx`、`AssemblyMode.tsx`、`windingTraceGeometry.ts`、`drawWindingTrace.ts`、新規`inputCommands.ts`、`RecipePanel.tsx`、条件付き`useRetroCanvasFrame.ts`に限定する。
+- testは半自動治具、失敗時record保持、材料固定、W1純関数、W2の同一縮尺・区間外stroke・`stripRect`・`axisRect`不変、P4-0非import、初回測定・再入場、MC4/legacyを対象とし、新規汎用fixture/E2E基盤を作らない。
+
+### 15.6 禁止とレビューゲート
+
+arbiter条件付き承認と人間再承認を2026-08-30に完了し、production/test実装を解禁した。同日、W2利用者向け前後切替をP4-1Gへ延期する閉包deltaを人間承認した。物理・較正・D10・被膜・RunSnapshot 4、音、新色、font、asset、package、生ドラッグ/パターン設計の修理、比較用state、`finishAssembly`再設計、commit、tag、push、deployは禁止する。W1約3倍は初期値とし、最終倍率はU2視認試遊で確定する。
