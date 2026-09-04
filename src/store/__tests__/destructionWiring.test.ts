@@ -41,7 +41,7 @@ function motorSnapshotInputFixture(): CaptureRunSnapshotInput {
     inventory,
   );
   if (!resolved.ok) throw new Error('テスト前提が崩れています: resolverが失敗しました');
-  const destructionConfig = assembleDestructionConfig(resolved.selection, resolved.equipmentContext);
+  const destructionConfig = assembleDestructionConfig(resolved.selection, resolved.equipmentContext, null);
   return {
     motorConfig: useGameStore.getState().config,
     carConfig: null,

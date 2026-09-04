@@ -49,6 +49,8 @@ import {
 } from '../../engine/destructionOrchestration';
 import { advanceDestructionState, createInitialDestructionState, DURATION_COMPARISON_EPSILON_S } from '../../engine/destructionModes';
 import { CHATTER_BURST_FRAMES, COIL_DEFORM_OMEGA } from '../../engine/constants';
+import { PRODUCTION_D01_LOOSENESS_K } from '../destructionCalibration';
+import type { WindingArm, WindingDirection, WindingRecord } from '../windingRecord';
 import type { PhysicsSnapshotAtT } from '../../engine/destructionModes';
 import { BATTERY_MATERIALS, BODY_MATERIALS, BRUSH_MATERIALS, GEAR_MATERIALS, MAGNET_MATERIALS, WIRE_MATERIALS, type BatteryMaterial, type WireMaterial } from '../materials';
 import { computeElectricalState, step, type MotorConfig, type SimState } from '../../engine/motorPhysics';
@@ -2885,36 +2887,89 @@ describe('materialMapping.ts: P3-4 G1a assembleDestructionConfig', () => {
   }
 
   it('nonLipo電池選択でbattery.profileがnonLipoになり、validateDestructionConfigがok:trueを返す完全なDestructionConfigを生成する', () => {
-    const config = assembleDestructionConfig(selection({ batteryId: 'battery-alkaline' }), equipmentContext());
+    const config = assembleDestructionConfig(selection({ batteryId: 'battery-alkaline' }), equipmentContext(), null);
     expect(config.battery.profile).toBe('nonLipo');
     const result = validateDestructionConfig(config as unknown as DestructionConfigDraft);
     expect(result.ok, result.ok ? '' : JSON.stringify(result)).toBe(true);
   });
 
   it('lipo電池選択でbattery.profileがlipoになり、validateDestructionConfigがok:trueを返す完全なDestructionConfigを生成する', () => {
-    const config = assembleDestructionConfig(selection({ batteryId: 'battery-lithium-polymer' }), equipmentContext());
+    const config = assembleDestructionConfig(selection({ batteryId: 'battery-lithium-polymer' }), equipmentContext(), null);
     expect(config.battery.profile).toBe('lipo');
     const result = validateDestructionConfig(config as unknown as DestructionConfigDraft);
     expect(result.ok, result.ok ? '' : JSON.stringify(result)).toBe(true);
   });
 
+  // P41C-R2-C2改(2026-08-31人間再承認): D01しきい角速度を装備中巻線記録の平均張力から解決する。
+  // 式 COIL_DEFORM_OMEGA × (1 − K × (1 − meanTension))、K=PRODUCTION_D01_LOOSENESS_K=0.5。
+  // 係数は`destructionCalibration.ts`が単一出典で、ここでリテラル0.5を複製しない。
+  describe('d01.coilDeformOmegaRadSの張力解決(P41C-R2-C2改)', () => {
+    function windingRecord(tension: number, turnCount = 30): WindingRecord {
+      return Array.from({ length: turnCount }, (_, i) => ({
+        position: 0.25, arm: (i < 21 ? 'left' : 'right') as WindingArm, direction: 1 as WindingDirection, tension,
+      }));
+    }
+
+    it('確定係数は承認済み格子{0.1〜0.5}の端である0.5', () => {
+      expect(PRODUCTION_D01_LOOSENESS_K).toBe(0.5);
+    });
+
+    it('legacy個体(記録なし)はCOIL_DEFORM_OMEGAをそのまま使う(記録を捏造せず、移設前の挙動を変えない)', () => {
+      const config = assembleDestructionConfig(selection(), equipmentContext(), null);
+      expect(config.d01.coilDeformOmegaRadS).toBe(COIL_DEFORM_OMEGA);
+    });
+
+    it('meanTension=1(最も締めた巻き)では閾値を下げない——高張力側の危険はD01の管轄外', () => {
+      const config = assembleDestructionConfig(selection(), equipmentContext(), windingRecord(1));
+      expect(config.d01.coilDeformOmegaRadS).toBeCloseTo(COIL_DEFORM_OMEGA, 12);
+    });
+
+    it('meanTension=0(最も緩い巻き)では閾値が(1−K)倍まで下がる', () => {
+      const config = assembleDestructionConfig(selection(), equipmentContext(), windingRecord(0));
+      expect(config.d01.coilDeformOmegaRadS).toBeCloseTo(COIL_DEFORM_OMEGA * (1 - PRODUCTION_D01_LOOSENESS_K), 12);
+    });
+
+    it('中間張力では式どおり線形に補間する(緩いほど閾値が低い=単調非減少)', () => {
+      const mid = assembleDestructionConfig(selection(), equipmentContext(), windingRecord(0.5)).d01.coilDeformOmegaRadS;
+      const loose = assembleDestructionConfig(selection(), equipmentContext(), windingRecord(0)).d01.coilDeformOmegaRadS;
+      const tight = assembleDestructionConfig(selection(), equipmentContext(), windingRecord(1)).d01.coilDeformOmegaRadS;
+      expect(mid).toBeCloseTo(COIL_DEFORM_OMEGA * (1 - PRODUCTION_D01_LOOSENESS_K * 0.5), 12);
+      expect(loose).toBeLessThan(mid);
+      expect(mid).toBeLessThan(tight);
+    });
+
+    it('ターン数が違っても平均張力が同じなら同じ閾値になる(算術平均だけを使う)', () => {
+      const a = assembleDestructionConfig(selection(), equipmentContext(), windingRecord(0.25, 30)).d01.coilDeformOmegaRadS;
+      const b = assembleDestructionConfig(selection(), equipmentContext(), windingRecord(0.25, 80)).d01.coilDeformOmegaRadS;
+      expect(a).toBe(b);
+    });
+
+    it('d01の他2フィールドは記録の有無・張力によらずD01_CALIBRATIONのまま', () => {
+      for (const record of [null, windingRecord(0), windingRecord(1)]) {
+        const d01 = assembleDestructionConfig(selection(), equipmentContext(), record).d01;
+        expect(d01.decayExposureScaleRad).toBe(1000);
+        expect(d01.minEffectiveTurnsRatio).toBe(0.5);
+      }
+    });
+  });
+
   it('d01/d02/d05はdestructionCalibration.ts/mapD05BrushWearConfig由来の値をそのまま反映する', () => {
-    const config = assembleDestructionConfig(selection(), equipmentContext());
+    const config = assembleDestructionConfig(selection(), equipmentContext(), null);
     expect(config.d01).toEqual({ decayExposureScaleRad: 1000, minEffectiveTurnsRatio: 0.5, coilDeformOmegaRadS: COIL_DEFORM_OMEGA });
     expect(config.d02.conductionScale).toBeCloseTo(0.04);
     expect(config.d05.brushWearRateRatio).toBe(1); // brush-carbon anchor
   });
 
   it('d04.bodyScorchDeltaFractionはEquipmentDestructionContext.bodyIdに応じて変わる(body-none=0、他body>0)', () => {
-    const none = assembleDestructionConfig(selection(), equipmentContext({ bodyId: 'body-none' }));
-    const cowl = assembleDestructionConfig(selection(), equipmentContext({ bodyId: 'body-cardboard-cowl' }));
+    const none = assembleDestructionConfig(selection(), equipmentContext({ bodyId: 'body-none' }), null);
+    const cowl = assembleDestructionConfig(selection(), equipmentContext({ bodyId: 'body-cardboard-cowl' }), null);
     expect(none.d04.bodyScorchDeltaFraction).toBe(0);
     expect(cowl.d04.bodyScorchDeltaFraction).toBeGreaterThan(0);
   });
 
   it('d07はselection.magnetIdに応じて変わる(neodymium=demagnetizing、ferrite=nonDemagnetizing)', () => {
-    const ferrite = assembleDestructionConfig(selection({ magnetId: 'magnet-ferrite' }), equipmentContext());
-    const neodymium = assembleDestructionConfig(selection({ magnetId: 'magnet-neodymium' }), equipmentContext());
+    const ferrite = assembleDestructionConfig(selection({ magnetId: 'magnet-ferrite' }), equipmentContext(), null);
+    const neodymium = assembleDestructionConfig(selection({ magnetId: 'magnet-neodymium' }), equipmentContext(), null);
     expect(ferrite.d07.irreversible.kind).toBe('nonDemagnetizing');
     expect(neodymium.d07.irreversible.kind).toBe('demagnetizing');
   });
@@ -2922,7 +2977,7 @@ describe('materialMapping.ts: P3-4 G1a assembleDestructionConfig', () => {
   it('全gear素材(pom/nylon-pa6/peek/titanium)×代表selectionで完全なDestructionConfigを生成しvalidateDestructionConfigを通す', () => {
     const gearIds: GearMaterialId[] = ['gear-pom', 'gear-nylon-pa6', 'gear-peek', 'gear-titanium'];
     for (const gearId of gearIds) {
-      const config = assembleDestructionConfig(selection({ gearId }), equipmentContext());
+      const config = assembleDestructionConfig(selection({ gearId }), equipmentContext(), null);
       const result = validateDestructionConfig(config as unknown as DestructionConfigDraft);
       expect(result.ok, `${gearId}: ${result.ok ? '' : JSON.stringify(result)}`).toBe(true);
     }

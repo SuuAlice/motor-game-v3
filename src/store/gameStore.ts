@@ -353,7 +353,11 @@ export function prepareDestructionRun(
   const effectiveMotorConfig = wornMotorConfig.motorConfig;
   const effectiveCarConfig = wornCarConfig.carConfig;
 
-  const destructionConfig = assembleDestructionConfig(resolved.selection, resolved.equipmentContext);
+  // P41C-R2-C2改(2026-08-31人間再承認): D01しきい角速度は装備中ローターの巻線記録から解決する。
+  // 出典は上でrecipeKeyへ渡したものと同一の`windingRecord`(selectEquippedWindingRecordの1回の
+  // 結果)であり、ここで在庫を引き直さない——引き直すとrecipeKeyと破壊configが別の記録を見る
+  // 状態が構築可能になる。legacy個体はnullのまま渡り、締め側の既定値が使われる。
+  const destructionConfig = assembleDestructionConfig(resolved.selection, resolved.equipmentContext, windingRecord);
   // 6→7: 初期DestructionStateを作り、装備ギヤ個体の歯欠け数でseedする(§14.3)。
   // 引数は`WearState.toothLossCount`の単一出典であり、IndividualDegradationInput経由の
   // 間接値は使わない(P3-1-Q9)。

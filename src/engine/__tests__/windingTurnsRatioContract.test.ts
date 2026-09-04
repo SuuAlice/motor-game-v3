@@ -73,7 +73,7 @@ describe('既存4執行点は変更されていない(同じ0.9333で挙動が�
   });
 
   it('執行点4: restoreRunSnapshotはeffectiveTurnsRatioを拒否しwindingTurnsRatioを受理する', () => {
-    const destructionConfig = assembleDestructionConfig(selection(), { bodyId: 'body-none' });
+    const destructionConfig = assembleDestructionConfig(selection(), { bodyId: 'body-none' }, null);
     const base = {
       carConfig: null, destructionConfig,
       runContext: { context: 'motor' as const, fireExposureProfile: { bodyEquipped: false, adjacentRolesEquipped: [] }, gearTotalToothCount: null },
@@ -90,7 +90,7 @@ describe('既存4執行点は変更されていない(同じ0.9333で挙動が�
   });
 
   it('執行点4: windingTurnsRatioが(0,1]の外ならrestoreRunSnapshotも拒否する', () => {
-    const destructionConfig = assembleDestructionConfig(selection(), { bodyId: 'body-none' });
+    const destructionConfig = assembleDestructionConfig(selection(), { bodyId: 'body-none' }, null);
     const snapshot = captureRunSnapshot({
       motorConfig: motorConfig({ windingTurnsRatio: 0 }), carConfig: null, destructionConfig,
       runContext: { context: 'motor' as const, fireExposureProfile: { bodyEquipped: false, adjacentRolesEquipped: [] }, gearTotalToothCount: null }, initialMotorState: { theta: 0, omega: 0, current: 0, backEmf: 0, shorted: false, running: true, rpm: 0, chatterFramesLeft: 0, batteryHeat: 0, coilCollapsed: false, highSpeedFrameCount: 0 },
@@ -103,7 +103,7 @@ describe('既存4執行点は変更されていない(同じ0.9333で挙動が�
 });
 
 describe('compose単一乗算点(承認項目2)', () => {
-  const destructionConfig: DestructionConfig = assembleDestructionConfig(selection(), { bodyId: 'body-none' });
+  const destructionConfig: DestructionConfig = assembleDestructionConfig(selection(), { bodyId: 'body-none' }, null);
   const pristine: DestructionState = createInitialDestructionState('nonLipo');
 
   function damaged(decayExposureRad: number): DestructionState {

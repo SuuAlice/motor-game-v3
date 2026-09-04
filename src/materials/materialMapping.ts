@@ -16,7 +16,8 @@ import { BATTERY_MATERIALS, BODY_MATERIALS, BRUSH_MATERIALS, GEAR_MATERIALS, MAG
 import type { MotorConfig } from '../engine/motorPhysics';
 import type { CarConfig } from '../engine/vehiclePhysics';
 import type { BatteryDestructionConfig, DestructionConfig, GearBreakageProfile } from '../engine/destructionOrchestration';
-import { D01_CALIBRATION, D02_CALIBRATION, D05_COMMON_CALIBRATION } from './destructionCalibration';
+import { D01_CALIBRATION, D02_CALIBRATION, D05_COMMON_CALIBRATION, resolveCoilDeformOmegaRadS } from './destructionCalibration';
+import type { WindingRecord } from './windingRecord';
 import { resolveGearMassDeltaGById, resolveGearReflectedInertiaKgM2ById } from './gearInertia';
 
 export type GearMaterialId = (typeof GEAR_MATERIALS)[number]['id'];
@@ -941,10 +942,18 @@ export interface EquipmentDestructionContext {
  * 戻り値もそれぞれのゲートで追従する。UI側からの呼び出し契機・呼び出し禁止事項(確定-2:
  * UI/gameStoreが個別mapXxx…を独自再構成することは禁止)はG1b以降の配線時に適用される。
  */
-export function assembleDestructionConfig(selection: MaterialSelection, equipmentContext: EquipmentDestructionContext): DestructionConfig {
+export function assembleDestructionConfig(
+  selection: MaterialSelection,
+  equipmentContext: EquipmentDestructionContext,
+  // P41C-R2-C2改(2026-08-31人間再承認): D01のしきい角速度は装備中ローターの巻線記録から
+  // 解決する。**必須引数**にしてあるのは、省略可能にすると「記録があるのに渡し忘れて締め側の
+  // 既定値で走る」状態が静かに成立してしまうためで、legacy個体は明示的にnullを渡す
+  // (P3-1-Q6の「構築不能 > fail-fast > 監査」を同じ形で適用する)。
+  windingRecord: WindingRecord | null,
+): DestructionConfig {
   return {
     battery: resolveBatteryDestructionConfig(selection.batteryId),
-    d01: D01_CALIBRATION,
+    d01: { ...D01_CALIBRATION, coilDeformOmegaRadS: resolveCoilDeformOmegaRadS(windingRecord) },
     d02: D02_CALIBRATION,
     d04: resolveD04Config(equipmentContext, selection.magnetId),
     d05: assembleD05Config(mapD05BrushWearConfig(selection.brushId), D05_COMMON_CALIBRATION),

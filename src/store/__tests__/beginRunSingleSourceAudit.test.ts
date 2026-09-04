@@ -26,6 +26,7 @@ import {
 import { DEFAULT_GARAGE_SELECTION, resolveGarageBuild } from '../../data/partPresets';
 import { assembleDestructionConfig, composeConfigFromMaterials } from '../../materials/materialMapping';
 import { computeRecipeKey } from '../../materials/recipeKey';
+import { selectEquippedWindingRecord } from '../equippedWinding';
 import { applyWearToCarConfig, applyWearToMotorConfig } from '../../materials/wearReflection';
 import { createInitialDestructionState } from '../../engine/destructionModes';
 import type { MotorConfig } from '../../engine/motorPhysics';
@@ -74,7 +75,11 @@ describe('C-4(alice担当分): prepareDestructionRunの8段が単一の読取り
     const resolved = deriveMaterialSelectionFromEquipment(loadout, inventory);
     expect(resolved.ok).toBe(true);
     if (!resolved.ok) return;
-    expect(result.destructionConfig).toEqual(assembleDestructionConfig(resolved.selection, resolved.equipmentContext));
+    // P41C-R2-C2改: 第3引数(装備中巻線記録)も**同一のloadout/inventoryから導出したもの**を渡す。
+    // ここでnullを固定すると、storeが記録からD01閾値を解決していても監査が素通りしてしまう。
+    expect(result.destructionConfig).toEqual(
+      assembleDestructionConfig(resolved.selection, resolved.equipmentContext, selectEquippedWindingRecord(inventory, loadout)),
+    );
   });
 
   it('recipeKeyはWear反映**前**のmaterialComposedBaseから計算されている(§14.2の3段が4段より前)', () => {
