@@ -6,7 +6,7 @@
 
 上位計画: `docs/phase4-p4-1-plan.md`
 
-状態: **P4-1Aは正式7commit（先端`364111f8`）を作成済み。P4-1B UIは2026-08-30にproduction半自動治具・手続き巻線描画・表示枠・人間視認是正・操作パッド内の巻き数常設まで完了し、正式commit先端`ae8f5f4c2031f9ad0197172201556c5d583160a2`へ到達した。スマホ人間視認と105ファイル・2695テスト、build・lint・型検査・禁止差分監査を通過している。次はP4-1Cの実装前詳細化と別途人間承認である。P4-1A/P4-1Bのtag・push・deploy、P4-1C以降、spec/art-spec確定変更、物理・較正、D10、被膜、RunSnapshot 4は未承認であり、承認まで行わない。**
+状態: **P4-1C UIは完了した。** P4-1Aは正式7commit（先端`364111f8`）、P4-1B UIは正式commit先端`ae8f5f4c2031f9ad0197172201556c5d583160a2`まで到達済みである。P4-1C UIはR3-D1〜D6どおり張力破断の巻線工程を接続し、2026-09-04の人間試遊で3条件すべてPASS・blocking defect 0となった（§17）。次はP4-1D（整流子の接触品質）の実装前詳細化と別途人間承認である。P4-1C成果物はまだ未commitで、tag・push・deploy、spec/art-spec確定変更、D10、被膜、素材別破断値は未承認であり、承認まで行わない。
 
 ## 1. UIの目的
 
@@ -254,3 +254,47 @@ arbiter条件付き承認と人間再承認を2026-08-30に完了し、productio
 - 人間は巻線形状・不均一さ・偽縞解消・画面収まり・巻き数常設と増加を承認した。利用者向け修正前後切替は、正典の修正前recordが生じるP4-1Gへ延期したままである。
 - 最終先端`ae8f5f4c2031f9ad0197172201556c5d583160a2`は105ファイル・2695テスト、build、lint、通常型検査、Phase 4 sweep型検査、palette、productionから`src/p40`への非import、禁止差分監査を通過した。
 - P4-1A/P4-1Bのtag・push・deployは未実施で、次はP4-1Cの実装前詳細化と別途人間承認である。
+
+## 17. P4-1C UI完了記録（2026-09-04人間試遊PASS）
+
+### 17.1 実装した範囲（R3-D1〜D6の反映先）
+
+| 裁定 | 反映先 | 内容 |
+|---|---|---|
+| R3-D1 | `src/components/assembly/windingStepState.ts` | `WindingStepAction`へ`wireBroke`を1種だけ追加。`winding`からのみ受理し`broken`へ遷移する。`broken`から受理するのは既存`reset`だけで、`changeLot`・`setRecord`を含む他actionは同一stateを返す |
+| R3-D3 | 同上 / `src/modes/AssemblyMode.tsx` | UI独自の`resolveDisplayTurnLimit`と`computeMaxTurns` importを削除。`AssemblyStepProps`の`resolveTurnLimit`でstore権威（`resolveWindingTurnLimitQuery`）を受け取る |
+| R3-D4 | `src/components/assembly/CoilWindingStep.tsx` | 任意破棄`discardLot()`は確認dialog→`changeLot`のまま不変。破断後の`restartAfterBreak()`は確認dialogを出さず既存`reset`だけを使う |
+| R3-D5 | 同上 | 状態文・ボタン・消費事実の3文言を確定値で表示する |
+| R3-D6 | 同上 | 記録追加前に`willWindingBreak`で判定し、`consumeWireOnBreakAction`が`ok:true`を返したときだけ`wireBroke`をdispatchする |
+
+### 17.2 C3破断表示
+
+- 破断したターンは記録へ含めず、**既存の巻線図がそのまま破断直前のprefixを描く**。破断専用の描画・色・記号は追加していない。
+- 状態文「線材が切れました。この巻線は完成できません。」、ボタン「新しい線材で巻き直す」、消費事実「切れるまでに{prefix長+1}ターン分の線材を使いました。」を、既存の常設`role="status"`と通常buttonだけで表示する。`role="status"`は増やしていない（1秒ごとの読み上げ割り込みを避けるため）。
+- 破断中は治具のpointer・keyboard操作と巻き操作のボタンを止め、再開ボタンだけを出す。
+- 原因の断定、推奨修正、品質評価、上手さゲージはいずれも出さない。累積は緩いターンで回復しないため、「休ませれば直る」と読める文言を置かない。
+
+### 17.3 破断後の巻き直し導線
+
+- 記録を捨てる入口は2つに分かれる。任意破棄は確認dialogを通り、破断後の再開は**確認dialogを出さない**（既に切れており、捨てる対象が残っていない）。
+- reducerが受理する消去actionは既存`reset`だけで、`discardBroken`・理由union・途中継ぎは追加していない。
+- 消費済みの線材は戻さない。再開後は材料未確定（`lotPending`）から新しいロットで巻き直す。
+
+### 17.4 在庫上限のstore権威一本化
+
+- 物理上限・記録スキーマ上限・在庫上限の最小値は`resolveWindingTurnLimit`だけが決める。UIは同じ値を表示に使うだけで、再計算もclampも在庫の直接読み取りもしない。
+- `ConsumeWireOnBreakCommand`は`lot`を入れ子で受け取り、storeが線径込みで上限を再検証する。UI側でfieldを平坦化しない。
+- `insufficientWire`枝は、上限resolverが在庫項を含むため現契約では到達不能である。上限resolverと消費関数が将来ずれた場合のfail-closed backstopとして残置し、到達不能である旨をコード内へ明記した。
+
+### 17.5 人間試遊の結果（2026-09-04）
+
+3条件すべてPASS、blocking defect 0。
+
+1. 最大張力を維持すると33ターン目に破断し、prefix 32ターンと「33ターン分を使いました」が表示される。
+2. 破断後は巻線・完成・巻き足しがロックされ、「新しい線材で巻き直す」で確認dialogなしに材料選択へ戻る。消費した線材は返却されない。
+3. 30ターン級は最大張力でも完成でき、張力を上げる利益と上げ続ける危険の双方を操作と見た目から感じられる。
+
+### 17.6 変更していないもの
+
+- 利用者向けの修正前後切替（W2）はP4-1Gへ延期したままである。幾何の不変条件（区間外strokeの不変、`stripRect`・`axisRect`の同一）は回帰で固定済みで、正典の修正前recordが生じた時点でUIを載せられる。
+- `src/retro/winding/**`の描画、`src/p40/**`（P4-0比較証跡）、音、新色、新asset、新D番号、図鑑、保存fieldはいずれも変更していない。

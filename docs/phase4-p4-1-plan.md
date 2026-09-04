@@ -8,7 +8,7 @@
 
 UI計画: `docs/phase4-p4-1-ui-plan.md`
 
-状態: **P4-1Aは正式7commit（先端`364111f8`）を作成済み。P4-1Bは2026-08-30に人間事前承認・arbiter条件付き承認・人間再承認・担当実装・Suu_mot3正式受入・人間視認・正式7commitまで完了した。先端は`ae8f5f4c2031f9ad0197172201556c5d583160a2`で、105ファイル・2695テスト、build・lint・通常型検査・Phase 4 sweep型検査・禁止差分監査が成功している。次はP4-1Cの実装前詳細化と別途人間承認である。P4-1A/P4-1Bのtag・push・deploy、P4-1C以降、spec/art-spec確定変更、物理・較正、D10、被膜、RunSnapshot 4は未承認であり、承認まで行わない。**
+状態: **P4-1Aは正式7commit（先端`364111f8`）を作成済み。P4-1Bは正式7commit（先端`ae8f5f4c2031f9ad0197172201556c5d583160a2`）まで完了済み。P4-1C（C1・R2-A・C2・R3の4delta）は人間承認・arbiter裁定・Suu_mot3正式受入をすべて経て実装を完了し、2026-09-04のC3人間試遊で3条件が全PASS、blocking defect 0で工程通過と判定された。最終状態は106ファイル・2807テスト、build・lint・通常型検査・material sweep型検査・Phase 4 sweep型検査・禁止差分監査がすべて成功している。次はP4-1D（整流子の接触品質）の実装前詳細化と別途人間承認である。P4-1A/P4-1B/P4-1Cのtag・push・deploy、P4-1D以降、spec/art-spec確定変更、D10、被膜、RunSnapshot 4は未承認であり、承認まで行わない。**
 
 ## 1. 要約
 
@@ -115,6 +115,68 @@ productionへ接続する候補軸は、正典§9.2に記載済みの現象だ�
 各軸は一つずつread-only有限sweepし、実在物性または既存設計較正値から候補を逆算する。全軸を同時に動かして結果だけ合わせない。
 
 張力操作は「高いほど常に得」にはしない。ただし低張力と高張力を対称な罰にする任意の山型関数も禁止する。利益側は整列・占積、危険側は素材許容を越えた損傷という、異なる実在現象として分ける。
+
+#### 5.3.1 P4-1Cの確定値・受入結果と、下側拘束の正典是正
+
+P4-1Cは次の4deltaで構成し、いずれも人間承認・arbiter裁定・Suu_mot3正式受入を経て完了した。
+
+| delta | 内容 | production確定値 | 単一出典 |
+|---|---|---|---|
+| C1 | 平均張力 → 占積比 → `windingTurnsRatio` | `PRODUCTION_TENSION_PACKING` = minPackingRatio **0.85** / referenceTension **1.0** | `src/materials/windingMapping.ts` |
+| R2-A | D01しきい角速度を`DestructionConfig.d01.coilDeformOmegaRadS`へ単一供給化 | 値の変更なし（**挙動変更0**） | `src/engine/constants.ts`の`COIL_DEFORM_OMEGA` |
+| C2 | 張力 → D01崩壊耐性 | `PRODUCTION_D01_LOOSENESS_K` = **0.5**（承認済み格子{0.1〜0.5}の端） | `src/materials/destructionCalibration.ts` |
+| R3 | 極端な高張力による線材破断（C3） | `PRODUCTION_WINDING_BREAK` = safeTension **224/256** / breakExposure **4** | `src/materials/windingMapping.ts` |
+
+- C1の`windingTurnsRatio`は「方向一貫性 × 張力占積」の積で、積を作るのは`deriveWindingMotorFields`の1箇所だけである。
+- R2-Aは`step`/`advanceMotorState`/`stepVehicle`/`stepTestRun`/`stepTrackRun`の5関数をrequired options化した。実呼出し閉包は18ファイル145件で、挙動変更0を全証跡（3種sweepの出力一致・数値リテラル多重集合の照合）で確認している。
+- R3の破断式は`excess_i = max(0, tension_i − safeTension)`、`exposure_i = exposure_{i−1} + excess_i`、`exposure_i > breakExposure`で破断。判定は記録追加**前**に行い、破断ターンは記録へ含めず（prefixは`N−1`）、破断ターンを含む`N`ターン分の線材を消費する。累積は毎回prefixから導出し、永続fieldもsave schemaも持たない。緩いターンでは回復も0リセットもしない。
+- 採用値の帰結（実測）: 最大張力を巻き続けると**33ターン目で破断**し、30ターン級は最大張力でも完成できる。安全域は`tension ≦ 0.875`で何ターン巻いても破断しない。最大/0の交互では65ターン目で破断する。
+- 在庫上限の権威は`resolveWindingTurnLimit`ただ1つで、物理上限・記録スキーマ上限（150）・在庫上限の最小値を返す。完成validator・破断消費validator・UI表示がこの同じ純関数を使う。
+
+##### H8: 素材別破断値の一次資料調査（成立/不成立）
+
+対象は`WIRE_MATERIALS`の4素材である。探索した量は「同一の比較条件（丸線・エナメル被覆・同一径・同一規格）で素材横断に取れる最大巻線張力」。
+
+- **成立（銅のみ）**: ELEKTRISOLA "Technical data for enamelled copper wire based on IEC 60317 / based on JIS 3202"。列名`Max. Winding Tension`、単位cN。**0.400 mmで854 cN**（0.355→618 / 0.450→1060 / 0.500→1287）。
+- **不成立（アルミ線・純銀線）**: 同社の公開技術データは銅専用で、径の適用範囲も「For copper: 0.008 mm – 0.50 mm / For other metals: Please inquire」とメーカー自身が明記している。他メーカー横断でも比較条件を揃えた数値表は見つからなかった。IEC 60317-0-3（エナメル丸アルミ線）は存在するが規定量は伸び等であって最大巻線張力ではなく、伸びから張力比を作るのは換算値の発明に当たるため行わない。
+- **不成立（銀メッキ銅線）**: 導体コアが銅であるため機械的に銅へ近いと推測はできるが一次資料ではない。`materials.ts`が同素材の`density`を`pending`として扱っている前例と同じ位置づけである。
+
+**したがってC3では素材別破断値・相対比を実装しない。** 銅の854 cNは現象が実在することの参考であって、他素材への外挿にも0..1張力軸への数値換算にも使わない。`WireMaterial`へ張力許容fieldを追加しない。
+
+**素材差の将来解禁条件**: (1)対象4素材すべてについて同一比較条件の一次資料（メーカー公式データシート／規格発行元／公的機関）が揃うこと。(2)1素材でも欠ける場合は、その素材だけを`designAssumption`で補わず**素材差そのものを実装しない**。(3)解禁時は`materials.ts`の`verified`/`pending`規約に沿ってCitation（literatureName・publisher・sourceKind・url・accessedOn）を必須とする。
+
+##### C3人間試遊（2026-09-04、3条件すべてPASS）
+
+1. 最大張力を維持すると**33ターン目で破断**し、prefixが32ターン残り、「33ターン分を使いました」と表示される。
+2. 破断後は巻線・完成・巻き足しがロックされ、「新しい線材で巻き直す」で確認dialogなしに材料選択へ戻り、**消費した線材は返却されない**。
+3. 30ターン級は最大張力でも完成でき、張力を上げる利益と上げ続ける危険の双方を操作・見た目から感じられる。
+
+blocking defectなし。工程通過。
+
+##### C2（張力→D01崩壊耐性）の確定と、下側拘束の正典是正
+
+2026-08-31の人間再承認（P41C-R2-C2改）により、D01のしきい角速度を巻線記録の平均張力から解決する形で確定した。
+
+- 式: `COIL_DEFORM_OMEGA × (1 − K × (1 − meanTension))`、`K = PRODUCTION_D01_LOOSENESS_K = 0.5`（**承認済み格子{0.1,0.2,0.3,0.4,0.5}の端**である）。`COIL_DEFORM_FRAMES = 360` は無変更。
+- 単一出典は `src/materials/destructionCalibration.ts` の `resolveCoilDeformOmegaRadS`。`assembleDestructionConfig` が装備中ローターの巻線記録から解決する。
+- 較正検証fixtureは構成C（P4-0固定構成のrecordターン数30→50のみ変更）。
+- **legacy個体（巻線記録なし）は `COIL_DEFORM_OMEGA` のまま**。記録を持たない個体へ張力を推定して与えることは記録の捏造であり、移設前の挙動も変えない。
+
+**(a) 下側拘束(iii)の文言是正の経緯（arbiter文言欠陥）**
+
+R2-SWEEP-2/3の裁定でarbiterが書いた拘束(iii)「NORMAL_OPERATION 15組合せは**張力によらず**非発火」は、正典定義（P3-2-Q13-2:「素材既定・**player値すべて既定**・攻め入力なし」）への再アンカーを怠った独自の言い換えであり、正典が含めていない攻め側入力（`varnished=false` × 極端低張力）を「通常」の保証範囲へ紛れ込ませていた。最終確認の実測でこの過剰包含が露見し、arbiterが自らの文言欠陥として記録したうえで、拘束(iii)を正典定義へ是正した（**正典定義自体は不変**）。教訓は「正準定義は1箇所に置き、言い換えを作らない。言い換えは読者の数だけ解釈を生む」である。
+
+**(b) 「D01は無ワニス選択の先にだけある」という構造保証**
+
+`nextDeformState` は `varnished === true` のとき常に `coilCollapsed: false` を返す。playerの既定は `varnished: true` であるため、**既定のプレイヤーはD01に決して出会わない**。D01は「ワニスを塗らない」という明示的な選択の先にだけ現れる。これは検証の空虚な一致ではなく、下側拘束が守るべき保証の実体そのものである。正典NORMAL_OPERATION 15組合せ×張力全域での非発火は、45走行の実測とこの構造保証の両方で成立している。
+
+**(c) 攻め側の発火境界（契約ではなく較正時の実測事実）**
+
+`varnished=false`（明示的なplayer逸脱）かつ極端低張力のNORMAL形状ビルド（80ターン）では、NiMH/LiPoの8/15組合せが高回転時にD01発火する。実測では `meanTension ≦ 約0.055`（k≦14）が発火域で、最小余裕は +0.2 rad/s、最大逸脱は −5.520 rad/s（hill-climb / NiMH / k=0）。alkaline の5組合せは全張力域で非発火である。これはC2の設計意図（緩い巻きは高回転で崩れる、正典§9.2）の帰結であり、隠すべき欠陥ではない。
+
+**これらの境界値は契約ではない。** 係数変更で動きうる観測値を契約へ昇格させないため、`varnished=false` ビルドに対して張力の安全境界を約束しない。契約上の下側拘束は「正典NORMAL_OPERATION（player値すべて既定＝`varnished: true` を含む）×張力全域で非発火」の1本だけである。
+
+**上側拘束**は、(i) 緩い張力ほど早期に発火する単調差を**大域傾向・粗い刻みの単調性**として受理する（隣接点の局所非単調と発火集合の穴は、閾値＋360frame連続条件という決定論的状態機械の境界で必然的に生じる張り付きであり、消すには式改造かFRAMES短縮しかなく、いずれも禁止）、(ii) 締めた巻き（`meanTension=1`）は非発火、の2点で充足済みである。UI・説明で「なめらかな連続応答」を装わないこと。
 
 ### 5.4 P4-1D: 整流子の接触品質
 
@@ -534,3 +596,46 @@ P4-1Bはproduction半自動治具、手続き巻線描画、MC4生成・厳密�
 U2人間視認では、スマホで巻線形状・不均一さ・均一巻きの偽縞解消・画面収まりを承認した。追加指摘「何ターン巻いているか分からない」は、操作パッド内へ既存`record.length` / `limit`だけを使う「巻き数 N / M ターン」を常設して解消し、数値が巻線中に増加することも人間確認済みである。新規state・action・型、パッド高さ変更、物理・較正の追加はない。
 
 最終先端`ae8f5f4c2031f9ad0197172201556c5d583160a2`は105ファイル・2695テスト、build、lint、通常型検査、Phase 4 sweep型検査、palette、productionから`src/p40`への非import、禁止差分監査を通過した。最終tree `40b8682eb9e964ac694037bf2fe5ce1500c111ab`は受入済み作業ツリーと一致する。P4-1A/P4-1Bのtag・push・deployは未実施である。
+
+## 17. P4-1C R3実装前統合裁定（2026-09-01人間承認済み）
+
+人間プロジェクトリードは次の全文を承認した。
+
+> P4-1C R3実装前統合裁定R3-D1〜D8全文、およびarbiter補足照会への着手を承認します。
+
+`docs/phase4-p4-1c-r3-human-reapproval-bundle.md`のR3-D1〜D8全文を本計画の正規構成要素として固定する。主要境界は次のとおりである。
+
+1. `broken`への入口として`{ readonly kind: 'wireBroke' }`だけを追加し、`broken`からは既存`reset`だけを受理する。
+2. 破断turn `N`ではprefix `N−1`を保持し、`N`ターン分を消費する。在庫1ターン留保は採用しない。
+3. 物理・schema・在庫の巻線上限はstore/domainの`resolveWindingTurnLimit`へ一本化し、UI独自計算・clamp・在庫直接読取りを廃止する。
+4. 通常の任意破棄は既存確認dialog付き`changeLot`、破断後の巻き直しは確認なしの既存`reset`として分離する。
+5. 消費表示はprefixから`record.length + 1`として導出し、表示専用field/stateを追加しない。
+6. 線材消費はstoreのResult action 1点だけを権威境界とし、成功時だけ永続在庫更新後にlocal reducerへ`wireBroke`を同期dispatchする。未知素材・不足・永続化失敗は全状態不変とする。
+7. 比較可能な一次資料が4素材分揃わないため、素材別破断閾値・相対比・張力許容fieldを採用しない。
+8. 素材非依存の蓄積式・閾値も未承認であり、arbiter補足レビュー、read-only有限sweep計画、人間再承認、sweep実測、production値の別承認を順に要求する。
+
+今回解禁されたのは、本節への固定、read-only調査、計画文書追随、arbiter補足レビュー提出だけである。production/test実装、破断式・閾値のproduction採用、sweep実行、spec/art-spec確定変更、engine、materials.ts、save schema、canonical E2、MC4、recipeKey v2、D10、被膜、asset、音、commit、tag、push、deploy、PR、mergeは禁止を維持する。
+
+## 18. P4-1C R3-E1 arbiter補足判定・有限sweep承認（2026-09-01人間承認済み）
+
+人間プロジェクトリードは次の全文を承認した。
+
+> P4-1C R3 arbiter補足レビュー判定全文、Cのnon-blocking注記、およびR3-E1有限バンドル（超過張力累積式、T_SAFE/E_BREAK 25候補のread-only sweep、破断ターン式floor(E_BREAK/x)+1、銅854 cN非外挿）を承認します。
+
+`docs/phase4-p4-1c-r3-e1-human-reapproval-bundle.md`のexact式、25候補格子、入力集合、受入条件、停止条件を正規構成要素として固定し、repoを編集しないread-only有限sweepを解禁する。一定超過量`x > 0`の最初の破断turnは`floor(E_BREAK / x) + 1`を正とする。銅854 cNは最大巻線張力という現象の存在を示す参考だけとし、共通`T_SAFE`への数値換算や他素材への外挿を行わない。
+
+store永続化成功後、local `wireBroke` dispatch前にクラッシュした場合、線材消費は維持され、reload後は新ロットから始まる。これは「消費済み線材は戻さない」契約の正しい帰結であり、永続原子性の欠陥ではない。
+
+sweep結果後は、推奨1案、代表代替、全受入結果、選定理由をR3-E2として人間へ再提示して停止する。production/test実装、production係数採用、spec/art-spec、engine、materials.ts、save schema、canonical E2、MC4、recipeKey v2、D10、被膜、asset、音、新色、新D番号、図鑑、保存field、物理軸、sweep基盤、commit、tag、push、deploy、PR、mergeは禁止を維持する。
+
+## 19. P4-1C R3-E2 production値・実装承認（2026-09-01人間承認済み）
+
+人間プロジェクトリードは次の全文を承認した。
+
+> P4-1C R3-E1受入条件(d)のarbiter補足裁定全文、およびR3-E2有限バンドルを承認します。
+
+`docs/phase4-p4-1c-r3-e1-boundary-arbiter-decision.md`のとおり、受入条件(d)は等号非破断、+1量子で正の増分となり理論上有限turnで破断する述語境界として固定する。+1量子に`MAX_WINDING_TURNS=150`以内の実破断は要求せず、格子再設計・追加sweepを行わない。
+
+production値は`T_SAFE=224/256 (=0.875)`、`E_BREAK=4`とする。破断判定は`excess_i=max(0,tension_i-T_SAFE)`、prefixと候補turnから導出した累積`exposure_i`が`E_BREAK`を厳密に超えた場合とする。累積field・save schemaを追加しない。判定はrecord追加前、破断turnをrecordへ含めずprefixを保持し、破断turnを含む線材を消費する。緩いturnで累積を回復・resetしない。素材別破断値を採用せず、銅854 cNを数値換算・他素材へ外挿しない。
+
+`docs/phase4-p4-1c-r3-human-reapproval-bundle.md`のR3-D1〜D6、本節のexact式・production値、対応test、全検証・禁止差分監査だけを実装解禁する。spec/art-spec確定変更、engine、materials.ts、save schema、canonical E2、MC4、recipeKey v2、D10、被膜、asset、音、新色、新D番号、図鑑、保存field、物理軸、sweep基盤、追加sweep、commit、tag、push、deploy、PR、mergeは禁止を維持する。
