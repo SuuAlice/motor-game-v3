@@ -14,6 +14,8 @@ import {
   type RunApplicationEnvelope,
 } from '../runOutcomeApplication';
 import { GEAR_TOTAL_TOOTH_COUNT } from '../../materials/inventoryItem';
+import { computeConsumedWireM } from '../../materials/assumedGeometry';
+import { resolveWindingTurnLimit } from '../rotorAssembly';
 import { COIL_DEFORM_OMEGA } from '../../engine/constants';
 import { useGameStore } from '../gameStore';
 import { captureRunSnapshot, restoreRunSnapshot, type CaptureRunSnapshotInput, type DestructionConfig, type DestructionRunContext, type RunOutcome } from '../../engine/destructionOrchestration';
@@ -2189,6 +2191,126 @@ describe('P4-1A: completeRotorAssemblyActionの原子境界', () => {
     expect(useSaveStore.getState().inventory).toBe(beforeInventory);
     expect(useSaveStore.getState().progress).toBe(beforeProgress);
     expect(useSaveStore.getState().progress.config).toBe(beforeConfig);
+  });
+
+  // -------------------------------------------------------------------------
+  // P4-1C R3(2026-09-01人間再承認、R3-D3/D6): 破断時の線材消費と、在庫上限のread-only query。
+  // -------------------------------------------------------------------------
+  const BREAK_LOT = { wireMaterialId: 'wire-copper-standard', windingWireGaugeMm: 0.4, windingParallelStrands: 1 as const };
+
+  it('R3: consumeWireOnBreakActionは線材在庫だけを減らし、ローター・装備・カウンタ・所持金を変えない', () => {
+    acquireLease();
+    const before = useSaveStore.getState();
+    const beforeWire = before.inventory.stackableStock.find((e) => e.family === 'wire')!;
+    const beforeM = beforeWire.family === 'wire' ? beforeWire.quantityM : 0;
+
+    const result = useSaveStore.getState().consumeWireOnBreakAction({ lot: BREAK_LOT, brokenTurnCount: 33 });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const after = useSaveStore.getState();
+    const afterWire = after.inventory.stackableStock.find((e) => e.family === 'wire')!;
+    expect(afterWire.family === 'wire' ? afterWire.quantityM : null).toBeCloseTo(beforeM - result.consumedM, 12);
+    expect(after.inventory.rotorAssemblies).toEqual(before.inventory.rotorAssemblies);
+    expect(after.equipmentLoadout).toEqual(before.equipmentLoadout);
+    expect(after.idCounters).toEqual(before.idCounters);
+    expect(after.inventory.cashG).toBe(before.inventory.cashG);
+    // 永続実体にも同じ内容が入っている(メモリだけの更新ではない)
+    const persistedWire = readPersisted().inventory.stackableStock.find((e) => e.family === 'wire')!;
+    expect(persistedWire.family === 'wire' ? persistedWire.quantityM : null).toBeCloseTo(beforeM - result.consumedM, 12);
+  });
+
+  it('R3: 破断ターンを含む本数分を消費する(prefix長+1ターン分)', () => {
+    acquireLease();
+    const r33 = useSaveStore.getState().consumeWireOnBreakAction({ lot: BREAK_LOT, brokenTurnCount: 33 });
+    expect(r33.ok && r33.consumedM).toBe(computeConsumedWireM(33, 1));
+  });
+
+  it('R3: 在庫を超えるターン数は在庫・永続内容とも不変でinvalidTurnCount(0 clampも部分消費もしない)', () => {
+    acquireLease();
+    const before = useSaveStore.getState();
+    const beforeSnapshot = JSON.parse(JSON.stringify(before.inventory));
+
+    const result = useSaveStore.getState().consumeWireOnBreakAction({ lot: BREAK_LOT, brokenTurnCount: 100000 });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.failure.kind).toBe('invalidTurnCount');
+    expect(useSaveStore.getState().inventory).toStrictEqual(beforeSnapshot);
+    expect(readPersisted().inventory).toStrictEqual(beforeSnapshot);
+  });
+
+  // 2026-09-02人間再承認: 定義域の負例。**永続実体まで見て**在庫が増えない・NaNにならないことを固定する。
+  it.each([-1, -100, 0, 1.5, Number.NaN, Number.POSITIVE_INFINITY])(
+    'R3: brokenTurnCount=%p はinvalidTurnCountで、メモリ・永続内容とも不変',
+    (count) => {
+      acquireLease();
+      const beforeInventory = useSaveStore.getState().inventory;
+      const beforePersisted = JSON.parse(JSON.stringify(readPersisted().inventory));
+
+      const result = useSaveStore.getState().consumeWireOnBreakAction({ lot: BREAK_LOT, brokenTurnCount: count });
+
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.failure.kind).toBe('invalidTurnCount');
+      expect(useSaveStore.getState().inventory).toBe(beforeInventory);
+      expect(readPersisted().inventory).toStrictEqual(beforePersisted);
+      const wire = readPersisted().inventory.stackableStock.find((e) => e.family === 'wire')!;
+      const quantityM = wire.family === 'wire' ? wire.quantityM : Number.NaN;
+      expect(Number.isFinite(quantityM), '永続在庫が有限であること(NaN汚染なし)').toBe(true);
+    },
+  );
+
+  it('R3: 負値で永続在庫が増えない(線材が増殖する経路が閉じていること)', () => {
+    acquireLease();
+    const wireBefore = readPersisted().inventory.stackableStock.find((e) => e.family === 'wire')!;
+    const beforeM = wireBefore.family === 'wire' ? wireBefore.quantityM : 0;
+
+    useSaveStore.getState().consumeWireOnBreakAction({ lot: BREAK_LOT, brokenTurnCount: -100 });
+
+    const wireAfter = readPersisted().inventory.stackableStock.find((e) => e.family === 'wire')!;
+    expect(wireAfter.family === 'wire' ? wireAfter.quantityM : null).toBe(beforeM);
+  });
+
+  it('R3: 未知素材では在庫不変でunknownWireMaterial', () => {
+    acquireLease();
+    const beforeSnapshot = JSON.parse(JSON.stringify(useSaveStore.getState().inventory));
+    const result = useSaveStore.getState().consumeWireOnBreakAction({ lot: { ...BREAK_LOT, wireMaterialId: 'wire-unobtanium' }, brokenTurnCount: 3 });
+    expect(result.ok === false && result.failure.kind).toBe('unknownWireMaterial');
+    expect(useSaveStore.getState().inventory).toStrictEqual(beforeSnapshot);
+  });
+
+  it('R3: 書込み失敗はpersistFailedで、in-memory stateも変化しない', () => {
+    acquireLease();
+    const beforeInventory = useSaveStore.getState().inventory;
+    fakeStorage.setItem = () => { throw new Error('quota'); };
+
+    const result = useSaveStore.getState().consumeWireOnBreakAction({ lot: BREAK_LOT, brokenTurnCount: 33 });
+
+    expect(result.ok === false && result.failure.kind).toBe('persistFailed');
+    expect(useSaveStore.getState().inventory).toBe(beforeInventory);
+  });
+
+  it('R3: resolveWindingTurnLimitQueryは在庫を読むだけで、書込みを一切行わない', () => {
+    acquireLease();
+    const beforeInventory = useSaveStore.getState().inventory;
+    const beforePersisted = JSON.parse(JSON.stringify(readPersisted()));
+
+    const limit = useSaveStore.getState().resolveWindingTurnLimitQuery(BREAK_LOT);
+
+    expect(limit).toBeGreaterThan(0);
+    expect(limit).toBe(resolveWindingTurnLimit(beforeInventory, BREAK_LOT));
+    expect(useSaveStore.getState().inventory).toBe(beforeInventory);
+    expect(readPersisted()).toStrictEqual(beforePersisted);
+  });
+
+  it('R3: 消費後は上限が減る(上限と消費が同じ在庫を見ている)', () => {
+    acquireLease();
+    const before = useSaveStore.getState().resolveWindingTurnLimitQuery(BREAK_LOT);
+    const result = useSaveStore.getState().consumeWireOnBreakAction({ lot: BREAK_LOT, brokenTurnCount: 33 });
+    expect(result.ok).toBe(true);
+    const after = useSaveStore.getState().resolveWindingTurnLimitQuery(BREAK_LOT);
+    expect(after).toBeLessThan(before);
   });
 
   it('順逆同数の記録はinvalidRecordで拒否され、config/在庫/装備/カウンタが不変のまま書込みへ進まない', () => {

@@ -5,6 +5,8 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import {
   resolveRotorAssemblyCompletion,
+  resolveWindingTurnLimit,
+  resolveWireBreakConsumption,
   type CompleteRotorAssemblyCommand,
   type ResolveRotorAssemblyCompletionInput,
   type RotorAssemblyMotorDraft,
@@ -12,7 +14,8 @@ import {
 import type { EquipmentLoadout } from '../runOutcomeApplication';
 import { selectEquippedWindingRecord } from '../equippedWinding';
 import type { PlayerInventory } from '../../materials/inventoryItem';
-import { computeConsumedWireM } from '../../materials/assumedGeometry';
+import { computeConsumedWireM, computeMaxTurnsByStock } from '../../materials/assumedGeometry';
+import { computeMaxTurns } from '../../engine/motorPhysics';
 import { MAX_WINDING_TURNS, MIN_RUNNABLE_WINDING_TURNS, type WindingRecord } from '../../materials/windingRecord';
 import { deriveWindingMotorFields, PRODUCTION_AXIS_OFFSET_COEFFICIENT_MM } from '../../materials/windingMapping';
 
@@ -380,5 +383,234 @@ describe('P4-1B: 完成configとselectorの単一出典', () => {
       if (!result.ok) continue;
       expect(selectEquippedWindingRecord(result.inventory, result.loadout)).toHaveLength(result.config.coilTurns);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P4-1C R3(2026-09-01人間再承認): 在庫上限の唯一の権威と、破断時の線材消費。
+// ---------------------------------------------------------------------------
+describe('P4-1C R3: resolveWindingTurnLimit / computeMaxTurnsByStock', () => {
+  const LOT = { wireMaterialId: 'wire-copper-standard', windingWireGaugeMm: 0.4, windingParallelStrands: 1 as const };
+  // **在庫は`computeConsumedWireM(n, strands)`で作る**。`1ターン分 × n`で作ると最終ULPの
+  // 丸め差でNターン分に届かず、上限がN−1になる(実装側もこの差を吸収する補正を持つ)。
+  const stockFor = (turns: number, strands: 1 | 2 = 1) => computeConsumedWireM(turns, strands);
+
+  it('在庫ちょうどNターン分でNを返し、1e-9足りないとN−1になる(切り捨て、fail-closed)', () => {
+    expect(computeMaxTurnsByStock(stockFor(40), 1)).toBe(40);
+    expect(computeMaxTurnsByStock(stockFor(40) - 1e-9, 1)).toBe(39);
+  });
+
+  it('上限と消費関数が厳密に一致する(上限を満たすのに消費で足りない、が起きない)', () => {
+    for (const strands of [1, 2] as const) {
+      for (const n of [1, 2, 10, 29, 30, 33, 65, 149, 150]) {
+        const stock = computeConsumedWireM(n, strands);
+        expect(computeMaxTurnsByStock(stock, strands), `n=${n} strands=${strands}`).toBe(n);
+        expect(computeConsumedWireM(computeMaxTurnsByStock(stock, strands), strands)).toBeLessThanOrEqual(stock);
+      }
+    }
+  });
+
+  it('在庫が0・負・非有限では0を返す(負の上限やNaNを下流へ流さない)', () => {
+    for (const bad of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(computeMaxTurnsByStock(bad, 1), `availableM=${String(bad)}`).toBe(0);
+    }
+  });
+
+  it('並列2本では1本の半分のターン数しか巻けない(消費が2倍だから)', () => {
+    expect(computeMaxTurnsByStock(stockFor(40), 2)).toBe(20);
+  });
+
+  it('物理上限・スキーマ上限・在庫上限の最小値を返す(3項それぞれが最小になる場合を個別に固定)', () => {
+    // 在庫が最小になる場合
+    expect(resolveWindingTurnLimit(baseInventory(stockFor(12)), LOT)).toBe(12);
+    // スキーマ上限(150)が最小になる場合: 在庫も物理も十分
+    const physicalMax = computeMaxTurns(LOT.windingWireGaugeMm, LOT.windingParallelStrands);
+    expect(physicalMax).toBeGreaterThanOrEqual(MAX_WINDING_TURNS);
+    expect(resolveWindingTurnLimit(baseInventory(stockFor(1000)), LOT)).toBe(MAX_WINDING_TURNS);
+    // 物理上限が最小になる場合: 太い線ほど巻けるターン数が減る
+    const thick = { ...LOT, windingWireGaugeMm: 0.8 };
+    expect(resolveWindingTurnLimit(baseInventory(stockFor(1000)), thick)).toBe(computeMaxTurns(0.8, 1));
+  });
+
+  it('未所持の線材では上限0(在庫エントリ不在は残量0として扱う)', () => {
+    expect(resolveWindingTurnLimit(baseInventory(100), { ...LOT, wireMaterialId: 'wire-silver' })).toBe(0);
+  });
+
+  it('**1ターン分の留保を入れない**(R3-D2): 在庫ちょうどNターン分なら上限はNで、N本目の破断消費Nも満たす', () => {
+    const inv = baseInventory(stockFor(30));
+    expect(resolveWindingTurnLimit(inv, LOT)).toBe(30);
+    const r = resolveWireBreakConsumption({ command: { lot: LOT, brokenTurnCount: 30 }, inventory: inv });
+    expect(r.ok).toBe(true);
+  });
+});
+
+describe('P4-1C R3: resolveWireBreakConsumption', () => {
+  const LOT = { wireMaterialId: 'wire-copper-standard', windingWireGaugeMm: 0.4, windingParallelStrands: 1 as const };
+  const CMD = { lot: LOT, brokenTurnCount: 33 };
+
+  it('破断ターンを含む本数分を消費し、線材在庫だけが減る', () => {
+    const inv = baseInventory(100);
+    const r = resolveWireBreakConsumption({ command: CMD, inventory: inv });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const expected = computeConsumedWireM(33, 1);
+    expect(r.consumedM).toBe(expected);
+    const wire = r.inventory.stackableStock.find((e) => e.family === 'wire' && e.materialId === 'wire-copper-standard');
+    expect(wire?.family === 'wire' ? wire.quantityM : null).toBe(100 - expected);
+  });
+
+  it('保持prefixがN−1なら消費はN(prefix長+1ターン分)である', () => {
+    const prefixLength = 32;
+    const r = resolveWireBreakConsumption({ command: { ...CMD, brokenTurnCount: prefixLength + 1 }, inventory: baseInventory(100) });
+    expect(r.ok && r.consumedM).toBe(computeConsumedWireM(prefixLength + 1, 1));
+  });
+
+  it('並列2本の消費は1本の厳密に2倍', () => {
+    const a = resolveWireBreakConsumption({ command: CMD, inventory: baseInventory(100) });
+    const b = resolveWireBreakConsumption({ command: { ...CMD, lot: { ...LOT, windingParallelStrands: 2 } }, inventory: baseInventory(100) });
+    expect(a.ok && b.ok && b.consumedM === a.consumedM * 2).toBe(true);
+  });
+
+  // 2026-09-02補足裁定(案B): 在庫上限は`resolveWindingTurnLimit`が含むため、在庫不足は
+  // `invalidTurnCount`側で落ちる。`insufficientWire`は上限resolverと消費関数が将来ずれた場合の
+  // fail-closed backstopとしてunionに残す(現契約では到達不能)。
+  it('在庫が足りないターン数はinvalidTurnCountで落ち、在庫を一切変えない(0 clampも部分消費もしない)', () => {
+    const inv = baseInventory(0.1);
+    const snapshot = JSON.parse(JSON.stringify(inv));
+    const r = resolveWireBreakConsumption({ command: CMD, inventory: inv });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.failure.kind).toBe('invalidTurnCount');
+    if (r.failure.kind === 'invalidTurnCount') {
+      expect(r.failure.count).toBe(33);
+      expect(r.failure.limit).toBe(resolveWindingTurnLimit(inv, LOT));
+      expect(r.failure.limit).toBeLessThan(33);
+    }
+    expect(inv).toEqual(snapshot);
+  });
+
+  // -------------------------------------------------------------------------
+  // 定義域の負例(2026-09-02人間再承認)。**消費計算より前**に閉じる。
+  // 回帰の対象は「負値で在庫が増える」「NaNが在庫へ書き込まれる」という実際に通っていた欠陥。
+  // -------------------------------------------------------------------------
+  it.each([-1, -100, 0, 1.5, 0.5, Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY])(
+    'brokenTurnCount=%p はinvalidTurnCountで拒否し、在庫を一切変えない',
+    (count) => {
+      const inv = baseInventory(100);
+      const snapshot = JSON.parse(JSON.stringify(inv));
+      const r = resolveWireBreakConsumption({ command: { lot: LOT, brokenTurnCount: count }, inventory: inv });
+      expect(r.ok).toBe(false);
+      if (r.ok) return;
+      expect(r.failure.kind).toBe('invalidTurnCount');
+      expect(inv).toEqual(snapshot);
+    },
+  );
+
+  it('負値で在庫が増えない(消費が負になる経路が閉じていること)', () => {
+    const inv = baseInventory(10);
+    for (const count of [-1, -100]) {
+      const r = resolveWireBreakConsumption({ command: { lot: LOT, brokenTurnCount: count }, inventory: inv });
+      expect(r.ok, `count=${count}`).toBe(false);
+      // 仮に成功していれば在庫が10を超える。okでないこと自体がその経路の不存在を示す。
+    }
+    const wire = inv.stackableStock.find((e) => e.family === 'wire')!;
+    expect(wire.family === 'wire' ? wire.quantityM : null).toBe(10);
+  });
+
+  it('NaNが在庫へ書き込まれない(保存が壊れる経路が閉じていること)', () => {
+    const inv = baseInventory(10);
+    const r = resolveWireBreakConsumption({ command: { lot: LOT, brokenTurnCount: Number.NaN }, inventory: inv });
+    expect(r.ok).toBe(false);
+    const wire = inv.stackableStock.find((e) => e.family === 'wire')!;
+    expect(Number.isFinite(wire.family === 'wire' ? wire.quantityM : Number.NaN)).toBe(true);
+  });
+
+  // Suu独立レビュー是正(A、2026-09-02): 承認式をド・モルガン展開すると、limitがNaNのとき
+  // `count > limit`がfalseになって受理側へ抜ける。承認式のexact否定で書くことの回帰。
+  it('limitがNaNになるlot(線径NaN)は、正しいターン数でもinvalidTurnCountで拒否する', () => {
+    const nanLot = { ...LOT, windingWireGaugeMm: Number.NaN };
+    const inv = baseInventory(100);
+    const snapshot = JSON.parse(JSON.stringify(inv));
+    expect(Number.isNaN(resolveWindingTurnLimit(inv, nanLot))).toBe(true);
+    const r = resolveWireBreakConsumption({ command: { lot: nanLot, brokenTurnCount: 1 }, inventory: inv });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.failure.kind).toBe('invalidTurnCount');
+    expect(inv).toEqual(snapshot);
+  });
+
+  it('スキーマ上限超過(151)は在庫が十分でもinvalidTurnCount', () => {
+    const inv = baseInventory(1000);
+    expect(resolveWindingTurnLimit(inv, LOT)).toBe(MAX_WINDING_TURNS);
+    const r = resolveWireBreakConsumption({ command: { lot: LOT, brokenTurnCount: MAX_WINDING_TURNS + 1 }, inventory: inv });
+    expect(r.ok === false && r.failure.kind).toBe('invalidTurnCount');
+    if (!r.ok && r.failure.kind === 'invalidTurnCount') expect(r.failure.limit).toBe(MAX_WINDING_TURNS);
+  });
+
+  it('物理上限超過は在庫が十分でもinvalidTurnCount(太線ほど巻ける本数が減る)', () => {
+    const thickLot = { ...LOT, windingWireGaugeMm: 0.8 };
+    const inv = baseInventory(1000);
+    const physicalLimit = resolveWindingTurnLimit(inv, thickLot);
+    expect(physicalLimit).toBeLessThan(MAX_WINDING_TURNS);
+    const r = resolveWireBreakConsumption({ command: { lot: thickLot, brokenTurnCount: physicalLimit + 1 }, inventory: inv });
+    expect(r.ok === false && r.failure.kind).toBe('invalidTurnCount');
+    if (!r.ok && r.failure.kind === 'invalidTurnCount') expect(r.failure.limit).toBe(physicalLimit);
+  });
+
+  it('正例の境界: count=1 と count=上限ちょうど は成功し、在庫が必ず減る', () => {
+    const inv = baseInventory(100);
+    const limit = resolveWindingTurnLimit(inv, LOT);
+    for (const count of [1, limit]) {
+      const r = resolveWireBreakConsumption({ command: { lot: LOT, brokenTurnCount: count }, inventory: inv });
+      expect(r.ok, `count=${count}`).toBe(true);
+      if (!r.ok) continue;
+      expect(Number.isFinite(r.consumedM) && r.consumedM > 0, `count=${count}`).toBe(true);
+      const wire = r.inventory.stackableStock.find((e) => e.family === 'wire')!;
+      expect(wire.family === 'wire' ? wire.quantityM : Number.NaN).toBeLessThan(100);
+    }
+  });
+
+  it('ok:trueなら常にconsumedMが有限かつ正で、在庫が減る(不変条件)', () => {
+    const inv = baseInventory(100);
+    for (const count of [1, 2, 10, 33, 65]) {
+      const r = resolveWireBreakConsumption({ command: { lot: LOT, brokenTurnCount: count }, inventory: inv });
+      expect(r.ok).toBe(true);
+      if (!r.ok) continue;
+      expect(Number.isFinite(r.consumedM)).toBe(true);
+      expect(r.consumedM).toBeGreaterThan(0);
+    }
+  });
+
+  it('未知素材はunknownWireMaterial。既知だが未所持(=残量0で上限0)のinvalidTurnCountと区別する', () => {
+    const unknown = resolveWireBreakConsumption({ command: { ...CMD, lot: { ...LOT, wireMaterialId: 'wire-unobtanium' } }, inventory: baseInventory(100) });
+    expect(unknown.ok === false && unknown.failure.kind).toBe('unknownWireMaterial');
+    // 既知素材だが在庫エントリが無い → 上限0なので、どのターン数でもinvalidTurnCountになる
+    const notStocked = resolveWireBreakConsumption({ command: { ...CMD, lot: { ...LOT, wireMaterialId: 'wire-silver' } }, inventory: baseInventory(100) });
+    expect(notStocked.ok === false && notStocked.failure.kind).toBe('invalidTurnCount');
+    if (!notStocked.ok && notStocked.failure.kind === 'invalidTurnCount') expect(notStocked.failure.limit).toBe(0);
+  });
+
+  it('破断はローターを生成せず、他の資産を遡及変更しない', () => {
+    const inv = baseInventory(100);
+    const r = resolveWireBreakConsumption({ command: CMD, inventory: inv });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.inventory.rotorAssemblies).toEqual(inv.rotorAssemblies);
+    expect(r.inventory.cashG).toBe(inv.cashG);
+    expect(r.inventory.items).toEqual(inv.items);
+    expect(r.inventory.bodyParts).toEqual(inv.bodyParts);
+    expect(r.inventory.bearingAssemblies).toEqual(inv.bearingAssemblies);
+    // 他素材の在庫(被膜)は不変
+    expect(r.inventory.stackableStock.find((e) => e.family === 'coating')).toEqual(
+      inv.stackableStock.find((e) => e.family === 'coating'),
+    );
+  });
+
+  it('入力を変更しない(失敗・成功いずれでも引数のinventoryは不変)', () => {
+    const inv = baseInventory(100);
+    const snapshot = JSON.parse(JSON.stringify(inv));
+    resolveWireBreakConsumption({ command: CMD, inventory: inv });
+    resolveWireBreakConsumption({ command: { ...CMD, brokenTurnCount: 100000 }, inventory: inv });
+    expect(inv).toEqual(snapshot);
   });
 });

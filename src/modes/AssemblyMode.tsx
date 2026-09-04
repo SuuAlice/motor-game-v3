@@ -6,6 +6,8 @@ import {
   type WindingStepAction,
   type WindingStepState,
 } from '../components/assembly/windingStepState';
+import { useSaveStore } from '../store/saveStore';
+import type { WindingTurnLimitLot } from '../store/rotorAssembly';
 import { CoilWindingStep } from '../components/assembly/CoilWindingStep';
 import { SandingStep } from '../components/assembly/SandingStep';
 import { SlitStep } from '../components/assembly/SlitStep';
@@ -27,6 +29,12 @@ export interface AssemblyStepProps {
    */
   winding: WindingStepState;
   dispatchWinding: (action: WindingStepAction) => void;
+  /**
+   * 巻ける上限を引く(R3-D3)。**storeが権威**で、UIは再計算もclampもしない。
+   * 在庫を引数に取らないのは、在庫の読み取りをUIへ持ち込まないため——
+   * 巻き始め前のLotChooserも、選択中の候補値でそのまま引ける。
+   */
+  resolveTurnLimit: (lot: WindingTurnLimitLot) => number;
 }
 
 interface StepDef {
@@ -73,6 +81,8 @@ export function AssemblyMode() {
   const [draft, setDraftState] = useState<MotorConfig>(INITIAL_DRAFT);
   const [winding, setWinding] = useState<WindingStepState>(INITIAL_WINDING_STEP_STATE);
 
+  const resolveTurnLimit = useSaveStore((state) => state.resolveWindingTurnLimitQuery);
+
   function dispatchWinding(action: WindingStepAction) {
     setWinding((prev) => windingStepReducer(prev, action));
   }
@@ -92,7 +102,8 @@ export function AssemblyMode() {
         工程 {stepIndex + 1} / {STEPS.length}: {step.title}
       </p>
 
-      <step.Component draft={draft} setDraft={setDraft} winding={winding} dispatchWinding={dispatchWinding} />
+      <step.Component draft={draft} setDraft={setDraft} winding={winding}
+        dispatchWinding={dispatchWinding} resolveTurnLimit={resolveTurnLimit} />
 
       <div className="flex gap-2">
         <button

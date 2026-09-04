@@ -9,6 +9,10 @@ import {
   deriveWindingMotorFields,
   PRODUCTION_AXIS_OFFSET_COEFFICIENT_MM,
   PRODUCTION_TENSION_PACKING,
+  PRODUCTION_WINDING_BREAK,
+  computeTensionExcess,
+  computeTensionExposure,
+  willWindingBreak,
   type TensionPackingCalibration,
 } from '../windingMapping';
 import { WINDING_QUANTIZATION_STEP, type WindingRecord } from '../windingRecord';
@@ -200,5 +204,89 @@ describe('事前条件のfail-closed(clampせずthrowする)', () => {
     expect(computeTensionPackingRatio(1, cal)).toBe(1);
     expect(deriveWindingMotorFields(record(30, { leftCount: 21, reversedAt: 10 })).windingTurnsRatio)
       .toBeCloseTo((28 / 30) * 0.925, 12);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P4-1C R3(2026-09-01人間再承認): 極端な高張力の継続による線材破断。
+// 較正値(224/256・4)はsweep実測で確定した承認値なので、ここでは**契約**を固定する。
+// ---------------------------------------------------------------------------
+describe('P4-1C R3: 超過張力の累積と破断判定', () => {
+  const CAL = PRODUCTION_WINDING_BREAK;
+  const Q = WINDING_QUANTIZATION_STEP;
+  const flat = (turnCount: number, tension: number) => record(turnCount, { tension });
+
+  it('production確定値は T_SAFE=224/256・E_BREAK=4', () => {
+    expect(CAL.safeTension).toBe(224 / 256);
+    expect(CAL.breakExposure).toBe(4);
+  });
+
+  it('安全域(tension <= T_SAFE)では超過0。何ターン巻いても破断しない', () => {
+    for (const k of [0, 64, 128, 200, 224]) {
+      expect(computeTensionExcess(k * Q, CAL), `k=${k}`).toBe(0);
+      expect(willWindingBreak(flat(149, k * Q), k * Q, CAL), `k=${k}`).toBe(false);
+    }
+  });
+
+  it('等号(累積 === E_BREAK)では破断しない。境界は厳密な > である', () => {
+    // 超過0.125/ターン(=最大張力)。32ターンで累積ちょうど4.0
+    const excess = 1 - CAL.safeTension;
+    const turns = CAL.breakExposure / excess;
+    expect(Number.isInteger(turns)).toBe(true);
+    expect(computeTensionExposure(flat(turns - 1, 1), 1, CAL)).toBeCloseTo(CAL.breakExposure, 12);
+    expect(willWindingBreak(flat(turns - 1, 1), 1, CAL)).toBe(false);
+    // 次の1ターンで超える
+    expect(willWindingBreak(flat(turns, 1), 1, CAL)).toBe(true);
+  });
+
+  it('T_SAFE+1量子では増分が正で単調増加する(理論上有限ターンで破断する述語境界)', () => {
+    const justOver = CAL.safeTension + Q;
+    expect(computeTensionExcess(justOver, CAL)).toBeGreaterThan(0);
+    const e1 = computeTensionExposure([], justOver, CAL);
+    const e2 = computeTensionExposure(flat(1, justOver), justOver, CAL);
+    expect(e2).toBeGreaterThan(e1);
+    // 記録スキーマ上限(150ターン)の内側では破断しない——理論破断ターンは1025
+    expect(willWindingBreak(flat(149, justOver), justOver, CAL)).toBe(false);
+    expect(Math.floor(CAL.breakExposure / computeTensionExcess(justOver, CAL)) + 1).toBe(1025);
+  });
+
+  it('最大張力を巻き続けると33ターン目で破断する(承認済み採用値の帰結)', () => {
+    for (let n = 1; n <= 40; n += 1) {
+      const breaks = willWindingBreak(flat(n - 1, 1), 1, CAL);
+      expect(breaks, `${n}ターン目`).toBe(n === 33 ? true : n > 33 ? true : false);
+      if (n === 33) break;
+    }
+    expect(willWindingBreak(flat(31, 1), 1, CAL)).toBe(false); // 32ターン目は通る
+    expect(willWindingBreak(flat(32, 1), 1, CAL)).toBe(true); // 33ターン目で破断
+  });
+
+  it('緩いターンでは回復も0リセットもしない(超過0が足されるだけ)', () => {
+    const withRest = [...flat(10, 1), ...flat(10, 0)];
+    const withoutRest = flat(10, 1);
+    expect(computeTensionExposure(withRest, 0, CAL)).toBe(computeTensionExposure(withoutRest, 0, CAL));
+    // 最大/0の交互は、一定最大(33ターン目)の約2倍=65ターン目まで伸びる。
+    // 超過を与えないターンが半分あるぶん到達が遅れるだけで、累積は一切減らない。
+    const altTurn = (i: number) => ({ position: 0.5, arm: 'straddle' as const, direction: 1 as const, tension: i % 2 === 0 ? 1 : 0 });
+    const altPrefix = (n: number) => Array.from({ length: n }, (_, i) => altTurn(i));
+    // 64ターン目(index 63、張力0)では破断しない
+    expect(willWindingBreak(altPrefix(63), 0, CAL)).toBe(false);
+    // 65ターン目(index 64、張力1)で破断する
+    expect(willWindingBreak(altPrefix(64), 1, CAL)).toBe(true);
+  });
+
+  it('累積はprefixから毎回導出され、同じprefixなら常に同じ値を返す(永続fieldを持たない)', () => {
+    const prefix = flat(20, 1);
+    expect(computeTensionExposure(prefix, 1, CAL)).toBe(computeTensionExposure(prefix, 1, CAL));
+    expect(computeTensionExposure(prefix, 1, CAL)).toBeCloseTo(21 * (1 - CAL.safeTension), 12);
+  });
+
+  it('事前条件違反はthrowする(clampしない)', () => {
+    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, -0.1, 1.1]) {
+      expect(() => computeTensionExcess(bad, CAL), `tension=${String(bad)}`).toThrow(/0〜1の有限値ではありません/);
+    }
+    expect(() => computeTensionExcess(0.5, { safeTension: 1.5, breakExposure: 4 })).toThrow(/safeTension/);
+    for (const bad of [0, -1, Number.NaN]) {
+      expect(() => computeTensionExcess(0.5, { safeTension: 0.875, breakExposure: bad }), `E=${String(bad)}`).toThrow(/breakExposure/);
+    }
   });
 });

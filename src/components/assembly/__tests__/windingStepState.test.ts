@@ -10,13 +10,12 @@ import {
   currentRecord,
   describeCompletionFailure,
   hasRecordedTurns,
-  resolveDisplayTurnLimit,
   windingStepReducer,
   type WindingLot,
   type WindingStepAction,
   type WindingStepState,
 } from '../windingStepState';
-import { MAX_WINDING_TURNS, MIN_RUNNABLE_WINDING_TURNS, type WindingRecord } from '../../../materials/windingRecord';
+import { MIN_RUNNABLE_WINDING_TURNS, type WindingRecord } from '../../../materials/windingRecord';
 import {
   INITIAL_TICK_STATE,
   INITIAL_WINDING_INPUT_STATE,
@@ -28,7 +27,6 @@ import {
 } from '../../../retro/winding/inputCommands';
 
 const INITIAL_TICK_STATE_FOR_TEST = INITIAL_TICK_STATE;
-import { computeMaxTurns } from '../../../engine/motorPhysics';
 
 const LOT: WindingLot = { wireMaterialId: 'wire-copper-standard', windingWireGaugeMm: 0.4, windingParallelStrands: 1 };
 const OTHER_LOT: WindingLot = { wireMaterialId: 'wire-aluminum', windingWireGaugeMm: 0.6, windingParallelStrands: 2 };
@@ -113,23 +111,6 @@ describe('canRequestCompletion', () => {
     expect(canRequestCompletion(to(MIN_RUNNABLE_WINDING_TURNS))).toBe(true);
     const winding = reduceAll([{ kind: 'fixLot', lot: LOT }, { kind: 'setRecord', record: record(30) }]);
     expect(canRequestCompletion(winding)).toBe(false);
-  });
-});
-
-describe('resolveDisplayTurnLimit', () => {
-  it('computeMaxTurnsと記録上限の小さい方を返す(独自の上限式を持たない)', () => {
-    for (const lot of [LOT, OTHER_LOT, { ...LOT, windingWireGaugeMm: 0.2 }] as WindingLot[]) {
-      expect(resolveDisplayTurnLimit(lot)).toBe(
-        Math.min(MAX_WINDING_TURNS, computeMaxTurns(lot.windingWireGaugeMm, lot.windingParallelStrands)),
-      );
-    }
-  });
-
-  it('太線・並列巻きほど上限が下がる', () => {
-    expect(resolveDisplayTurnLimit({ ...LOT, windingWireGaugeMm: 0.6 }))
-      .toBeLessThan(resolveDisplayTurnLimit({ ...LOT, windingWireGaugeMm: 0.4 }));
-    expect(resolveDisplayTurnLimit({ ...LOT, windingParallelStrands: 2 }))
-      .toBeLessThan(resolveDisplayTurnLimit({ ...LOT, windingParallelStrands: 1 }));
   });
 });
 
@@ -315,5 +296,70 @@ describe('B-F8: 材料破棄で経過時間が持ち越されない', () => {
     expect(refs.offset).toBe(12_000);
     // 次の材料で始動した瞬間、12本のturnがcatch-upで湧く。
     expect(advanceTicks(INITIAL_TICK_STATE_FOR_TEST, refs.offset).ticks).toBe(12);
+  });
+});
+
+// P4-1C R3(2026-09-01人間承認): 線材破断。R3-D1/D4/D5の契約を固定する。
+describe('R3: 線材破断', () => {
+  const toWinding = (n: number) => reduceAll([
+    { kind: 'fixLot', lot: LOT }, { kind: 'setRecord', record: record(n) },
+  ]);
+
+  it('wireBrokeはwindingからのみ受理し、prefixを保持してbrokenへ移る', () => {
+    const winding = toWinding(20);
+    const broken = windingStepReducer(winding, { kind: 'wireBroke' });
+    expect(broken.kind).toBe('broken');
+    // 破断turnはrecordに含まれない。巻けたぶんだけが残る。
+    expect(currentRecord(broken)).toHaveLength(20);
+    expect(currentLot(broken)).toEqual(LOT);
+  });
+
+  it('winding以外ではwireBrokeを受理しない', () => {
+    const fixed = windingStepReducer(INITIAL_WINDING_STEP_STATE, { kind: 'fixLot', lot: LOT });
+    expect(windingStepReducer(fixed, { kind: 'wireBroke' })).toBe(fixed);
+    expect(windingStepReducer(INITIAL_WINDING_STEP_STATE, { kind: 'wireBroke' })).toBe(INITIAL_WINDING_STEP_STATE);
+    const review = reduceAll([
+      { kind: 'fixLot', lot: LOT }, { kind: 'setRecord', record: record(30) }, { kind: 'toReview' },
+    ]);
+    expect(windingStepReducer(review, { kind: 'wireBroke' })).toBe(review);
+  });
+
+  it('brokenでは完成を要求できない', () => {
+    const broken = windingStepReducer(toWinding(30), { kind: 'wireBroke' });
+    expect(canRequestCompletion(broken)).toBe(false);
+  });
+
+  it('brokenから受理するのはresetだけ', () => {
+    const broken = windingStepReducer(toWinding(20), { kind: 'wireBroke' });
+    for (const action of [
+      { kind: 'fixLot', lot: OTHER_LOT } as const,
+      { kind: 'changeLot' } as const,
+      { kind: 'setRecord', record: record(25) } as const,
+      { kind: 'toReview' } as const,
+      { kind: 'backToWinding' } as const,
+      { kind: 'wireBroke' } as const,
+      { kind: 'completionFailed', failure: { kind: 'persistFailed', detail: 'x' } } as const,
+    ]) {
+      expect(windingStepReducer(broken, action), action.kind).toBe(broken);
+    }
+    // resetだけが通り、lotPendingへ戻る。
+    expect(windingStepReducer(broken, { kind: 'reset' })).toEqual(INITIAL_WINDING_STEP_STATE);
+  });
+
+  it('resetで記録が消え、材料未確定へ戻る', () => {
+    const broken = windingStepReducer(toWinding(40), { kind: 'wireBroke' });
+    const after = windingStepReducer(broken, { kind: 'reset' });
+    expect(after.kind).toBe('lotPending');
+    expect(currentRecord(after)).toEqual([]);
+    expect(currentLot(after)).toBeNull();
+  });
+
+  it('消費ターン数はprefix+1で、破断契約と一致する', () => {
+    for (const n of [0, 1, 10, 30, 149]) {
+      const broken = windingStepReducer(toWinding(n), { kind: 'wireBroke' });
+      // 0ターンでもwindingへ入っていれば破断しうる(1本目で切れる)。
+      if (broken.kind !== 'broken') continue;
+      expect(currentRecord(broken).length + 1, `n=${n}`).toBe(n + 1);
+    }
   });
 });

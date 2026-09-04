@@ -25,7 +25,16 @@ import type { DegradationDiff, RunOutcome } from '../engine/destructionOrchestra
 import type { BearingAssemblyState, BodyPartState, EquipmentRole, InventoryItem, PlayerInventory, RotorAssemblyState, StackableStockEntry, WearState } from '../materials/inventoryItem';
 import { GEAR_TOTAL_TOOTH_COUNT } from '../materials/inventoryItem';
 import { resolveWindingRunnability, validateWindingRecord } from '../materials/windingRecord';
-import { resolveRotorAssemblyCompletion, type CompleteRotorAssemblyCommand, type CompleteRotorAssemblyFailure } from './rotorAssembly';
+import {
+  resolveRotorAssemblyCompletion,
+  resolveWireBreakConsumption,
+  resolveWindingTurnLimit,
+  type CompleteRotorAssemblyCommand,
+  type CompleteRotorAssemblyFailure,
+  type ConsumeWireOnBreakCommand,
+  type ConsumeWireOnBreakFailure,
+  type WindingTurnLimitLot,
+} from './rotorAssembly';
 import { BATTERY_MATERIALS, BODY_MATERIALS, BRUSH_MATERIALS, COATING_MATERIALS, GEAR_MATERIALS, MAGNET_MATERIALS, WIRE_MATERIALS } from '../materials/materials';
 import { DEFAULT_GARAGE_SELECTION, type GarageSelection } from '../data/partPresets';
 import type { CourseProgress, CourseRunRecord } from './gameStore';
@@ -1486,6 +1495,26 @@ export interface SaveStore {
   completeRotorAssemblyAction: (command: CompleteRotorAssemblyCommand) =>
     | { ok: true; rotorAssemblyId: string }
     | { ok: false; failure: CompleteRotorAssemblyFailure };
+
+  /**
+   * P4-1C R3(2026-09-01人間再承認、R3-D3): この工程で巻ける上限ターン数を返す**read-only query**。
+   *
+   * 在庫上限の権威は`resolveWindingTurnLimit`ただ1つで、**現在在庫はここが`get()`から読む**。
+   * UIはこの戻り値を表示にしか使わず、自前で在庫を読んだりclampしたりしない。
+   * 書込みは一切行わない。
+   */
+  resolveWindingTurnLimitQuery: (lot: WindingTurnLimitLot) => number;
+
+  /**
+   * P4-1C R3(同上、R3-D6): 破断時の線材消費。**破断ターンを含む本数分**を消費する。
+   *
+   * UIはロット(素材ID・線径・並列本数)と破断turn数だけを渡し、現在在庫はstoreが読む。
+   * 成功時だけ永続在庫を書き、`writeOrFail`が失敗したらメモリ上のstoreも更新しない。
+   * 工程stateは持たない——`ok:true`を受けてUI側reducerが`wireBroke`を送る(R3-D1)。
+   */
+  consumeWireOnBreakAction: (command: ConsumeWireOnBreakCommand) =>
+    | { ok: true; consumedM: number }
+    | { ok: false; failure: ConsumeWireOnBreakFailure };
 }
 
 function toShopEconomyState(inventory: PlayerInventory, nextItemCounter: number): ShopEconomyState {
@@ -1918,6 +1947,29 @@ export const useSaveStore = create<SaveStore>()(
         }
         applyFreshStateToStore(set, nextState);
         return { ok: true, rotorAssemblyId: assemblyId };
+      },
+
+      resolveWindingTurnLimitQuery: (lot) => {
+        // read-only。gate読取りに失敗しても書込みは行わず、上限0(=巻けない)を返す。
+        const gate = readGatedFreshState(set, get, false);
+        if (!gate.ok) return 0;
+        return resolveWindingTurnLimit(gate.fresh.inventory, lot);
+      },
+
+      consumeWireOnBreakAction: (command) => {
+        const gate = readGatedFreshState(set, get, true);
+        if (!gate.ok) return { ok: false, failure: { kind: 'persistFailed', detail: gateErrorToReasonJa(gate.error) } };
+        const fresh = gate.fresh;
+        const resolved = resolveWireBreakConsumption({ command, inventory: fresh.inventory });
+        if (!resolved.ok) return { ok: false, failure: resolved.failure };
+        // 動かすのは線材在庫だけ。ローター個体・装備・config・採番・所持金・図鑑・ノートは
+        // `fresh`のまま持ち越す(破断はローターを生成しない)。
+        const nextState: PersistedSaveState = { ...fresh, inventory: resolved.inventory };
+        if (!writeOrFail(set, nextState)) {
+          return { ok: false, failure: { kind: 'persistFailed', detail: gateErrorToReasonJa({ kind: 'storageError' }) } };
+        }
+        applyFreshStateToStore(set, nextState);
+        return { ok: true, consumedM: resolved.consumedM };
       },
 
       purchaseInstrumentAction: (instrumentId) => {

@@ -6,9 +6,8 @@
 // 記録の型・量子化・検証は`src/materials/windingRecord.ts`、入力規則は
 // `src/retro/winding/inputCommands.ts`、完成の可否は`src/store/rotorAssembly.ts`が
 // それぞれ単一出典であり、**本ファイルはどれも再実装しない**。
-import { MAX_WINDING_TURNS, MIN_RUNNABLE_WINDING_TURNS, type WindingRecord } from '../../materials/windingRecord';
-import { computeMaxTurns } from '../../engine/motorPhysics';
-import type { CompleteRotorAssemblyFailure } from '../../store/rotorAssembly';
+import { MIN_RUNNABLE_WINDING_TURNS, type WindingRecord } from '../../materials/windingRecord';
+import type { CompleteRotorAssemblyFailure, ConsumeWireOnBreakFailure } from '../../store/rotorAssembly';
 
 /**
  * 巻き始めに固定する加工値。**1ターン記録した後は変更できない**——
@@ -37,6 +36,16 @@ export type WindingStepState =
       /** **失敗しても記録は捨てない**。再試行で同じ記録から完成を試せる。 */
       readonly record: WindingRecord;
       readonly failure: CompleteRotorAssemblyFailure;
+    }
+  | {
+      readonly kind: 'broken';
+      readonly lot: WindingLot;
+      /**
+       * 破断直前のprefix。**破断したturnは含まない**(R3凍結契約)。
+       * 記録として残るのは切れる前に巻けたぶんだけで、切れたturnは
+       * 線材だけを消費して記録には入らない。
+       */
+      readonly record: WindingRecord;
     };
 
 export const INITIAL_WINDING_STEP_STATE: WindingStepState = { kind: 'lotPending' };
@@ -49,29 +58,30 @@ export type WindingStepAction =
   | { readonly kind: 'toReview' }
   | { readonly kind: 'backToWinding' }
   | { readonly kind: 'completionFailed'; readonly failure: CompleteRotorAssemblyFailure }
+  /**
+   * 線材が切れた(R3-D1)。**storeのResultが`ok:true`を返した直後にだけ**dispatchする。
+   * `ok:false`では呼ばない——在庫が減っていないのに工程だけ破断状態になると、
+   * 「消費済みの線材」と「巻けなかった記録」が食い違う。
+   *
+   * 破断後の消去・再開は既存`reset`だけを使い、専用actionを増やさない。
+   */
+  | { readonly kind: 'wireBroke' }
   | { readonly kind: 'reset' };
 
 /** 記録を持つ段階か。`changeLot`で確認が要るかの判断に使う。 */
 export function hasRecordedTurns(state: WindingStepState): boolean {
-  return (state.kind === 'winding' || state.kind === 'review' || state.kind === 'failed') && state.record.length > 0;
+  return (state.kind === 'winding' || state.kind === 'review' || state.kind === 'failed' || state.kind === 'broken')
+    && state.record.length > 0;
 }
 
 /** 現在の記録。まだ巻いていない段階では空配列。 */
 export function currentRecord(state: WindingStepState): WindingRecord {
-  return state.kind === 'winding' || state.kind === 'review' || state.kind === 'failed' ? state.record : [];
+  return state.kind === 'winding' || state.kind === 'review' || state.kind === 'failed' || state.kind === 'broken'
+    ? state.record : [];
 }
 
 export function currentLot(state: WindingStepState): WindingLot | null {
   return state.kind === 'lotPending' ? null : state.lot;
-}
-
-/**
- * この工程で巻ける上限。`computeMaxTurns`(物理)と記録スキーマ上限の小さい方。
- * **UIはこの値を表示にしか使わない**——完成の可否は`resolveRotorAssemblyCompletion`が
- * 単独で執行する(UI clampだけの二重契約を作らない、技術論点8)。
- */
-export function resolveDisplayTurnLimit(lot: WindingLot): number {
-  return Math.min(MAX_WINDING_TURNS, computeMaxTurns(lot.windingWireGaugeMm, lot.windingParallelStrands));
 }
 
 /** 完成ボタンを押せる段階か(押した結果の可否はstoreが決める)。 */
@@ -93,13 +103,17 @@ export function windingStepReducer(state: WindingStepState, action: WindingStepA
       return { kind: 'lotFixed', lot: action.lot };
     }
     case 'changeLot': {
-      if (state.kind === 'lotPending') return state;
+      // `broken`からは受理しない(R3-D1)。破断後に使える消去は既存`reset`だけで、
+      // 任意破棄の経路と混ざると「切れたのに材料を選び直した」状態が作れてしまう。
+      if (state.kind === 'lotPending' || state.kind === 'broken') return state;
       // **記録は全破棄する。部分切り詰めをしない**——残した一部が
       // 「どの材料で巻かれたか」を説明できなくなる。
       return { kind: 'lotPending' };
     }
     case 'setRecord': {
-      if (state.kind === 'lotPending') return state;
+      // `broken`からは受理しない(R3-D1)。切れた後に巻き足せると、
+      // 保持したprefixが「切れる前の記録」でなくなる。
+      if (state.kind === 'lotPending' || state.kind === 'broken') return state;
       if (state.kind === 'review' || state.kind === 'failed') {
         // 確認中・失敗後に巻き足す場合は巻線中へ戻す(理由表示を残したまま記録だけ変えない)。
         return { kind: 'winding', lot: state.lot, record: action.record };
@@ -117,6 +131,11 @@ export function windingStepReducer(state: WindingStepState, action: WindingStepA
     case 'completionFailed': {
       if (state.kind !== 'review' && state.kind !== 'failed') return state;
       return { kind: 'failed', lot: state.lot, record: state.record, failure: action.failure };
+    }
+    case 'wireBroke': {
+      // 巻いている最中にだけ切れる。確認中・失敗後・材料未確定では受理しない。
+      if (state.kind !== 'winding') return state;
+      return { kind: 'broken', lot: state.lot, record: state.record };
     }
     case 'reset':
       return INITIAL_WINDING_STEP_STATE;
@@ -141,6 +160,28 @@ export function describeCompletionFailure(failure: CompleteRotorAssemblyFailure)
       return '選んだ線材が見つかりません';
     case 'duplicateAssemblyId':
       return 'ローターの採番が重複しました';
+    case 'persistFailed':
+      return '保存できませんでした';
+  }
+}
+
+/**
+ * 破断時の線材消費が失敗した理由(R3-D6)。`kind`で分岐し、文字列判定をしない。
+ *
+ * この経路は本来起きない(上限内でしか巻けないため在庫は足りるはず)が、
+ * 改竄入力・他タブ競合・破損saveに対するfail-closedとして理由を出す。
+ * 原因の断定も次の操作の指示もしない。
+ */
+export function describeBreakConsumptionFailure(failure: ConsumeWireOnBreakFailure): string {
+  switch (failure.kind) {
+    case 'unknownWireMaterial':
+      return '選んだ線材が見つかりません';
+    case 'invalidTurnCount':
+      return `巻き数が正しくありません(${failure.count}ターン / この工程の上限は${failure.limit}ターン)`;
+    case 'insufficientWire':
+      // 上限resolverが在庫項を含むため、現契約では在庫不足も`invalidTurnCount`側で落ちる。
+      // この枝は上限resolverと消費関数が将来ずれた場合の最後の砦として残す。
+      return `線材が足りません(必要${failure.requiredM}メートル / 残り${failure.availableM}メートル)`;
     case 'persistFailed':
       return '保存できませんでした';
   }

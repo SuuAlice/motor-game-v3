@@ -5,6 +5,7 @@
 // 迂回して直接dispatchすれば契約は空文化する(実際にそうなっていた)。
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
+import { describeBreakConsumptionFailure } from '../windingStepState';
 
 /** コメントを落とす。説明文中の語をimplementationと数えない。 */
 function strip(source: string): string {
@@ -138,10 +139,20 @@ describe('production巻線UIはcoilTurnsを独立編集しない', () => {
     expect(winding).not.toContain('SliderRow');
   });
 
-  it('上限は表示だけに使い、独自の上限式を持たない', () => {
-    expect(winding).toContain('resolveDisplayTurnLimit');
+  it('上限はstore権威を受け取るだけで、独自の上限式を持たない(R3-D3)', () => {
+    // 旧`resolveDisplayTurnLimit`(UI独自計算)は廃止し、propsで受け取る形へ移した。
+    expect(winding).not.toContain('resolveDisplayTurnLimit');
+    expect(winding).toContain('resolveTurnLimit');
     expect(winding).not.toContain('computeMaxTurns(');
     expect(winding).not.toContain('Math.min(prev.coilTurns');
+  });
+
+  it('UIは在庫を直接読まない(R3-D3)', () => {
+    // storeへの参照は破断消費actionの1点だけ。在庫そのものは読まない。
+    // (上限はprops経由の権威値、消費はaction。どちらもUIが在庫を触らない形。)
+    expect(winding).not.toContain('stackableStock');
+    expect(winding).not.toContain('state.inventory');
+    expect(winding).not.toContain('resolveWindingTurnLimitQuery');
   });
 });
 
@@ -237,5 +248,141 @@ describe('U2: 巻き数を操作パッド内に常設する', () => {
     const chooser = winding.slice(winding.indexOf('function LotChooser'));
     expect(chooser.match(/useState[<(]/g)).toHaveLength(3);
     expect(chooser.match(/useRef[<(]/g)).toBeNull();
+  });
+});
+
+// P4-1C R3(2026-09-01人間承認): 破断表示と再開導線がUI経路へ繋がっていること。
+describe('R3: 破断後の再開は確認dialogを出さない', () => {
+  const start = winding.indexOf('const restartAfterBreak');
+  const restart = winding.slice(start, winding.indexOf('};', start));
+
+  it('restartAfterBreakはconfirmを通さず、既存resetだけを使う', () => {
+    expect(restart).not.toContain('window.confirm');
+    expect(restart).toContain("dispatchWinding({ kind: 'reset' })");
+    // 専用の消去actionを増やしていない。
+    expect(winding).not.toContain('discardBroken');
+  });
+
+  it('任意破棄の確認dialogは維持する', () => {
+    const discard = winding.slice(winding.indexOf('const discardLot'), winding.indexOf('const fixLot'));
+    expect(discard).toContain('window.confirm');
+    expect(discard).toContain("kind: 'changeLot'");
+  });
+
+  it('reset dispatchは破断後の再開1箇所だけ', () => {
+    expect(winding.match(/kind: 'reset'/g)).toHaveLength(1);
+  });
+});
+
+describe('R3: 破断時の表示', () => {
+  it('状態文・ボタン・消費事実が確定文言どおり', () => {
+    expect(winding).toContain('線材が切れました。この巻線は完成できません。');
+    expect(winding).toContain('新しい線材で巻き直す');
+    expect(winding).toContain('切れるまでに${record.length + 1}ターン分の線材を使いました。');
+  });
+
+  it('原因断定・助言・評価語を出さない', () => {
+    for (const banned of ['引きすぎ', '緩すぎ', '原因', 'おすすめ', '推奨', '注意してください']) {
+      expect(winding, banned).not.toContain(banned);
+    }
+  });
+
+  it('破断中は治具操作を受け付けない', () => {
+    const pad = winding.slice(winding.indexOf('role="application"'), winding.indexOf('キーボード: A/D'));
+    expect(pad).toContain('if (broken) return;');
+  });
+
+  it('破断中は巻き操作のボタンを出さず、再開ボタンだけを出す', () => {
+    expect(winding).toContain('{broken && (');
+    expect(winding).toContain('{!broken && (');
+  });
+
+  it('破断専用の描画・色・記号を足していない(既存巻線図がprefixを描く)', () => {
+    // WindingTraceViewの呼び出しは1箇所のまま。破断用の別ビューを作らない。
+    expect(winding.match(/<WindingTraceView/g)).toHaveLength(1);
+    expect(winding).not.toMatch(/broken.*(PALETTE|fillStyle|strokeStyle)/);
+  });
+
+  it('role="status"を増やさない', () => {
+    expect(winding.match(/role="status"/g)).toHaveLength(2);
+  });
+});
+
+// P4-1C R3-D6: 破断判定→store消費→dispatchの順序と、失敗時の非dispatch。
+describe('R3: store成功時だけwireBrokeをdispatchする', () => {
+  const body = winding.slice(winding.indexOf('const runCommands'), winding.indexOf('const runCommand ='));
+
+  it('判定はalice側の純関数と較正値を使い、UIで式や定数を複製しない', () => {
+    expect(body).toContain('willWindingBreak(state.record, state.tension, PRODUCTION_WINDING_BREAK)');
+    // 較正値のリテラル複製がない。
+    expect(winding).not.toContain('224');
+    expect(winding).not.toContain('breakExposure');
+    expect(winding).not.toContain('safeTension');
+    // 累積をUIが保持していない。
+    expect(winding).not.toContain('exposure');
+  });
+
+  it('記録へ追加する前に判定する(破断ターンはrecordに入らない)', () => {
+    const judge = body.indexOf('willWindingBreak');
+    const apply = body.indexOf('applyWindingCommand(state, command)');
+    expect(judge).toBeGreaterThan(-1);
+    expect(apply).toBeGreaterThan(judge);
+  });
+
+  it('消費ターン数はprefix+1でstoreへ渡す', () => {
+    expect(body).toContain('brokenTurnCount: state.record.length + 1');
+  });
+
+  it('lotは入れ子のまま渡す(平坦化しない)', () => {
+    // storeが線径込みで物理上限・在庫上限を再検証できる形。UIでfieldを組み直さない。
+    expect(body).toContain('consumeWireOnBreak({ lot, brokenTurnCount:');
+    expect(body).not.toContain('wireMaterialId: lot.wireMaterialId');
+    expect(body).not.toContain('windingParallelStrands: lot.windingParallelStrands');
+  });
+
+  it('ok:falseではdispatchせず、理由だけを出す', () => {
+    const failure = body.slice(body.indexOf('if (!consumed.ok)'), body.indexOf("dispatchWinding({ kind: 'wireBroke' })"));
+    expect(failure).toContain('describeBreakConsumptionFailure');
+    expect(failure).toContain('return;');
+    expect(failure).not.toContain('wireBroke');
+  });
+
+  it('wireBrokeのdispatchは消費成功後の1箇所だけ', () => {
+    expect(winding.match(/kind: 'wireBroke'/g)).toHaveLength(1);
+    const dispatchAt = body.indexOf("dispatchWinding({ kind: 'wireBroke' })");
+    expect(body.indexOf('consumeWireOnBreak({')).toBeLessThan(dispatchAt);
+  });
+
+  it('書込みactionは破断消費の1つだけ(UIが在庫を読まない)', () => {
+    expect(winding.match(/useSaveStore\(/g)).toHaveLength(1);
+    expect(winding).toContain('state.consumeWireOnBreakAction');
+    expect(winding).not.toContain('stackableStock');
+  });
+});
+
+// P4-1C R3 store境界是正(2026-09-02人間再承認): failure unionへinvalidTurnCountが加わった。
+// 承認済み7ファイル閉包を保つため、この2件はwiring側へ置く。
+describe('describeBreakConsumptionFailure', () => {
+  it('4枝すべてに文言を返す', () => {
+    expect(describeBreakConsumptionFailure({ kind: 'unknownWireMaterial', materialId: 'x' }))
+      .toBe('選んだ線材が見つかりません');
+    expect(describeBreakConsumptionFailure({ kind: 'invalidTurnCount', count: 151, limit: 62 }))
+      .toBe('巻き数が正しくありません(151ターン / この工程の上限は62ターン)');
+    expect(describeBreakConsumptionFailure({ kind: 'insufficientWire', requiredM: 5, availableM: 2 }))
+      .toBe('線材が足りません(必要5メートル / 残り2メートル)');
+    expect(describeBreakConsumptionFailure({ kind: 'persistFailed', detail: 'x' }))
+      .toBe('保存できませんでした');
+  });
+
+  it('原因断定・推奨修正を含まず、単位を省かない', () => {
+    const all = [
+      describeBreakConsumptionFailure({ kind: 'invalidTurnCount', count: 0, limit: 30 }),
+      describeBreakConsumptionFailure({ kind: 'insufficientWire', requiredM: 5, availableM: 2 }),
+    ].join(' ');
+    for (const banned of ['原因', '推奨', 'おすすめ', '引きすぎ', 'べきです']) {
+      expect(all, banned).not.toContain(banned);
+    }
+    expect(all).toContain('ターン');
+    expect(all).toContain('メートル');
   });
 });

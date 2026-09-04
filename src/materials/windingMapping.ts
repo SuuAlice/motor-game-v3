@@ -105,6 +105,91 @@ export function computeTensionPackingRatio(meanTension: number, calibration: Ten
   return minPackingRatio + (1 - minPackingRatio) * Math.min(1, meanTension / referenceTension);
 }
 
+// ---------------------------------------------------------------------------
+// P4-1C R3(C3張力破断、2026-09-01人間再承認): 極端な高張力の継続による線材破断。
+//
+// **素材非依存の`designAssumption`である**。H8の一次資料調査で、同一条件(丸線・エナメル被覆・
+// 同一径・同一規格)で最大巻線張力を比較できたのは銅のみ(ELEKTRISOLA IEC/JIS、0.400 mmで854 cN)で、
+// アルミ線・純銀線・銀メッキ銅線は一次資料が揃わなかった。銅値を他素材へ外挿せず、
+// 0..1張力への数値換算も行わない——854 cNは「この現象が実在する」ことの参考であって、
+// 下記定数の導出根拠ではない(R3-D7)。素材別破断値はC3では実装しない。
+// ---------------------------------------------------------------------------
+
+export interface WindingBreakCalibration {
+  /** これ以下の張力では超過が0となり、何ターン巻いても破断しない安全域の上端。 */
+  readonly safeTension: number;
+  /** 累積超過がこの値を**超えた**ときに破断する(等号では破断しない)。 */
+  readonly breakExposure: number;
+}
+
+/**
+ * production確定値(2026-09-01人間再承認、R3-E2)。25候補のread-only sweepから選定した。
+ *
+ * `safeTension = 224/256 = 0.875`・`breakExposure = 4`のとき、最大張力を巻き続けると
+ * **33ターン目で破断**する。選定理由(実測):
+ *  - `MIN_RUNNABLE_WINDING_TURNS`=10に対し33なので、最大張力でも30ターン級は完成できる
+ *    (破断ターンが10以下の候補は「最大張力では走行可能な巻線を1本も作れない」になる)。
+ *  - 50・80・150ターンでは破断するため、「長く巻くほど張力を抑える」トレードオフが常用域に出る。
+ *  - 安全域だけでC1の占積利益の87.5%が無リスクで取れ、危険域は最後の12.5%を賭ける形になる。
+ *  - 最大/0の交互では65ターンまで伸び、「引きっぱなしが悪い」ことが累積の性質から出る。
+ * 変更には人間再承認を要する。
+ */
+export const PRODUCTION_WINDING_BREAK: WindingBreakCalibration = {
+  safeTension: 224 / 256,
+  breakExposure: 4,
+};
+
+/**
+ * 1ターン分の超過張力(純関数)。`max(0, tension − safeTension)`。
+ *
+ * 事前条件違反はfail-fastでthrowする(`computeTensionPackingRatio`と同じ規律)。clampしない。
+ */
+export function computeTensionExcess(tension: number, calibration: WindingBreakCalibration): number {
+  if (!Number.isFinite(tension) || tension < 0 || tension > 1) {
+    throw new Error(`computeTensionExcess: tensionが0〜1の有限値ではありません: ${String(tension)}`);
+  }
+  const { safeTension, breakExposure } = calibration;
+  if (!Number.isFinite(safeTension) || safeTension < 0 || safeTension > 1) {
+    throw new Error(`computeTensionExcess: safeTensionが0〜1の有限値ではありません: ${String(safeTension)}`);
+  }
+  if (!Number.isFinite(breakExposure) || breakExposure <= 0) {
+    throw new Error(`computeTensionExcess: breakExposureが正の有限値ではありません: ${String(breakExposure)}`);
+  }
+  return Math.max(0, tension - safeTension);
+}
+
+/**
+ * 記録済みprefixと候補ターンから累積超過を導出する(純関数)。
+ *
+ * **毎回prefixから計算し直す**。累積値を`WindingInputState`や保存schemaへ持たせない——
+ * 持たせると「記録と累積が食い違った状態」が構築可能になり、復元時に検証する術がなくなる。
+ * 緩いターンでは超過0が足されるだけで、**減少も0リセットもしない**(R3-D8確定、回復規則なし)。
+ */
+export function computeTensionExposure(
+  prefix: WindingRecord,
+  nextTension: number,
+  calibration: WindingBreakCalibration,
+): number {
+  let exposure = 0;
+  for (const turn of prefix) exposure += computeTensionExcess(turn.tension, calibration);
+  return exposure + computeTensionExcess(nextTension, calibration);
+}
+
+/**
+ * 候補ターンを**記録へ追加する前**の破断判定(純関数)。
+ *
+ * `true`のとき、そのターンは記録へ追加せず(prefixは`prefix`のまま)、
+ * **破断ターンを含む本数分**の線材を消費する(消費 = `prefix.length + 1`ターン分)。
+ * 等号(`exposure === breakExposure`)では破断しない——境界は厳密な`>`である。
+ */
+export function willWindingBreak(
+  prefix: WindingRecord,
+  nextTension: number,
+  calibration: WindingBreakCalibration,
+): boolean {
+  return computeTensionExposure(prefix, nextTension, calibration) > calibration.breakExposure;
+}
+
 /**
  * 巻線記録から`MotorConfig`の3フィールドを導出する(純関数)。
  *

@@ -82,6 +82,28 @@ export function computeConsumedWireM(turnCount: number, parallelStrands: number)
 }
 
 /**
+ * P4-1C R3(2026-09-01人間再承認): 在庫長から巻ける上限ターン数 [ターン]。
+ *
+ * `computeConsumedWireM`の逆算だけを使い、**新しい定数を導入しない**——1ターン分の消費長を
+ * 同関数から取り、それで割って切り捨てる。両者が同じ`WINDING_MEAN_RADIUS_M`を見るため、
+ * 「上限を満たしているのに消費で足りない」という食い違いが構造的に起きない。
+ *
+ * 非有限・0以下の在庫は0を返す(fail-closed。負の上限やNaNを下流へ流さない)。
+ */
+export function computeMaxTurnsByStock(availableM: number, parallelStrands: 1 | 2): number {
+  if (!Number.isFinite(availableM) || availableM <= 0) return 0;
+  // 1ターン分で割って概算し、**実際の消費関数と突き合わせて補正する**。
+  // 単純な除算+floorだけで確定させると、`computeConsumedWireM(n)`と
+  // `computeConsumedWireM(1) × n`の丸め差(最終ULP)により「上限は満たすのに消費で足りない」
+  // 1ターンのずれが起こる(在庫ちょうど30ターン分で上限29が返る事象を実測した)。
+  // 上限の意味を「消費関数がその本数を在庫内に収める最大の本数」と定義し直し、両者を一致させる。
+  let turns = Math.floor(availableM / computeConsumedWireM(1, parallelStrands));
+  while (turns > 0 && computeConsumedWireM(turns, parallelStrands) > availableM) turns -= 1;
+  while (computeConsumedWireM(turns + 1, parallelStrands) <= availableM) turns += 1;
+  return turns;
+}
+
+/**
  * 導線の巻き線体積 [m³]。
  * lengthM = coilTurns × 2π × WINDING_MEAN_RADIUS_M
  * crossSectionM2 = π × (wireGaugeMm / 1000 / 2)²(導体径として扱う設計仮定、被膜厚は含まない)

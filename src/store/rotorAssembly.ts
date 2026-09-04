@@ -12,7 +12,7 @@
 import { computeMaxTurns, isValidWindingTurnsRatio, type MotorConfig } from '../engine/motorPhysics';
 import { deriveWindingMotorFields } from '../materials/windingMapping';
 import type { PlayerInventory, RotorAssemblyState } from '../materials/inventoryItem';
-import { computeConsumedWireM } from '../materials/assumedGeometry';
+import { computeConsumedWireM, computeMaxTurnsByStock } from '../materials/assumedGeometry';
 import {
   validateWindingRecord,
   resolveWindingRunnability,
@@ -94,6 +94,138 @@ export type ResolveRotorAssemblyCompletionResult =
     }
   | { readonly ok: false; readonly failure: CompleteRotorAssemblyFailure };
 
+// ---------------------------------------------------------------------------
+// P4-1C R3(2026-09-01人間再承認、R3-D3/D6): 在庫上限の唯一の権威と、破断時の線材消費。
+// ---------------------------------------------------------------------------
+
+/**
+ * 在庫上限の判定に要る固定加工値。`WindingLot`(UI層)はこの形へ**構造的に代入可能**なので、
+ * store層がcomponents層をimportせずに済む。**在庫量はここに持たせない**(R3-D3)——
+ * lotへ在庫を焼き込むと、在庫が変わったのにlotが古い値を持ち続ける状態が構築できる。
+ */
+export interface WindingTurnLimitLot {
+  readonly wireMaterialId: string;
+  readonly windingWireGaugeMm: number;
+  readonly windingParallelStrands: 1 | 2;
+}
+
+/** 在庫から当該線材の残量[m]を読む。未所持・未知素材はいずれも0(呼出し側が理由を分ける)。 */
+function readWireStockM(inventory: PlayerInventory, wireMaterialId: string): number {
+  const entry = inventory.stackableStock.find((e) => e.family === 'wire' && e.materialId === wireMaterialId);
+  return entry !== undefined && entry.family === 'wire' ? entry.quantityM : 0;
+}
+
+/**
+ * この工程で巻ける上限ターン数。**在庫上限の唯一の権威**(R3-D3)。
+ * 物理(`computeMaxTurns`)・記録スキーマ(`MAX_WINDING_TURNS`)・在庫(`computeMaxTurnsByStock`)の最小値。
+ *
+ * **1ターン分の留保を入れない**(R3-D2確定)。破断ターンが`N`なら保持prefixは`N−1`・消費は`N`で、
+ * 在庫がちょうど`N`ターン分あれば`N`本目の試行で破断しても消費`N`を満たす。上限`N`到達後は
+ * `N+1`本目を試行させないため、正常経路で「prefix=Nの後にN+1本目が破断」は構築されない。
+ * 常時1ターン留保すると、破断しない通常の完成でも利用可能在庫より1ターン少なくなる。
+ */
+export function resolveWindingTurnLimit(inventory: PlayerInventory, lot: WindingTurnLimitLot): number {
+  return Math.min(
+    MAX_WINDING_TURNS,
+    computeMaxTurns(lot.windingWireGaugeMm, lot.windingParallelStrands),
+    computeMaxTurnsByStock(readWireStockM(inventory, lot.wireMaterialId), lot.windingParallelStrands),
+  );
+}
+
+/**
+ * UIが渡せるのは固定加工値(`lot`)と破断ターン数だけ(R3-D6、2026-09-02補足裁定で案B確定)。
+ * 現在在庫はstoreが読む。
+ *
+ * **`lot`を平坦化せず入れ子で持つ**——`resolveWindingTurnLimit`が受ける`WindingTurnLimitLot`と
+ * 同一実体をそのまま渡せるため、「上限判定に使ったlotと消費に使った素材が食い違う」状態が
+ * 構造的に作れない。平坦化すると3fieldを個別に組み直せてしまい、その食い違いが構築可能になる。
+ */
+export interface ConsumeWireOnBreakCommand {
+  readonly lot: WindingTurnLimitLot;
+  /** 破断したターンの通し番号(1始まり)。保持prefix長 + 1 と一致する。 */
+  readonly brokenTurnCount: number;
+}
+
+/**
+ * 破断消費の失敗理由。**4 kindだけ**とし`CompleteRotorAssemblyFailure`を流用しない——
+ * `duplicateAssemblyId`等は破断経路で構造的に起こり得ず、流用すると到達不能な分岐を
+ * UI文言側にも増やす。
+ */
+export type ConsumeWireOnBreakFailure =
+  | { readonly kind: 'unknownWireMaterial'; readonly materialId: string }
+  /**
+   * 破断ターン数が`1..resolveWindingTurnLimit`の整数でない。下限は常に1なので`limit`だけを返す。
+   * 負値・0・非整数・NaN・Infinity・スキーマ上限超過・物理上限超過・在庫上限超過を**この1kindで表す**
+   * (2026-09-02補足裁定・案B)。
+   */
+  | { readonly kind: 'invalidTurnCount'; readonly count: number; readonly limit: number }
+  | { readonly kind: 'insufficientWire'; readonly requiredM: number; readonly availableM: number }
+  | { readonly kind: 'persistFailed'; readonly detail: string };
+
+export type ResolveWireBreakConsumptionResult =
+  | { readonly ok: true; readonly inventory: PlayerInventory; readonly consumedM: number }
+  | { readonly ok: false; readonly failure: ConsumeWireOnBreakFailure };
+
+/**
+ * 破断時の線材消費の解決(純関数)。**破断ターンを含む本数分**を消費する(R3-D5)。
+ *
+ * 線長は`computeConsumedWireM`が単一出典で、ここで式を書き直さない。
+ * 在庫不足では**0 clampも部分消費もしない**——`insufficientWire`で拒否し在庫を一切変えない。
+ * 正常経路では`resolveWindingTurnLimit`が`brokenTurnCount`を上限内に抑えるため到達しないが、
+ * 改竄入力・古い表示・他タブ競合・破損saveに対するfail-closedとして残す(R3-D2)。
+ */
+export function resolveWireBreakConsumption(input: {
+  readonly command: ConsumeWireOnBreakCommand;
+  readonly inventory: PlayerInventory;
+}): ResolveWireBreakConsumptionResult {
+  const { command, inventory } = input;
+  const { lot, brokenTurnCount } = command;
+  if (!WIRE_MATERIAL_IDS.has(lot.wireMaterialId)) {
+    return { ok: false, failure: { kind: 'unknownWireMaterial', materialId: lot.wireMaterialId } };
+  }
+
+  // **消費計算より前に定義域を閉じる**(2026-09-02補足裁定・案B)。`computeConsumedWireM`は
+  // 線長規約の単一出典であって入力の定義域を守る責務を持たないため、生の`brokenTurnCount`を
+  // そのまま渡すと負値で消費が負になり**在庫が増え**、NaNで**在庫がNaNになって保存が壊れる**。
+  // 完成経路では`validateWindingRecord`済みの`record.length`しか渡らないので露出しなかった穴で、
+  // UI由来の生値が初めて届く本経路で閉じる必要がある。
+  // 整数性と上限を1つのゲートで見る——負値・0・非整数・NaN・Infinity・スキーマ上限超過・
+  // 物理上限超過・在庫上限超過がすべてここで落ちる。
+  const limit = resolveWindingTurnLimit(inventory, lot);
+  // **承認式をそのまま否定する形で書く**。`!isInteger || count < 1 || count > limit`という
+  // ド・モルガン展開は等価ではない——`limit`がNaN(例: `lot.windingWireGaugeMm`がNaNで
+  // `computeMaxTurns`がNaNを返す)のとき`count > limit`はfalseになり、**受理側へ抜ける**。
+  // 承認式`isInteger(count) && 1 <= count && count <= limit`は`count <= NaN`がfalseなので
+  // 全体がfalseになり、否定して正しく拒否できる。比較のNaN伝播を跨ぐ書き換えをしない。
+  if (!(Number.isInteger(brokenTurnCount) && brokenTurnCount >= 1 && brokenTurnCount <= limit)) {
+    return { ok: false, failure: { kind: 'invalidTurnCount', count: brokenTurnCount, limit } };
+  }
+
+  const requiredM = computeConsumedWireM(brokenTurnCount, lot.windingParallelStrands);
+  const availableM = readWireStockM(inventory, lot.wireMaterialId);
+  // `resolveWindingTurnLimit`は在庫項(`computeMaxTurnsByStock`)を含むため、上のゲートを
+  // 通った時点で`availableM >= requiredM`が保証される。**到達不能だが残す**——上限resolverと
+  // 消費関数が将来ずれた場合に、在庫を負値へ落とす前に止まる最後の砦であり、
+  // 不足メートル数という上のkindでは出せない情報も持つ。
+  if (availableM < requiredM) {
+    return { ok: false, failure: { kind: 'insufficientWire', requiredM, availableM } };
+  }
+  return {
+    ok: true,
+    consumedM: requiredM,
+    // **線材在庫だけを動かす**。ローター個体・装備・config・採番・所持金・図鑑・ノートは
+    // 触らない——破断はローターを生成しないため(R3凍結契約)。
+    inventory: {
+      ...inventory,
+      stackableStock: inventory.stackableStock.map((entry) =>
+        entry.family === 'wire' && entry.materialId === lot.wireMaterialId
+          ? { ...entry, quantityM: entry.quantityM - requiredM }
+          : entry,
+      ),
+    },
+  };
+}
+
 /**
  * 巻線完成の解決(純関数)。線材在庫の消費・ローター個体の生成・装備の差し替えを
  * **1つのResultとして**返す。途中保存・二段commitはしない。
@@ -149,11 +281,21 @@ export function resolveRotorAssemblyCompletion(
   }
 
   const requiredM = computeConsumedWireM(record.length, command.windingParallelStrands);
-  const stockEntry = inventory.stackableStock.find(
-    (entry) => entry.family === 'wire' && entry.materialId === command.wireMaterialId,
-  );
-  const availableM = stockEntry !== undefined && stockEntry.family === 'wire' ? stockEntry.quantityM : 0;
+  const availableM = readWireStockM(inventory, command.wireMaterialId);
   if (availableM < requiredM) {
+    return { ok: false, failure: { kind: 'insufficientWire', requiredM, availableM } };
+  }
+
+  // P4-1C R3(R3-D3): 在庫上限は`resolveWindingTurnLimit`が唯一の権威。完成側もここで
+  // 同じ純関数を通し、表示・破断消費と判断が割れないようにする。**上の在庫判定を
+  // これに置き換えない**——`insufficientWire`は「あと何メートル足りないか」を返せるが、
+  // 上限の再検証は本数しか言えず、失敗理由の情報量が落ちるため両方を通す。
+  const turnLimit = resolveWindingTurnLimit(inventory, {
+    wireMaterialId: command.wireMaterialId,
+    windingWireGaugeMm: command.windingWireGaugeMm,
+    windingParallelStrands: command.windingParallelStrands,
+  });
+  if (record.length > turnLimit) {
     return { ok: false, failure: { kind: 'insufficientWire', requiredM, availableM } };
   }
 

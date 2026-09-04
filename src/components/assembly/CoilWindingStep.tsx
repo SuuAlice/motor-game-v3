@@ -23,13 +23,15 @@ import {
 import {
   canRequestCompletion,
   currentLot,
+  describeBreakConsumptionFailure,
   currentRecord,
   hasRecordedTurns,
-  resolveDisplayTurnLimit,
   type WindingLot,
 } from './windingStepState';
 import { MIN_RUNNABLE_WINDING_TURNS } from '../../materials/windingRecord';
 import { WIRE_MATERIALS } from '../../materials/materials';
+import { PRODUCTION_WINDING_BREAK, willWindingBreak } from '../../materials/windingMapping';
+import { useSaveStore } from '../../store/saveStore';
 import { WindingTraceView } from './WindingTraceView';
 
 /** 選べる線径。既存の①工程が持っていた範囲(0.2〜0.8mm)をそのまま離散化した。 */
@@ -37,7 +39,9 @@ const WIRE_GAUGES_MM = [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8] as const;
 
 const ARM_LABEL = { left: '左腕', right: '右腕', straddle: '中央またぎ' } as const;
 
-export function CoilWindingStep({ winding, dispatchWinding }: AssemblyStepProps) {
+export function CoilWindingStep({ winding, dispatchWinding, resolveTurnLimit }: AssemblyStepProps) {
+  // 破断時の線材消費(R3-D6)。**書込みはこのactionだけ**で、在庫はstoreが読む。
+  const consumeWireOnBreak = useSaveStore((state) => state.consumeWireOnBreakAction);
   const lot = currentLot(winding);
   const record = currentRecord(winding);
   // 治具の保持状態(位置・腕・張力・方向)。記録からは導けないので入力state側で持つ。
@@ -48,7 +52,9 @@ export function CoilWindingStep({ winding, dispatchWinding }: AssemblyStepProps)
   const runStartMsRef = useRef<number | null>(null);
   const runningOffsetMsRef = useRef(0);
 
-  const limit = lot === null ? 0 : resolveDisplayTurnLimit(lot);
+  const broken = winding.kind === 'broken';
+  // 上限はstore権威(R3-D3)。UIは受け取った値を表示に使うだけで、再計算もclampもしない。
+  const limit = lot === null ? 0 : resolveTurnLimit(lot);
   // 上限は**表示のためだけ**に使う。完成の可否はstoreのvalidatorが単独で執行する。
   const atLimit = lot !== null && record.length >= limit;
 
@@ -79,9 +85,17 @@ export function CoilWindingStep({ winding, dispatchWinding }: AssemblyStepProps)
     let state = workingRef.current;
     const before = state.record;
     let reason: string | null = null;
+    let broke = false;
     for (const command of commands) {
       if (command.kind === 'advanceTurn' && state.record.length >= limit) {
         reason = `この線径では最大${limit}ターンまでです`;
+        break;
+      }
+      // **記録へ追加する前に**判定する(R3凍結契約)。破断したターンは記録に入らず、
+      // 線材だけを消費する。較正値はalice側の単一出典をそのまま渡し、UIで複製しない。
+      if (command.kind === 'advanceTurn'
+        && willWindingBreak(state.record, state.tension, PRODUCTION_WINDING_BREAK)) {
+        broke = true;
         break;
       }
       const next = applyWindingCommand(state, command);
@@ -90,8 +104,22 @@ export function CoilWindingStep({ winding, dispatchWinding }: AssemblyStepProps)
     }
     workingRef.current = state;
     setInput(state);
-    setRejectReason(reason);
     if (state.record !== before) dispatchWinding({ kind: 'setRecord', record: state.record });
+
+    if (!broke) { setRejectReason(reason); return; }
+
+    // 消費が確定してからだけ工程を破断状態にする。**ok:falseではdispatchしない**——
+    // 在庫が減っていないのに工程だけ切れると、消費済み線材と記録が食い違う。
+    setRunning(false);
+    // `lot`は入れ子のまま渡す(平坦化しない)。storeが線径込みで物理上限・在庫上限を
+    // 再検証できるようにするための形で、UI側で組み直さない。
+    const consumed = consumeWireOnBreak({ lot, brokenTurnCount: state.record.length + 1 });
+    if (!consumed.ok) {
+      setRejectReason(describeBreakConsumptionFailure(consumed.failure));
+      return;
+    }
+    setRejectReason(null);
+    dispatchWinding({ kind: 'wireBroke' });
   };
 
   const runCommand = (command: WindingCommand) => runCommands([command]);
@@ -174,13 +202,23 @@ export function CoilWindingStep({ winding, dispatchWinding }: AssemblyStepProps)
     dispatchWinding({ kind: 'fixLot', lot: next });
   };
 
+  /**
+   * 破断後の再開(R3-D4)。**確認dialogを出さない**——線材は既に切れており、
+   * 「捨てますか」と尋ねる対象が残っていない。任意破棄(`discardLot`)の確認は
+   * そのまま維持し、こちらは既存`reset`だけを使う(専用actionを増やさない)。
+   */
+  const restartAfterBreak = () => {
+    resetJig();
+    dispatchWinding({ kind: 'reset' });
+  };
+
   if (lot === null) {
     return (
       <div className="flex flex-col gap-3 rounded-lg bg-white p-6 shadow-sm">
         <p className="text-sm text-slate-600">
           巻き始める前に、線材・線径・並列本数を決めます。巻き始めたあとは変えられません。
         </p>
-        <LotChooser onFix={fixLot} />
+        <LotChooser onFix={fixLot} resolveTurnLimit={resolveTurnLimit} />
       </div>
     );
   }
@@ -194,16 +232,18 @@ export function CoilWindingStep({ winding, dispatchWinding }: AssemblyStepProps)
         aria-label="巻線治具。軸は自動で回ります。指やマウスで導線を左右へ動かすとガイド位置、下へ引くほど張力が強くなります"
         tabIndex={0}
         onPointerDown={(event) => {
+          if (broken) return;
           event.currentTarget.setPointerCapture(event.pointerId);
           handlePad(event);
         }}
         onPointerMove={(event) => {
-          if (!event.currentTarget.hasPointerCapture(event.pointerId)) return;
+          if (broken || !event.currentTarget.hasPointerCapture(event.pointerId)) return;
           handlePad(event);
         }}
         onPointerUp={(event) => event.currentTarget.releasePointerCapture(event.pointerId)}
         onPointerCancel={(event) => event.currentTarget.releasePointerCapture(event.pointerId)}
         onKeyDown={(event) => {
+          if (broken) return;
           if (event.key === ' ') { event.preventDefault(); setRunning((value) => !value); return; }
           const command = resolveJigKeyCommand(event.key, input);
           if (command === null) return;
@@ -221,9 +261,11 @@ export function CoilWindingStep({ winding, dispatchWinding }: AssemblyStepProps)
             巻き数 <span className="font-bold tabular-nums">{record.length} / {limit}</span> ターン
           </span>
           <span>
-            {atLimit
-              ? `これ以上巻けません(上限${limit}ターン)`
-              : running ? '回転中。導線を動かしてください(1秒=1ターン)' : '停止中。始動すると軸が回ります'}
+            {winding.kind === 'broken'
+              ? '線材が切れました。この巻線は完成できません。'
+              : atLimit
+                ? `これ以上巻けません(上限${limit}ターン)`
+                : running ? '回転中。導線を動かしてください(1秒=1ターン)' : '停止中。始動すると軸が回ります'}
           </span>
         </div>
       </div>
@@ -233,15 +275,25 @@ export function CoilWindingStep({ winding, dispatchWinding }: AssemblyStepProps)
       </p>
 
       <div className="flex flex-wrap gap-2">
+        {broken && (
+          <button type="button" onClick={restartAfterBreak}
+            className="min-h-[44px] rounded-lg bg-amber-600 px-4 py-2 font-bold text-white">
+            新しい線材で巻き直す
+          </button>
+        )}
+        {!broken && (
         <button type="button" onClick={() => setRunning((value) => !value)}
           className="min-h-[44px] rounded-lg bg-sky-700 px-4 py-2 font-bold text-white">
           {running ? '一時停止' : '始動'}
         </button>
+        )}
+        {!broken && (
         <button type="button"
           onClick={() => runCommand({ kind: 'setDirection', direction: input.direction === 1 ? -1 : 1 })}
           className="min-h-[44px] rounded-lg bg-slate-700 px-4 py-2 font-bold text-white">
           方向を反転
         </button>
+        )}
         {/* 巻き終える/巻き足す。`review`段階に入らないと完成要求できない。 */}
         {winding.kind === 'winding' && (
           <button type="button" disabled={record.length < MIN_RUNNABLE_WINDING_TURNS}
@@ -260,11 +312,15 @@ export function CoilWindingStep({ winding, dispatchWinding }: AssemblyStepProps)
 
       {/* 段階は常設ノードで示す。条件でノードごと出し入れしない。 */}
       <p role="status" className="min-h-[1.25rem] text-sm text-slate-700">
-        {winding.kind === 'winding'
-          ? (record.length < MIN_RUNNABLE_WINDING_TURNS
-            ? `あと${MIN_RUNNABLE_WINDING_TURNS - record.length}ターンで巻き終えられます`
-            : '巻き終えると、確認のうえ完成できます')
-          : canRequestCompletion(winding) ? '巻き終えました。工程を進めると完成できます' : ''}
+        {/* 破断は事実だけを述べる。原因の断定も、次にどうすべきかの助言も出さない。
+            消費ターン数は破断契約(prefix + 切れた1ターン)そのもので、別計算ではない。 */}
+        {broken
+          ? `切れるまでに${record.length + 1}ターン分の線材を使いました。`
+          : winding.kind === 'winding'
+            ? (record.length < MIN_RUNNABLE_WINDING_TURNS
+              ? `あと${MIN_RUNNABLE_WINDING_TURNS - record.length}ターンで巻き終えられます`
+              : '巻き終えると、確認のうえ完成できます')
+            : canRequestCompletion(winding) ? '巻き終えました。工程を進めると完成できます' : ''}
       </p>
 
       <dl className="grid grid-cols-2 gap-x-3 gap-y-1 text-sm tabular-nums">
@@ -285,17 +341,22 @@ export function CoilWindingStep({ winding, dispatchWinding }: AssemblyStepProps)
         <p>線材 {WIRE_MATERIALS.find((m) => m.id === lot.wireMaterialId)?.nameJa ?? lot.wireMaterialId}
           {' / '}線径 {lot.windingWireGaugeMm} ミリメートル
           {' / '}並列 {lot.windingParallelStrands} 本</p>
-        <button type="button" onClick={discardLot}
-          className="mt-2 min-h-[44px] rounded-lg bg-slate-200 px-3 py-2 font-bold text-slate-700">
-          材料を選び直す(巻いた記録は捨てられます)
-        </button>
+        {!broken && (
+          <button type="button" onClick={discardLot}
+            className="mt-2 min-h-[44px] rounded-lg bg-slate-200 px-3 py-2 font-bold text-slate-700">
+            材料を選び直す(巻いた記録は捨てられます)
+          </button>
+        )}
       </div>
     </div>
   );
 }
 
 /** 巻き始め前の材料選択。ここでだけ線径・並列本数を決められる。 */
-function LotChooser({ onFix }: { onFix: (lot: WindingLot) => void }) {
+function LotChooser({ onFix, resolveTurnLimit }: {
+  onFix: (lot: WindingLot) => void;
+  resolveTurnLimit: AssemblyStepProps['resolveTurnLimit'];
+}) {
   const [wireMaterialId, setWireMaterialId] = useState<string>(WIRE_MATERIALS[0].id);
   const [windingWireGaugeMm, setGauge] = useState<number>(0.4);
   const [windingParallelStrands, setStrands] = useState<1 | 2>(1);
@@ -326,7 +387,7 @@ function LotChooser({ onFix }: { onFix: (lot: WindingLot) => void }) {
         </div>
       </fieldset>
       <p className="text-sm text-slate-600">
-        この線径・並列本数では最大 {resolveDisplayTurnLimit({ wireMaterialId, windingWireGaugeMm, windingParallelStrands })} ターンまで巻けます。
+        この材料では最大 {resolveTurnLimit({ wireMaterialId, windingWireGaugeMm, windingParallelStrands })} ターンまで巻けます。
       </p>
       <button type="button" onClick={() => onFix({ wireMaterialId, windingWireGaugeMm, windingParallelStrands })}
         className="min-h-[44px] rounded-xl bg-amber-600 px-4 py-2 font-black text-white">
