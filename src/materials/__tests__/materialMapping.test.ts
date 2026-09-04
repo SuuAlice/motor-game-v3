@@ -48,7 +48,7 @@ import {
   type RunOutcome,
 } from '../../engine/destructionOrchestration';
 import { advanceDestructionState, createInitialDestructionState, DURATION_COMPARISON_EPSILON_S } from '../../engine/destructionModes';
-import { CHATTER_BURST_FRAMES } from '../../engine/constants';
+import { CHATTER_BURST_FRAMES, COIL_DEFORM_OMEGA } from '../../engine/constants';
 import type { PhysicsSnapshotAtT } from '../../engine/destructionModes';
 import { BATTERY_MATERIALS, BODY_MATERIALS, BRUSH_MATERIALS, GEAR_MATERIALS, MAGNET_MATERIALS, WIRE_MATERIALS, type BatteryMaterial, type WireMaterial } from '../materials';
 import { computeElectricalState, step, type MotorConfig, type SimState } from '../../engine/motorPhysics';
@@ -566,7 +566,7 @@ describe('materialMapping.ts Step7a(composeConfigFromMaterials: 合成純関数)
     let s = restState();
     const rng = () => 0.5;
     for (let i = 0; i < 120; i++) {
-      s = step(result.motorConfig, s, 1 / 120, rng);
+      s = step(result.motorConfig, s, 1 / 120, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: rng });
       expect(Number.isFinite(s.theta)).toBe(true);
       expect(Number.isFinite(s.omega)).toBe(true);
       expect(Number.isFinite(s.current)).toBe(true);
@@ -592,7 +592,7 @@ describe('materialMapping.ts Step7a(composeConfigFromMaterials: 合成純関数)
     let state = createInitialVehicleState(result.motorConfig, result.carConfig);
     const rng = () => 0.5;
     for (let i = 0; i < 120; i++) {
-      state = stepTrackRun(result.motorConfig, result.carConfig, validated, state, 1 / 120, rng);
+      state = stepTrackRun(result.motorConfig, result.carConfig, validated, state, 1 / 120, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: rng });
       expect(Number.isFinite(state.positionM)).toBe(true);
       expect(Number.isFinite(state.velocityMps)).toBe(true);
       expect(Number.isFinite(state.energyUsedJ)).toBe(true);
@@ -784,7 +784,7 @@ function measureHeatCapReachFrames(internalResistanceRatio: number, maxFrames = 
   const config = p31BaseMotorConfig({ slitWidthMm: 0, batteryInternalResistanceRatio: internalResistanceRatio });
   let s = p31RestState();
   for (let i = 1; i <= maxFrames; i++) {
-    s = step(config, s, DT_P3_1, NO_NOISE_RNG_P3_1);
+    s = step(config, s, DT_P3_1, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: NO_NOISE_RNG_P3_1 });
     if (s.batteryHeat >= BATTERY_HEAT_LIMIT) return i;
   }
   return null;
@@ -840,7 +840,7 @@ describe('P3-1: 電池destruction profile写像とD03較正値のsweep証跡', (
         let s: SimState = { ...p31RestState(), omega: 50 };
         let maxHeat = 0;
         for (let i = 0; i < frames; i++) {
-          s = step(config, s, DT_P3_1, NO_NOISE_RNG_P3_1);
+          s = step(config, s, DT_P3_1, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: NO_NOISE_RNG_P3_1 });
           maxHeat = Math.max(maxHeat, s.batteryHeat);
         }
         return maxHeat;
@@ -976,7 +976,7 @@ describe('P3-2ゲート2: D04/D07較正値の写像(物理到達sweepを含ま�
     for (const magnetId of ALL_MAGNET_IDS) {
       const draft: DestructionConfigDraft = {
         battery: mapD04BatteryDestructionConfig('battery-lithium-polymer'),
-        d01: { decayExposureScaleRad: 1000, minEffectiveTurnsRatio: 0.5 },
+        d01: { decayExposureScaleRad: 1000, minEffectiveTurnsRatio: 0.5, coilDeformOmegaRadS: COIL_DEFORM_OMEGA },
         d02: { smokeGaugeThreshold: 0.6, coilOverheatGaugeLimit: 1, conductionScale: 0.04, dissipationCoefficient: 0.5, smokeResistanceMultiplier: 1.2 },
         d04: { bodyScorchDeltaFraction: mapBodyScorchDeltaFraction('body-ps-cowl'), magnetScorchDeltaFraction: mapMagnetScorchDeltaFraction(magnetId) },
         d05: {
@@ -1077,7 +1077,7 @@ describe('P3-2ゲート5(是正版): M4到達可能性・D07 Q11・Q2独立sweep
   function g5LipoDestructionConfig(): DestructionConfig {
     return {
       battery: mapD04BatteryDestructionConfig('battery-lithium-polymer'),
-      d01: { decayExposureScaleRad: 1000, minEffectiveTurnsRatio: 0.5 },
+      d01: { decayExposureScaleRad: 1000, minEffectiveTurnsRatio: 0.5, coilDeformOmegaRadS: COIL_DEFORM_OMEGA },
       d02: { smokeGaugeThreshold: 0.6, coilOverheatGaugeLimit: 1, conductionScale: 0.04, dissipationCoefficient: 0.5, smokeResistanceMultiplier: 1.2 },
       d04: { bodyScorchDeltaFraction: mapBodyScorchDeltaFraction('body-ps-cowl'), magnetScorchDeltaFraction: mapMagnetScorchDeltaFraction('magnet-neodymium') },
       d05: {
@@ -1105,7 +1105,7 @@ describe('P3-2ゲート5(是正版): M4到達可能性・D07 Q11・Q2独立sweep
   function g5NonLipoDestructionConfig(magnetId: 'magnet-neodymium' | 'magnet-ferrite' = 'magnet-neodymium'): DestructionConfig {
     return {
       battery: { profile: 'nonLipo', shortCircuitDurationLimitS: 999 }, // D07 sweepはD03/D04と無関係、短絡経路は評価させない
-      d01: { decayExposureScaleRad: 1000, minEffectiveTurnsRatio: 0.5 },
+      d01: { decayExposureScaleRad: 1000, minEffectiveTurnsRatio: 0.5, coilDeformOmegaRadS: COIL_DEFORM_OMEGA },
       d02: { smokeGaugeThreshold: 0.6, coilOverheatGaugeLimit: 1, conductionScale: 0.04, dissipationCoefficient: 0.5, smokeResistanceMultiplier: 1.2 },
       d04: { bodyScorchDeltaFraction: mapBodyScorchDeltaFraction('body-ps-cowl'), magnetScorchDeltaFraction: mapMagnetScorchDeltaFraction(magnetId) },
       d05: {
@@ -1176,7 +1176,7 @@ describe('P3-2ゲート5(是正版): M4到達可能性・D07 Q11・Q2独立sweep
       // 早期returnガード(status==='overheated'なら入力をそのまま返す)を回避する。
       const prevVehicleState = normalizeOverheatedStatusForD04Hold(vehicleState, destructionState);
       const effectiveConfig = composeEffectiveMotorConfig(baseMotorConfig, destructionState, destructionConfig); // 単一出典
-      const rawNextVehicleState = stepTrackRun(effectiveConfig, carConfig, track, prevVehicleState, DT_G5, NO_NOISE_RNG_G5); // 実効configを使用
+      const rawNextVehicleState = stepTrackRun(effectiveConfig, carConfig, track, prevVehicleState, DT_G5, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: NO_NOISE_RNG_G5 }); // 実効configを使用
       vehicleState = rawNextVehicleState;
       const frame = buildVehicleFrameInput(effectiveConfig, carConfig, prevVehicleState, vehicleState); // 同じ実効configを使用、実関数をそのまま使用
       if (destructionConfig.battery.profile === 'lipo' && runawayAtStep === null && frame.batteryHeat >= destructionConfig.battery.runawayHeatThreshold) {
@@ -1282,7 +1282,7 @@ describe('P3-2ゲート5(是正版): M4到達可能性・D07 Q11・Q2独立sweep
     for (let i = 0; i < maxSteps; i++) {
       const prevVehicleState = normalizeOverheatedStatusForD04Hold(vehicleState, accumulator.destructionState);
       const effectiveConfig = composeEffectiveMotorConfig(snapshot.motorConfig, accumulator.destructionState, snapshot.destructionConfig);
-      const rawNextVehicleState = stepTrackRun(effectiveConfig, snapshot.carConfig!, track, prevVehicleState, DT_G5, NO_NOISE_RNG_G5);
+      const rawNextVehicleState = stepTrackRun(effectiveConfig, snapshot.carConfig!, track, prevVehicleState, DT_G5, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: NO_NOISE_RNG_G5 });
       const frame = buildVehicleFrameInput(effectiveConfig, carConfig, prevVehicleState, rawNextVehicleState);
       const { state, events } = advanceDestructionState(accumulator.destructionState, frame, snapshot.destructionConfig, snapshot.runContext, DT_G5);
       vehicleState = normalizeOverheatedStatusForD04Hold(rawNextVehicleState, state);
@@ -1412,7 +1412,7 @@ describe('P3-2ゲート5(是正版): M4到達可能性・D07 Q11・Q2独立sweep
         // D04 stageが'none'のまま推移するため実質no-opだが、全harnessで同一契約を使う)。
         const prevVehicleState = normalizeOverheatedStatusForD04Hold(vehicleState, destructionState);
         const effectiveConfig = composeEffectiveMotorConfig(motorConfig, destructionState, destructionConfig);
-        const rawNextVehicleState = stepTrackRun(effectiveConfig, carConfig, track, prevVehicleState, DT_G5, NO_NOISE_RNG_G5);
+        const rawNextVehicleState = stepTrackRun(effectiveConfig, carConfig, track, prevVehicleState, DT_G5, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: NO_NOISE_RNG_G5 });
         const frame = buildVehicleFrameInput(effectiveConfig, carConfig, prevVehicleState, rawNextVehicleState);
         const result = advanceDestructionState(destructionState, frame, destructionConfig, runContext, DT_G5);
         destructionState = result.state;
@@ -1626,7 +1626,7 @@ describe('P3-2ゲート5(是正版): M4到達可能性・D07 Q11・Q2独立sweep
       for (let i = 0; i < 200 && overheatedAtStep === null; i++) {
         const prevVehicleState = normalizeOverheatedStatusForD04Hold(vehicleState, destructionState);
         const effectiveConfig = composeEffectiveMotorConfig(motorConfig, destructionState, destructionConfig);
-        const rawNextVehicleState = stepTrackRun(effectiveConfig, carConfig, track, prevVehicleState, DT_G5, NO_NOISE_RNG_G5);
+        const rawNextVehicleState = stepTrackRun(effectiveConfig, carConfig, track, prevVehicleState, DT_G5, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: NO_NOISE_RNG_G5 });
         const frame = buildVehicleFrameInput(effectiveConfig, carConfig, prevVehicleState, rawNextVehicleState);
         const result = advanceDestructionState(destructionState, frame, destructionConfig, runContext, DT_G5);
         destructionState = result.state;
@@ -1720,7 +1720,7 @@ describe('P3-2ゲート5(是正版): M4到達可能性・D07 Q11・Q2独立sweep
         : mapD03DestructionConfig(batteryId);
       return {
         battery,
-        d01: { decayExposureScaleRad: 1000, minEffectiveTurnsRatio: 0.5 },
+        d01: { decayExposureScaleRad: 1000, minEffectiveTurnsRatio: 0.5, coilDeformOmegaRadS: COIL_DEFORM_OMEGA },
         d02: { smokeGaugeThreshold: 0.6, coilOverheatGaugeLimit: 1, conductionScale: 0.04, dissipationCoefficient: 0.5, smokeResistanceMultiplier: 1.2 },
         d04: { bodyScorchDeltaFraction: mapBodyScorchDeltaFraction('body-ps-cowl'), magnetScorchDeltaFraction: mapMagnetScorchDeltaFraction('magnet-neodymium') },
         d05: {
@@ -1765,7 +1765,7 @@ describe('P3-2ゲート5(是正版): M4到達可能性・D07 Q11・Q2独立sweep
       for (; i < maxSteps && (vehicleState.status === 'running' || vehicleState.status === 'ready'); i++) {
         const prevVehicleState = normalizeOverheatedStatusForD04Hold(vehicleState, destructionState);
         const effectiveConfig = composeEffectiveMotorConfig(motorConfig, destructionState, destructionConfig);
-        const rawNextVehicleState = stepTrackRun(effectiveConfig, carConfig, track, prevVehicleState, DT_G5, NO_NOISE_RNG_G5);
+        const rawNextVehicleState = stepTrackRun(effectiveConfig, carConfig, track, prevVehicleState, DT_G5, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: NO_NOISE_RNG_G5 });
         const frame = buildVehicleFrameInput(effectiveConfig, carConfig, prevVehicleState, rawNextVehicleState);
         const result = advanceDestructionState(destructionState, frame, destructionConfig, runContext, DT_G5);
         destructionState = result.state;
@@ -1865,7 +1865,7 @@ describe('P3-2ゲート5(是正版): M4到達可能性・D07 Q11・Q2独立sweep
       for (let i = 0; i < maxSteps; i++) {
         const prevVehicleState = vehicleState;
         const effectiveConfig = composeEffectiveMotorConfig(baseMotorConfig, destructionState, destructionConfig);
-        vehicleState = stepTrackRun(effectiveConfig, carConfig, track, prevVehicleState, DT_G5, NO_NOISE_RNG_G5);
+        vehicleState = stepTrackRun(effectiveConfig, carConfig, track, prevVehicleState, DT_G5, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: NO_NOISE_RNG_G5 });
         const frame = buildVehicleFrameInput(effectiveConfig, carConfig, prevVehicleState, vehicleState);
         const result = advanceDestructionState(destructionState, frame, destructionConfig, runContext, DT_G5);
         destructionState = result.state;
@@ -2224,7 +2224,7 @@ describe('P3-2ゲート5(是正版): M4到達可能性・D07 Q11・Q2独立sweep
       let state: SimState = { theta: Math.PI / 4, omega: 0, current: 0, backEmf: 0, shorted: false, running: true, rpm: 0, chatterFramesLeft: 0, batteryHeat: 0, coilCollapsed: false, highSpeedFrameCount: 0 };
       const rpmHistory: number[] = [];
       for (let i = 0; i < totalFrames; i++) {
-        state = step(motorConfig, state, DT_G5, NO_NOISE_RNG_G5, loadTorque);
+        state = step(motorConfig, state, DT_G5, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: NO_NOISE_RNG_G5, loadTorque: loadTorque });
         if (i >= totalFrames - windowFrames) rpmHistory.push(state.rpm);
       }
       const mean = (arr: number[]) => arr.reduce((a, b) => a + b, 0) / arr.length;
@@ -2389,7 +2389,7 @@ describe('P3-2ゲート5(是正版): M4到達可能性・D07 Q11・Q2独立sweep
       for (; i < maxSteps && (vehicleState.status === 'running' || vehicleState.status === 'ready'); i++) {
         const prevVehicleState = normalizeOverheatedStatusForD04Hold(vehicleState, destructionState);
         const effectiveConfig = composeEffectiveMotorConfig(motorConfig, destructionState, destructionConfig);
-        const rawNextVehicleState = stepTrackRun(effectiveConfig, carConfig, track, prevVehicleState, DT_G5, NO_NOISE_RNG_G5);
+        const rawNextVehicleState = stepTrackRun(effectiveConfig, carConfig, track, prevVehicleState, DT_G5, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: NO_NOISE_RNG_G5 });
         const frame = buildVehicleFrameInput(effectiveConfig, carConfig, prevVehicleState, rawNextVehicleState);
         const result = advanceDestructionState(destructionState, frame, destructionConfig, runContext, DT_G5);
         destructionState = result.state;
@@ -2616,7 +2616,7 @@ describe('P3-2ゲート5(是正版): M4到達可能性・D07 Q11・Q2独立sweep
       let totalChatterFrames = 0;
       for (let i = 0; i < totalFrames; i++) {
         const prevFramesLeft = state.chatterFramesLeft;
-        state = step(motorConfig, state, DT_G5, rng, 0);
+        state = step(motorConfig, state, DT_G5, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: rng, loadTorque: 0 });
         if (prevFramesLeft === 0 && state.chatterFramesLeft === CHATTER_BURST_FRAMES - 1) burstStarts++;
         if (prevFramesLeft > 0 || state.chatterFramesLeft > 0) totalChatterFrames++;
       }
@@ -2828,7 +2828,7 @@ describe('P3-3ゲート2: ブラシ素材の写像(mapBrushRatios/mapD05BrushWea
     for (const brush of BRUSH_MATERIALS) {
       const config: DestructionConfig = {
         battery: mapD04BatteryDestructionConfig('battery-lithium-polymer'),
-        d01: { decayExposureScaleRad: 1000, minEffectiveTurnsRatio: 0.5 },
+        d01: { decayExposureScaleRad: 1000, minEffectiveTurnsRatio: 0.5, coilDeformOmegaRadS: COIL_DEFORM_OMEGA },
         d02: { smokeGaugeThreshold: 0.6, coilOverheatGaugeLimit: 1, conductionScale: 0.04, dissipationCoefficient: 0.5, smokeResistanceMultiplier: 1.2 },
         d04: { bodyScorchDeltaFraction: mapBodyScorchDeltaFraction('body-ps-cowl'), magnetScorchDeltaFraction: mapMagnetScorchDeltaFraction('magnet-neodymium') },
         d05: assembleD05Config(mapD05BrushWearConfig(brush.id), BRUSH_D05_COMMON_PART),
@@ -2900,7 +2900,7 @@ describe('materialMapping.ts: P3-4 G1a assembleDestructionConfig', () => {
 
   it('d01/d02/d05はdestructionCalibration.ts/mapD05BrushWearConfig由来の値をそのまま反映する', () => {
     const config = assembleDestructionConfig(selection(), equipmentContext());
-    expect(config.d01).toEqual({ decayExposureScaleRad: 1000, minEffectiveTurnsRatio: 0.5 });
+    expect(config.d01).toEqual({ decayExposureScaleRad: 1000, minEffectiveTurnsRatio: 0.5, coilDeformOmegaRadS: COIL_DEFORM_OMEGA });
     expect(config.d02.conductionScale).toBeCloseTo(0.04);
     expect(config.d05.brushWearRateRatio).toBe(1); // brush-carbon anchor
   });

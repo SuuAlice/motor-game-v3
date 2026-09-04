@@ -243,6 +243,7 @@ function runSlipStep(
   evaluation: MotorFrameEvaluation,
   dt: number,
   rng: Rng,
+  coilDeformOmegaRadS: number,
   velocityMpsPre: number,
   gripMax: number,
   resistTotal: number,
@@ -264,7 +265,7 @@ function runSlipStep(
   const fContact = contactSign * gripMax;
 
   const loadTorqueUsed = (fContact * wheelRadius) / (gearRatio * eta);
-  const nextMotorRaw = advanceMotorState(effectiveMotorConfig, motorState, evaluation, dt, rng, loadTorqueUsed);
+  const nextMotorRaw = advanceMotorState(effectiveMotorConfig, motorState, evaluation, dt, { coilDeformOmegaRadS, rng, loadTorque: loadTorqueUsed });
   const carAccel = (fContact + resistTotal) / massKg;
   const nextVelocity = velocityMpsPre + carAccel * dt;
 
@@ -371,15 +372,30 @@ export function createInitialVehicleState(_motorConfig: MotorConfig, carConfig: 
   };
 }
 
+/**
+ * P4-1C R2-A(2026-08-31人間再承認): 車両層stepの引数束。
+ * `coilDeformOmegaRadS`をrequiredにするため末尾の省略可能引数をobjectへ束ねた
+ * (理由は`motorPhysics.MotorStepOptions`のコメント参照)。
+ */
+export interface VehicleStepOptions {
+  /** D01のコイル崩壊しきい角速度 [rad/s]。**必須**。モーター層へそのまま搬送する。 */
+  readonly coilDeformOmegaRadS: number;
+  readonly rng?: Rng;
+  readonly slopeRad?: number;
+  readonly trackInputs?: TrackFrameInputs;
+}
+
 export function stepVehicle(
   motorConfig: MotorConfig,
   carConfig: CarConfig,
   state: VehicleSimState,
   dt: number,
-  rng: Rng = Math.random,
-  slopeRad: number = 0,
-  trackInputs: TrackFrameInputs = {},
+  options: VehicleStepOptions,
 ): VehicleSimState {
+  const { coilDeformOmegaRadS } = options;
+  const rng = options.rng ?? Math.random;
+  const slopeRad = options.slopeRad ?? 0;
+  const trackInputs = options.trackInputs ?? {};
   // 終端状態の安定性: motorPhysics.step()の静止摩擦クランプと同じ早期returnパターン。
   // 自動再始動を構造的に禁止する。
   if (state.status === 'finished' || state.status === 'stalled' || state.status === 'derailed' || state.status === 'overheated') {
@@ -445,6 +461,7 @@ export function stepVehicle(
       evaluation,
       dt,
       rng,
+      coilDeformOmegaRadS,
       velocityMpsPre,
       gripMax,
       resist.total,
@@ -494,7 +511,7 @@ export function stepVehicle(
       // 同じ式で判定できるよう一般化。driveForceRequired>=0の既存Phase2構成では
       // |x|<=g ⟺ x<=g のため既存挙動は無変更)
       loadTorqueUsed = -tResistReflected;
-      const nextMotorRaw = advanceMotorState(effectiveMotorConfig, state.motor, evaluation, dt, rng, loadTorqueUsed, jEff);
+      const nextMotorRaw = advanceMotorState(effectiveMotorConfig, state.motor, evaluation, dt, { coilDeformOmegaRadS, rng, loadTorque: loadTorqueUsed, effectiveInertia: jEff });
       const nextAxleOmegaRaw = nextMotorRaw.omega / gearRatio;
       const nextVelocityRaw = nextAxleOmegaRaw * wheelRadius;
 
@@ -520,7 +537,7 @@ export function stepVehicle(
         // 差=0により構造的に必ず真になり、advanceMotorState自身の静止摩擦
         // クランプ経路(電池発熱・ワニス崩壊判定・rpm平滑化を含む既存ロジック)を
         // 確実に通る(新規ロジックの重複実装を避ける)
-        nextMotor = advanceMotorState(effectiveMotorConfig, { ...state.motor, omega: 0 }, heldEvaluation, dt, rng, heldTMag + heldTCog);
+        nextMotor = advanceMotorState(effectiveMotorConfig, { ...state.motor, omega: 0 }, heldEvaluation, dt, { coilDeformOmegaRadS, rng, loadTorque: heldTMag + heldTCog });
         nextVelocity = 0;
         isSlipping = false;
         driveForceActual = 0;
@@ -551,6 +568,7 @@ export function stepVehicle(
         evaluation,
         dt,
         rng,
+        coilDeformOmegaRadS,
         velocityMpsPre,
         gripMax,
         resist.total,
@@ -720,9 +738,8 @@ export function stepTestRun(
   state: VehicleSimState,
   dt: number,
   courseLengthM: number,
-  rng: Rng = Math.random,
-  slopeRad: number = 0,
+  options: VehicleStepOptions,
 ): VehicleSimState {
-  const next = stepVehicle(motorConfig, carConfig, state, dt, rng, slopeRad);
+  const next = stepVehicle(motorConfig, carConfig, state, dt, options);
   return evaluateCourseCompletion(next, courseLengthM);
 }

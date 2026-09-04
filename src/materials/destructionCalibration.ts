@@ -8,10 +8,15 @@
 // (mapD04BatteryDestructionConfig・mapD07DestructionConfigが内部で参照)、本ファイルには含めない。
 
 import type { DestructionConfig } from '../engine/destructionOrchestration';
+import { COIL_DEFORM_OMEGA } from '../engine/constants';
 
 export const D01_CALIBRATION: DestructionConfig['d01'] = {
   decayExposureScaleRad: 1000, // 確定。人間再承認不要(P3-3-D01較正確定、2026-08-11)
   minEffectiveTurnsRatio: 0.5, // 確定。人間再承認不要(同上)
+  // P4-1C R2-A(2026-08-31人間再承認): 移設のみで挙動変更0。**`constants.ts`の
+  // `COIL_DEFORM_OMEGA`が唯一の出典**で、同値の定数を別に作らない(bare caller・
+  // 旧snapshot補完値もこの1定数を参照する)。張力からの供給はR2-SWEEP以降。
+  coilDeformOmegaRadS: COIL_DEFORM_OMEGA,
 };
 
 export const D02_CALIBRATION: DestructionConfig['d02'] = {

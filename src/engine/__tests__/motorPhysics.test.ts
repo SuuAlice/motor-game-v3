@@ -10,18 +10,7 @@ import {
   type SimState,
 } from '../motorPhysics';
 import { getCommutationSign } from '../commutator';
-import {
-  B_FLOOR_RATIO,
-  B_MATERIAL_MAX,
-  B_MATERIAL_MIN,
-  B_REF_DISTANCE_MM,
-  K_B_DISTANCE,
-  K_E,
-  K_T,
-  J_NAIL,
-  CHATTER_BURST_FRAMES,
-  CHATTER_PRESSURE_THRESHOLD,
-} from '../constants';
+import { B_FLOOR_RATIO, B_MATERIAL_MAX, B_MATERIAL_MIN, B_REF_DISTANCE_MM, CHATTER_BURST_FRAMES, CHATTER_PRESSURE_THRESHOLD, COIL_DEFORM_OMEGA, J_NAIL, K_B_DISTANCE, K_E, K_T } from '../constants';
 import { mulberry32 } from './prng';
 
 const DT = 1 / 120;
@@ -49,7 +38,7 @@ function restState(theta = Math.PI / 4): SimState {
 function runSteps(config: MotorConfig, steps: number, rng: () => number = NO_NOISE_RNG, initial = restState()) {
   let s = initial;
   for (let i = 0; i < steps; i++) {
-    s = step(config, s, DT, rng);
+    s = step(config, s, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: rng });
   }
   return s;
 }
@@ -68,7 +57,7 @@ describe('受け入れ基準1: 適正パラメータでの定常回転', () => {
     let s = restState();
 
     // 始動電流: ω=0の瞬間はbackEmfが必ず0になるため、理論上のI=V/Rと一致する
-    const first = step(config, s, DT, NO_NOISE_RNG);
+    const first = step(config, s, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: NO_NOISE_RNG });
     const iStart = first.current;
     expect(iStart).toBeGreaterThan(0);
 
@@ -77,7 +66,7 @@ describe('受け入れ基準1: 適正パラメータでの定常回転', () => {
     const endWindow = 120;
     const endCurrents: number[] = [];
     for (let i = 1; i < totalSteps; i++) {
-      s = step(config, s, DT, NO_NOISE_RNG);
+      s = step(config, s, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: NO_NOISE_RNG });
       if (i >= totalSteps - endWindow) endCurrents.push(s.current);
     }
     const iEnd = endCurrents.reduce((a, b) => a + b, 0) / endCurrents.length;
@@ -95,7 +84,7 @@ describe('受け入れ基準2: スリット0(ショート)', () => {
     const config = goodConfig({ slitWidthMm: 0 });
     let s = restState();
     for (let i = 0; i < 240; i++) {
-      s = step(config, s, DT, NO_NOISE_RNG);
+      s = step(config, s, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: NO_NOISE_RNG });
       expect(s.shorted).toBe(true);
       expect(s.current).toBe(0);
     }
@@ -109,7 +98,7 @@ describe('受け入れ基準3: ブラシ圧による静止摩擦クランプ', (
     let s = restState();
     let sawNonNegative = true;
     for (let i = 0; i < 240; i++) {
-      s = step(config, s, DT, NO_NOISE_RNG);
+      s = step(config, s, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: NO_NOISE_RNG });
       if (s.omega < 0) sawNonNegative = false;
     }
     expect(sawNonNegative).toBe(true);
@@ -131,7 +120,7 @@ describe('受け入れ基準4: ω=0付近での符号チャタリング防止', 
     let s = restState(0.3);
     let prevOmega = s.omega;
     for (let i = 0; i < 2000; i++) {
-      s = step(config, s, DT, rng);
+      s = step(config, s, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: rng });
       const signFlipped = (prevOmega > 0 && s.omega < 0) || (prevOmega < 0 && s.omega > 0);
       expect(signFlipped).toBe(false);
       prevOmega = s.omega;
@@ -142,8 +131,8 @@ describe('受け入れ基準4: ω=0付近での符号チャタリング防止', 
 describe('受け入れ基準5: Jの巻き数依存(§3.1)', () => {
   it('単体プロパティ: 同一のθ・ωから1ステップ進めたとき、coilTurnsが大きい(Jが大きい)方がΔωが小さい', () => {
     const base: SimState = { theta: Math.PI / 2, omega: 10, current: 0, backEmf: 0, shorted: false, running: true, rpm: 0, chatterFramesLeft: 0, batteryHeat: 0, coilCollapsed: false, highSpeedFrameCount: 0 };
-    const low = step(goodConfig({ coilTurns: 80 }), base, DT, NO_NOISE_RNG);
-    const high = step(goodConfig({ coilTurns: 140 }), base, DT, NO_NOISE_RNG);
+    const low = step(goodConfig({ coilTurns: 80 }), base, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: NO_NOISE_RNG });
+    const high = step(goodConfig({ coilTurns: 140 }), base, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: NO_NOISE_RNG });
     expect(high.omega - base.omega).toBeLessThan(low.omega - base.omega);
   });
 
@@ -166,7 +155,7 @@ describe('エネルギー整合性(K_T = K_E のとき T_mag・ω ≈ e_back・i
     const rng = mulberry32(3);
     for (let i = 0; i < 300; i++) {
       const before = s;
-      s = step(config, s, DT, rng);
+      s = step(config, s, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: rng });
 
       const sign = getCommutationSign(before.theta);
       const sinTheta = Math.sin(before.theta);
@@ -202,7 +191,7 @@ describe('性質ベーステスト(ランダムパラメータ)', () => {
       let s = restState(rng() * Math.PI * 2);
       let prevOmega = s.omega;
       for (let i = 0; i < 200; i++) {
-        s = step(config, s, DT, rng);
+        s = step(config, s, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: rng });
 
         expect(Number.isFinite(s.theta)).toBe(true);
         expect(Number.isFinite(s.omega)).toBe(true);
@@ -237,7 +226,7 @@ describe('Phase3バランス調整: 持続的チャタリングバースト(§3.
 
     const currents: number[] = [];
     for (let i = 0; i < 30; i++) {
-      s = step(config, s, DT, rng);
+      s = step(config, s, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: rng });
       currents.push(s.current);
     }
 
@@ -253,7 +242,7 @@ describe('Phase3バランス調整: 持続的チャタリングバースト(§3.
     let s: SimState = { theta: Math.PI / 2, omega: 10, current: 0, backEmf: 0, shorted: false, running: true, rpm: 0, chatterFramesLeft: 0, batteryHeat: 0, coilCollapsed: false, highSpeedFrameCount: 0 };
 
     for (let i = 0; i < 60; i++) {
-      s = step(config, s, DT, ALWAYS_TRIGGER_RNG);
+      s = step(config, s, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: ALWAYS_TRIGGER_RNG });
       expect(s.chatterFramesLeft).toBe(0);
     }
   });
@@ -310,15 +299,15 @@ describe('Phase2 Step5a: 導線ratio(抵抗率・密度)のengine拡張', () => 
     it('effectiveInertia未指定のstep()経路(内部でcomputeOmegaDynamicsがJを再計算する経路)もwireDensityRatio省略と明示的1.0で一致する', () => {
       // effectiveInertiaを渡さないため、computeOmegaDynamics内部のJ計算(J_NAIL+コイル寄与×densityRatio)を
       // 直接経由する。120ステップ統合テストとは別に、この経路単体を数ステップで固定する。
-      const s1 = step(goodConfig(), restState(), DT, NO_NOISE_RNG);
-      const s2 = step(goodConfig({ wireDensityRatio: 1.0 }), restState(), DT, NO_NOISE_RNG);
+      const s1 = step(goodConfig(), restState(), DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: NO_NOISE_RNG });
+      const s2 = step(goodConfig({ wireDensityRatio: 1.0 }), restState(), DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: NO_NOISE_RNG });
       expect(s2.omega).toBe(s1.omega);
       expect(s2.theta).toBe(s1.theta);
     });
 
     it('effectiveInertia指定のadvanceMotorState経路(computeOmegaDynamicsの内部J計算を経由しない経路)もratio省略と明示的1.0で一致する(Q2契約)', () => {
-      const s1 = step(goodConfig(), restState(), DT, NO_NOISE_RNG, 0, 3e-4);
-      const s2 = step(goodConfig({ wireDensityRatio: 1.0 }), restState(), DT, NO_NOISE_RNG, 0, 3e-4);
+      const s1 = step(goodConfig(), restState(), DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: NO_NOISE_RNG, loadTorque: 0, effectiveInertia: 3e-4 });
+      const s2 = step(goodConfig({ wireDensityRatio: 1.0 }), restState(), DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: NO_NOISE_RNG, loadTorque: 0, effectiveInertia: 3e-4 });
       expect(s2.omega).toBe(s1.omega);
     });
   });
@@ -396,7 +385,7 @@ describe('Phase2 Step5a: 導線ratio(抵抗率・密度)のengine拡張', () => 
     function omegaAfterSteps(config: MotorConfig, regime: Regime, steps: number): number {
       let s = stateAt(regime.theta, regime.omega);
       for (let i = 0; i < steps; i++) {
-        s = step(config, s, DT, NO_NOISE_RNG, regime.loadTorque);
+        s = step(config, s, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: NO_NOISE_RNG, loadTorque: regime.loadTorque });
       }
       return s.omega;
     }
@@ -431,7 +420,7 @@ describe('Phase2 Step5a: 導線ratio(抵抗率・密度)のengine拡張', () => 
     it('effectiveInertiaを外部指定した場合、wireDensityRatioを変えても出力が完全一致する(二重適用なし)', () => {
       const EFFECTIVE_INERTIA = 3e-4;
       const results = [0.5, 1, 2].map(
-        (r) => step(goodConfig({ wireDensityRatio: r }), restState(Math.PI / 3), DT, NO_NOISE_RNG, 0, EFFECTIVE_INERTIA).omega,
+        (r) => step(goodConfig({ wireDensityRatio: r }), restState(Math.PI / 3), DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: NO_NOISE_RNG, loadTorque: 0, effectiveInertia: EFFECTIVE_INERTIA }).omega,
       );
       expect(results[0]).toBe(results[1]);
       expect(results[1]).toBe(results[2]);
@@ -439,7 +428,7 @@ describe('Phase2 Step5a: 導線ratio(抵抗率・密度)のengine拡張', () => 
 
     it('effectiveInertiaを省略した場合、wireDensityRatioを変えると出力が変化する(相補経路: 内部J計算にratioが反映される)', () => {
       const results = [0.5, 1, 2].map(
-        (r) => step(goodConfig({ wireDensityRatio: r }), restState(Math.PI / 3), DT, NO_NOISE_RNG, 0).omega,
+        (r) => step(goodConfig({ wireDensityRatio: r }), restState(Math.PI / 3), DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: NO_NOISE_RNG, loadTorque: 0 }).omega,
       );
       expect(results[0]).not.toBe(results[1]);
       expect(results[1]).not.toBe(results[2]);
@@ -460,8 +449,8 @@ describe('Phase2 Step5b: 電池ratio(内部抵抗)のengine拡張', () => {
     });
 
     it('advanceMotorState経路(batteryHeat): batteryInternalResistanceRatio省略と明示的1.0で一致する', () => {
-      const s1 = step(goodConfig(), restState(), DT, NO_NOISE_RNG);
-      const s2 = step(goodConfig({ batteryInternalResistanceRatio: 1.0 }), restState(), DT, NO_NOISE_RNG);
+      const s1 = step(goodConfig(), restState(), DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: NO_NOISE_RNG });
+      const s2 = step(goodConfig({ batteryInternalResistanceRatio: 1.0 }), restState(), DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: NO_NOISE_RNG });
       expect(s2.batteryHeat).toBe(s1.batteryHeat);
       expect(s2.omega).toBe(s1.omega);
     });
@@ -521,7 +510,7 @@ describe('Phase2 Step5b: 電池ratio(内部抵抗)のengine拡張', () => {
     function omegaAfterSteps(config: MotorConfig, regime: Regime, steps: number): number {
       let s = stateAt(regime.theta, regime.omega);
       for (let i = 0; i < steps; i++) {
-        s = step(config, s, DT, NO_NOISE_RNG, regime.loadTorque);
+        s = step(config, s, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: NO_NOISE_RNG, loadTorque: regime.loadTorque });
       }
       return s.omega;
     }
@@ -568,7 +557,7 @@ describe('Phase2 Step5b: 電池ratio(内部抵抗)のengine拡張', () => {
       };
       const heats = [0.5, 1, 2].map((r) => {
         const config = goodConfig({ batteryInternalResistanceRatio: r });
-        const next = advanceMotorState(config, restState(), fixedEvaluation, DT, NO_NOISE_RNG);
+        const next = advanceMotorState(config, restState(), fixedEvaluation, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: NO_NOISE_RNG });
         return next.batteryHeat;
       });
       expect(heats[0]).toBeLessThan(heats[1]);
@@ -585,14 +574,8 @@ describe('Phase2 Step5b: 電池ratio(内部抵抗)のengine拡張', () => {
         deadZone: false,
         chatterFramesLeft: 0,
       };
-      const omitted = advanceMotorState(goodConfig(), restState(), fixedEvaluation, DT, NO_NOISE_RNG);
-      const explicit = advanceMotorState(
-        goodConfig({ batteryInternalResistanceRatio: 1.0 }),
-        restState(),
-        fixedEvaluation,
-        DT,
-        NO_NOISE_RNG,
-      );
+      const omitted = advanceMotorState(goodConfig(), restState(), fixedEvaluation, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: NO_NOISE_RNG });
+      const explicit = advanceMotorState(goodConfig({ batteryInternalResistanceRatio: 1.0 }), restState(), fixedEvaluation, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: NO_NOISE_RNG });
       expect(explicit.batteryHeat).toBe(omitted.batteryHeat);
     });
   });

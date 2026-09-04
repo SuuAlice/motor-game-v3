@@ -68,7 +68,7 @@ function flickState(theta: number, omega: number): SimState {
 function runSteps(config: MotorConfig, steps: number, initial: SimState, rng: () => number = NO_NOISE_RNG): SimState {
   let s = initial;
   for (let i = 0; i < steps; i++) {
-    s = step(config, s, DT, rng);
+    s = step(config, s, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: rng });
   }
   return s;
 }
@@ -132,7 +132,7 @@ describe('コギング項の数値安定性(構造変更の副作用に対する
       const rng = mulberry32(1);
       let s = flickState(0, flickOmega);
       for (let i = 0; i < 120 * 5; i++) {
-        s = step(config, s, DT, rng);
+        s = step(config, s, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: rng });
         expect(Number.isFinite(s.omega)).toBe(true);
         expect(Math.abs(s.omega)).toBeLessThan(2000); // spec上のRPM上限(数千RPM)を大きく超えない
       }
@@ -161,7 +161,7 @@ describe('Phase A受け入れ基準: i²発熱(短絡時にbatteryHeatが単調�
     let reachedLimit = false;
     for (let i = 0; i < 600; i++) {
       const prev = s;
-      s = step(config, s, DT, NO_NOISE_RNG);
+      s = step(config, s, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: NO_NOISE_RNG });
       expect(s.batteryHeat).toBeGreaterThanOrEqual(prevHeat); // 単調増加(非減少)
       prevHeat = s.batteryHeat;
       if (didBatteryJustOverheat(prev, s)) reachedLimit = true;
@@ -190,7 +190,7 @@ describe('Phase A受け入れ基準: 無ワニス+高ωで崩壊する。ワニ�
     let collapseEvents = 0;
     for (let i = 0; i < COIL_DEFORM_FRAMES + 60; i++) {
       const prev = s;
-      s = step(config, s, DT, NO_NOISE_RNG);
+      s = step(config, s, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: NO_NOISE_RNG });
       if (didCollapseJustHappen(prev, s)) collapseEvents += 1;
     }
     expect(collapseEvents).toBe(1);
@@ -227,7 +227,7 @@ describe('Phase A受け入れ基準: エネルギー整合性テストがコギ�
     const rng = mulberry32(7);
     for (let i = 0; i < 300; i++) {
       const before = s;
-      s = step(config, s, DT, rng);
+      s = step(config, s, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: rng });
 
       const sign = getCommutationSign(before.theta);
       const sinTheta = Math.sin(before.theta);

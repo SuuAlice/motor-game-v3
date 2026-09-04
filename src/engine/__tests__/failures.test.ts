@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { diagnoseFailures } from '../failures';
 import { step, type MotorConfig, type SimState } from '../motorPhysics';
-import { FLICK_INITIAL_OMEGA } from '../constants';
+import { COIL_DEFORM_OMEGA, FLICK_INITIAL_OMEGA } from '../constants';
 import type { HistorySample } from '../scoring';
 import { mulberry32 } from './prng';
 
@@ -149,7 +149,7 @@ describe('diagnoseFailures(実際のstep()出力を使った統合テスト)', (
     const history: HistorySample[] = [];
     const sampleEvery = Math.round(0.1 / DT);
     for (let i = 0; i < seconds * 120; i++) {
-      s = step(config, s, DT, rng);
+      s = step(config, s, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: rng });
       if (i % sampleEvery === 0) history.push({ t: i * DT, rpm: s.rpm, current: s.current, backEmf: s.backEmf });
     }
     return history;

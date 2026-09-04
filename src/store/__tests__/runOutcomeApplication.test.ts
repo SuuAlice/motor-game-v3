@@ -815,7 +815,7 @@ describe('P3-1サブステップ4: stepMotorWithDestruction → applyRunOutcome�
   function goodDestructionConfig(shortCircuitDurationLimitS: number): DestructionConfig {
     return {
       battery: { profile: 'nonLipo', shortCircuitDurationLimitS },
-      d01: { decayExposureScaleRad: 1000, minEffectiveTurnsRatio: 0.5 },
+      d01: { decayExposureScaleRad: 1000, minEffectiveTurnsRatio: 0.5, coilDeformOmegaRadS: COIL_DEFORM_OMEGA },
       d02: { smokeGaugeThreshold: 0.6, coilOverheatGaugeLimit: 1, conductionScale: 0.1, dissipationCoefficient: 0.1, smokeResistanceMultiplier: 1.2 },
       d04: { bodyScorchDeltaFraction: 0.2, magnetScorchDeltaFraction: 0.15 },
       d05: {
@@ -972,7 +972,7 @@ describe('P3-1サブステップ4: stepMotorWithDestruction → applyRunOutcome�
         stageDurations: overrides.stageDurations ?? { swellingS: 1 / 120, smokingS: 1 / 120 },
         internalResistanceDegradationMultiplier: 1.5,
       },
-      d01: { decayExposureScaleRad: 1000, minEffectiveTurnsRatio: 0.5 },
+      d01: { decayExposureScaleRad: 1000, minEffectiveTurnsRatio: 0.5, coilDeformOmegaRadS: COIL_DEFORM_OMEGA },
       d02: { smokeGaugeThreshold: 0.6, coilOverheatGaugeLimit: 1, conductionScale: 0.1, dissipationCoefficient: 0.1, smokeResistanceMultiplier: 1.2 },
       d04: { bodyScorchDeltaFraction: 0.2, magnetScorchDeltaFraction: 0.15 },
       d05: {
@@ -1663,7 +1663,7 @@ describe('P3-1サブステップ4: stepMotorWithDestruction → applyRunOutcome�
   function gate6DestructionConfig(magnetId: MaterialSelection['magnetId'], brushId: MaterialSelection['brushId'], shortCircuitDurationLimitS: number): DestructionConfig {
     return {
       battery: { profile: 'nonLipo', shortCircuitDurationLimitS },
-      d01: { decayExposureScaleRad: 1000, minEffectiveTurnsRatio: 0.5 },
+      d01: { decayExposureScaleRad: 1000, minEffectiveTurnsRatio: 0.5, coilDeformOmegaRadS: COIL_DEFORM_OMEGA },
       d02: confirmedD02(),
       d04: { bodyScorchDeltaFraction: 0.2, magnetScorchDeltaFraction: 0.15 },
       d05: assembleD05Config(mapD05BrushWearConfig(brushId), d05CommonPart()),

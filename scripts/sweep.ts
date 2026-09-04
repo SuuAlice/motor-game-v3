@@ -1,5 +1,5 @@
 import { computeMaxTurns, step, type MotorConfig, type SimState } from '../src/engine/motorPhysics';
-import { FLICK_INITIAL_OMEGA, OMEGA_EPS } from '../src/engine/constants';
+import { COIL_DEFORM_OMEGA, FLICK_INITIAL_OMEGA, OMEGA_EPS } from '../src/engine/constants';
 
 function mulberry32(seed: number): () => number {
   let a = seed;
@@ -124,13 +124,13 @@ function simulate(config: MotorConfig, evalSeconds: number, seed: number): SimRe
     running: true, rpm: 0, chatterFramesLeft: 0, batteryHeat: 0, coilCollapsed: false,
     highSpeedFrameCount: 0,
   };
-  for (let index = 0; index < WARMUP_SECONDS / DT; index += 1) state = step(config, state, DT, rng);
+  for (let index = 0; index < WARMUP_SECONDS / DT; index += 1) state = step(config, state, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng });
   const rpms: number[] = [];
   const currents: number[] = [];
   let maxHeat = state.batteryHeat;
   let shorted = state.shorted;
   for (let index = 0; index < evalSeconds / DT; index += 1) {
-    state = step(config, state, DT, rng);
+    state = step(config, state, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng });
     rpms.push(Math.abs(state.rpm)); currents.push(state.current);
     maxHeat = Math.max(maxHeat, state.batteryHeat); shorted ||= state.shorted;
   }

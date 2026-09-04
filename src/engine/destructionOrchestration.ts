@@ -5,10 +5,10 @@
 // ラッパー)を担う。`stepTrackRunWithDestruction`(track-run版)はP3-4以降で追加する(P3-0-Q2)。
 
 import { computeElectricalState, computeRCoil, didCollapseJustHappen, isValidWindingTurnsRatio, resolveWindingTurnsRatio, step } from './motorPhysics';
-import type { MotorConfig, SimState } from './motorPhysics';
-import { CHATTER_BURST_FRAMES } from './constants';
+import type { MotorConfig, MotorStepOptions, SimState } from './motorPhysics';
+import { CHATTER_BURST_FRAMES, COIL_DEFORM_OMEGA } from './constants';
 import { stepTestRun } from './vehiclePhysics';
-import type { CarConfig, FailureCode, VehicleSimState } from './vehiclePhysics';
+import type { CarConfig, FailureCode, VehicleSimState, VehicleStepOptions } from './vehiclePhysics';
 import { computeEnergyBudgetJ, createValidatedTrack, stepTrackRun } from './trackPhysics';
 import type { TrackDefinition, ValidatedTrackDefinition } from './trackPhysics';
 import { advanceDestructionState, createInitialDestructionState, validateFireExposureProfile } from './destructionModes';
@@ -255,7 +255,7 @@ export function deriveDegradationDiffs(events: readonly DestructionEvent[], fina
 
 export interface DestructionConfigDraft {
   battery?: BatteryDestructionConfig;
-  d01?: { decayExposureScaleRad: number; minEffectiveTurnsRatio: number };
+  d01?: { decayExposureScaleRad: number; minEffectiveTurnsRatio: number; coilDeformOmegaRadS: number };
   d02?: { smokeGaugeThreshold: number; coilOverheatGaugeLimit: number; conductionScale: number; dissipationCoefficient: number; smokeResistanceMultiplier: number };
   d04?: { bodyScorchDeltaFraction: number; magnetScorchDeltaFraction: number };
   d05?: {
@@ -384,6 +384,10 @@ export function validateDestructionConfig(draft: DestructionConfigDraft): Valida
     }
     if (!isEffectiveTurnsRatioFloor(draft.d01.minEffectiveTurnsRatio)) {
       invalidFields.push({ field: 'd01.minEffectiveTurnsRatio', reason: '(0,1]の範囲の有限数である必要があります' });
+    }
+    // P4-1C R2-A: D01のコイル崩壊しきい角速度。発火判定と進行の**両方**がこの1つを読む。
+    if (!isPositiveFinite(draft.d01.coilDeformOmegaRadS)) {
+      invalidFields.push({ field: 'd01.coilDeformOmegaRadS', reason: '正の有限数である必要があります' });
     }
   }
 
@@ -1038,6 +1042,21 @@ function validateD07ConfigRawShape(raw: unknown): boolean {
   return true;
 }
 
+// P4-1C R2-A(2026-08-31人間再承認): COIL_DEFORM_OMEGAを`DestructionConfig.d01.coilDeformOmegaRadS`
+// へ移設した結果、契約version 3のまま当該fieldを持たない**旧snapshot**が存在しうる。契約versionは
+// 上げず、復元時に移設元の単一出典`COIL_DEFORM_OMEGA`(=移設前の実装がハードコードしていた値)で
+// 補完することで、旧snapshotの復元後挙動を移設前と完全に一致させる。
+// 補完するのは**fieldが存在しない場合のみ**。存在する場合は一切書き換えず、0・負値・NaN・Infinityは
+// `validateDestructionConfig`の`isPositiveFinite`が、非numberは`validateDestructionConfigRawShape`が
+// それぞれfail-closedで拒否する。
+function completeLegacyD01CoilDeformOmega(raw: unknown): unknown {
+  if (!isPlainObject(raw)) return raw;
+  const d01 = raw.d01;
+  if (!isPlainObject(d01)) return raw;
+  if (d01.coilDeformOmegaRadS !== undefined) return raw;
+  return { ...raw, d01: { ...d01, coilDeformOmegaRadS: COIL_DEFORM_OMEGA } };
+}
+
 function validateDestructionConfigRawShape(raw: unknown): raw is DestructionConfigDraft {
   if (!isPlainObject(raw)) return false;
   if (raw.battery !== undefined && !validateBatteryDestructionConfigRawShape(raw.battery)) return false;
@@ -1045,6 +1064,9 @@ function validateDestructionConfigRawShape(raw: unknown): raw is DestructionConf
   if (raw.d01 !== undefined) {
     if (!isPlainObject(raw.d01)) return false;
     if (typeof raw.d01.decayExposureScaleRad !== 'number' || typeof raw.d01.minEffectiveTurnsRatio !== 'number') return false;
+    // P4-1C R2-A: 旧snapshot(このfieldを持たない)は下記restoreRunSnapshotで補完するため、
+    // ここでは**存在する場合のみ**型を見る。存在して非numberなら破損として拒否する。
+    if (raw.d01.coilDeformOmegaRadS !== undefined && typeof raw.d01.coilDeformOmegaRadS !== 'number') return false;
   }
   if (raw.d02 !== undefined) {
     if (!isPlainObject(raw.d02)) return false;
@@ -1131,7 +1153,7 @@ export function restoreRunSnapshot(raw: unknown): RestoreRunSnapshotResult {
   const carConfigRaw = raw.carConfig;
   if (carConfigRaw !== null && !validateCarConfigShape(carConfigRaw)) return { ok: false, reason: 'invalidSchema', details: 'carConfig' };
 
-  const destructionConfigRaw = raw.destructionConfig;
+  const destructionConfigRaw = completeLegacyD01CoilDeformOmega(raw.destructionConfig);
   if (!validateDestructionConfigRawShape(destructionConfigRaw)) return { ok: false, reason: 'invalidSchema', details: 'destructionConfig' };
   const destructionConfigResult = validateDestructionConfig(destructionConfigRaw);
   if (!destructionConfigResult.ok) {
@@ -1411,8 +1433,10 @@ export function normalizeOverheatedStatusForD04Hold(state: VehicleSimState, dest
 }
 
 // motorPhysics.tsの`type Rng = () => number`は非exportのため、destructionOrchestration.ts側から
-// 直接参照できない。motorPhysics.tsは無改修のまま、既存`step`の公開シグネチャから型を導出する。
-type MotorStepRng = NonNullable<Parameters<typeof step>[3]>;
+// 直接参照できない。公開型`MotorStepOptions`のrngフィールドから導出する。
+// P4-1C R2-A以前は`Parameters<typeof step>[3]`だったが、位置添字による参照は引数形が変わると
+// 型追随の閉包が広がる(実際にgameStore.ts等へ波及しかけた)ため、options型経由へ改めた。
+type MotorStepRng = NonNullable<MotorStepOptions['rng']>;
 
 // P3-2ゲート4(v12 §3.2「D02/D04/D07の実効config合成」、docs/phase3-p3-2-plan.md v11 §2.0)。
 /**
@@ -1512,7 +1536,7 @@ export function stepMotorWithDestruction(
   const baseConfig = accumulator.replaySnapshot.motorConfig; // 唯一の出典(P3-1-Q9-2、不変)
   const destructionConfig = accumulator.replaySnapshot.destructionConfig; // 唯一の出典(P3-1-Q9-2、不変)
   const config = composeEffectiveMotorConfig(baseConfig, accumulator.destructionState, destructionConfig); // 新規(ゲート4)
-  const physicsState = step(config, motorState, dt, rng, loadTorque, effectiveInertia); // 実効configを使用
+  const physicsState = step(config, motorState, dt, { coilDeformOmegaRadS: accumulator.replaySnapshot.destructionConfig.d01.coilDeformOmegaRadS, rng, loadTorque, effectiveInertia }); // 実効configを使用
   const frame = buildMotorOnlyFrameInput(config, motorState, physicsState); // 同じ実効configを使用(既存規約を維持)
   const { state, events } = advanceDestructionState(
     accumulator.destructionState, frame, destructionConfig, accumulator.replaySnapshot.runContext, dt,
@@ -1534,9 +1558,10 @@ export function stepMotorWithDestruction(
 }
 
 // vehiclePhysics.tsの`type Rng = () => number`は非exportのため、destructionOrchestration.ts側から
-// 直接参照できない。vehiclePhysics.tsは無改修のまま、既存`stepTestRun`の公開シグネチャから
-// 型を導出する(MotorStepRngと同型のパターン)。
-type VehicleStepRng = NonNullable<Parameters<typeof stepTestRun>[5]>;
+// 直接参照できない。公開型`VehicleStepOptions`のrngフィールドから導出する
+// (MotorStepRngと同型のパターン。P4-1C R2-A以前は`Parameters<typeof stepTestRun>[5]`だった)。
+// 位置添字を使わない理由は上の`MotorStepRng`と同じ。
+type VehicleStepRng = NonNullable<VehicleStepOptions['rng']>;
 
 // P3-2ゲート6(docs/phase3-p3-2-plan.md v17 §5.1、正式Fable Q8裁定)。
 /**
@@ -1576,7 +1601,7 @@ export function stepTestRunWithDestruction(
   // 実際にstepVehicleへ渡される引数である。省略すると既定値0で走行し、RunSnapshotが
   // 保持するslopeRadが実際の物理へ反映されない「死にフィールド」になるため、M-2是正として
   // 最後の引数まで明示的に渡す。
-  const rawNextPhysicsState = stepTestRun(motorConfig, carConfig, prevPhysicsState, dt, courseLengthM, rng, slopeRad);
+  const rawNextPhysicsState = stepTestRun(motorConfig, carConfig, prevPhysicsState, dt, courseLengthM, { coilDeformOmegaRadS: destructionConfig.d01.coilDeformOmegaRadS, rng, slopeRad });
   const frame = buildVehicleFrameInput(motorConfig, carConfig, prevPhysicsState, rawNextPhysicsState); // 5.3節、ゲート5で新設済みの実関数をそのまま使用
   const { state, events } = advanceDestructionState(
     accumulator.destructionState, frame, destructionConfig, accumulator.replaySnapshot.runContext, dt,
@@ -1736,7 +1761,7 @@ export function stepTrackRunWithDestruction(
   // overheated保留規則(正式Fable P3-2ゲート5 Q13-1裁定)のpre面。base step内部の早期return
   // ガード(status==='overheated'なら入力をそのまま返す)を回避するため、prev側へ適用する。
   const prevPhysicsState = normalizeOverheatedStatusForD04Hold(vehicleState, accumulator.destructionState);
-  const rawNextPhysicsState = stepTrackRun(motorConfig, carConfig, track, prevPhysicsState, dt, rng);
+  const rawNextPhysicsState = stepTrackRun(motorConfig, carConfig, track, prevPhysicsState, dt, { coilDeformOmegaRadS: destructionConfig.d01.coilDeformOmegaRadS, rng });
   const frame = buildVehicleFrameInput(motorConfig, carConfig, prevPhysicsState, rawNextPhysicsState);
   const { state, events } = advanceDestructionState(
     accumulator.destructionState, frame, destructionConfig, accumulator.replaySnapshot.runContext, dt,

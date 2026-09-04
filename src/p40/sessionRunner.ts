@@ -22,6 +22,7 @@ import type { CarConfig, VehicleSimState } from '../engine/vehiclePhysics';
 import { createInitialVehicleState } from '../engine/vehiclePhysics';
 import { stepTrackRun, type ValidatedTrackDefinition } from '../engine/trackPhysics';
 import { createRunRng } from '../engine/destructionOrchestration';
+import { COIL_DEFORM_OMEGA } from '../engine/constants';
 import { aggregateWindingRecord, resolveWindingRunnability, type P4WindingAggregate, type WindingRecord } from '../materials/windingRecord';
 
 /** 物理タイムステップ。既存と同一の固定値(spec §2、engine凍結方針)。 */
@@ -54,7 +55,10 @@ export function stepPhase4Track(
   dt: number,
   rng: () => number,
 ): VehicleSimState {
-  return stepTrackRun(motorConfig, carConfig, track, state, dt, rng);
+  // P4-1C R2-A(2026-08-31人間再承認): `stepTrackRun`のoptionsがrequiredになったための
+  // 機械的追随。P4-0はD01閾値を動かさないため、`constants.ts`の`COIL_DEFORM_OMEGA`
+  // (単一出典)をそのまま渡す——P4-0の決定論(固定record hash・trace一致)は不変である。
+  return stepTrackRun(motorConfig, carConfig, track, state, dt, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng });
 }
 
 /** trace 1点(§8: 既存`TestRunSample`相当の項目に限定し、新しい計測量を作らない)。 */

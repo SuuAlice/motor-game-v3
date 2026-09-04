@@ -6,11 +6,10 @@
 // scoring.tsとの循環参照はimport typeのみで構成する(型のみのためコンパイル時に
 // 消去され、実行時の循環importにはならない)。
 import type { MotorConfig } from './motorPhysics';
-import { stepVehicle, type CarConfig, type VehicleSimState } from './vehiclePhysics';
+import { stepVehicle, type CarConfig, type VehicleSimState, type VehicleStepOptions } from './vehiclePhysics';
 import type { Objective } from './scoring';
 import { BATTERY_CAPACITY_J_1_5V, BATTERY_CAPACITY_J_3_0V } from './constants';
 
-type Rng = () => number;
 
 // spec §4.10のまま
 export interface TrackSegment {
@@ -181,7 +180,7 @@ export function stepTrackRun(
   track: ValidatedTrackDefinition,
   state: VehicleSimState,
   dt: number,
-  rng: Rng = Math.random,
+  options: VehicleStepOptions,
 ): VehicleSimState {
   // 終端状態の安定性: stepVehicle自身も同じ早期returnパターンを持つが、
   // トラック層でも二重に安定させる
@@ -203,12 +202,17 @@ export function stepTrackRun(
   // 超過を許容する、STALL_DETECTION_TIME_S等と同じ設計慣習)。
   const forcePowerOff = track.hasEnergyBudget === true && state.energyUsedJ >= computeEnergyBudgetJ(motorConfig);
 
-  const result = stepVehicle(motorConfig, carConfig, state, dt, rng, slopeRad, {
-    surfaceGrip: segment.surfaceGrip,
-    curveRadiusM: segment.curveRadiusM,
-    roughness: segment.roughness,
-    allowReverse: track.allowReverse ?? false,
-    forcePowerOff,
+  const result = stepVehicle(motorConfig, carConfig, state, dt, {
+    coilDeformOmegaRadS: options.coilDeformOmegaRadS,
+    rng: options.rng,
+    slopeRad,
+    trackInputs: {
+      surfaceGrip: segment.surfaceGrip,
+      curveRadiusM: segment.curveRadiusM,
+      roughness: segment.roughness,
+      allowReverse: track.allowReverse ?? false,
+      forcePowerOff,
+    },
   });
 
   // フレーム終了時点の新しいpositionMから区間を再解決し、trackSegmentIndexへ

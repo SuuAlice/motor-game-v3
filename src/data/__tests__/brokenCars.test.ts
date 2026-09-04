@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { COIL_DEFORM_OMEGA } from '../../engine/constants';
 import { BROKEN_CARS } from '../brokenCars';
 import { createInitialVehicleState, stepTestRun } from '../../engine/vehiclePhysics';
 
@@ -30,7 +31,7 @@ describe('故障車プリセット', () => {
       }
       let state = createInitialVehicleState(motorConfig, carConfig);
       for (let step = 0; step < 120 * 30 && (state.status === 'ready' || state.status === 'running'); step += 1) {
-        state = stepTestRun(motorConfig, carConfig, state, 1 / 120, 10, () => 0.5);
+        state = stepTestRun(motorConfig, carConfig, state, 1 / 120, 10, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: () => 0.5 });
       }
       expect(state.status, item.id).toBe('finished');
     }

@@ -65,7 +65,7 @@ function runSteps(
 ): VehicleSimState {
   let s = state;
   for (let i = 0; i < steps; i++) {
-    s = stepVehicle(motorConfig, carConfig, s, DT, rng);
+    s = stepVehicle(motorConfig, carConfig, s, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: rng });
   }
   return s;
 }
@@ -79,7 +79,7 @@ describe('Phase2受け入れ基準#1: 適正モーター+標準車体で10mを�
     const maxSteps = 120 * 30;
     let steps = 0;
     while (state.status !== 'finished' && state.status !== 'stalled' && state.status !== 'overheated' && steps < maxSteps) {
-      state = stepTestRun(motorConfig, carConfig, state, DT, 10, rng);
+      state = stepTestRun(motorConfig, carConfig, state, DT, 10, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: rng });
       steps += 1;
     }
     expect(state.status).toBe('finished');
@@ -121,8 +121,8 @@ describe('Phase2受け入れ基準#2: ギヤ比を上げると初期加速度が
       velocityMps: (motorOmega / carHigh.gearRatio) * (carHigh.wheelDiameterMm / 2000),
     };
 
-    stateLow = stepVehicle(motorConfig, carLow, stateLow, DT, rngLow);
-    stateHigh = stepVehicle(motorConfig, carHigh, stateHigh, DT, rngHigh);
+    stateLow = stepVehicle(motorConfig, carLow, stateLow, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: rngLow });
+    stateHigh = stepVehicle(motorConfig, carHigh, stateHigh, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: rngHigh });
     expect(stateHigh.accelerationMps2).toBeGreaterThan(stateLow.accelerationMps2);
 
     // 無負荷最高速(定常走行速度)の比較は、同条件で十分長く走らせて確認する
@@ -163,12 +163,12 @@ describe('Phase2受け入れ基準#3: 車輪径を上げると同じ車軸回転
 
     const rngSmall = mulberry32(3);
     const rngLarge = mulberry32(3);
-    const smallWheelState = stepVehicle(motorConfig, carSmallWheel, baseState, DT, rngSmall);
+    const smallWheelState = stepVehicle(motorConfig, carSmallWheel, baseState, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: rngSmall });
     const largeWheelBaseState: VehicleSimState = {
       ...baseState,
       velocityMps: (motorOmega / carLargeWheel.gearRatio) * (carLargeWheel.wheelDiameterMm / 2000),
     };
-    const largeWheelState = stepVehicle(motorConfig, carLargeWheel, largeWheelBaseState, DT, rngLarge);
+    const largeWheelState = stepVehicle(motorConfig, carLargeWheel, largeWheelBaseState, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: rngLarge });
 
     // 同一のmotor.omegaから出発しているため、axleOmega=motor.omega/gearRatioは
     // ほぼ同一(1ステップの積分による微小差のみ)。v=axleOmega・wheelRadiusにより
@@ -187,8 +187,8 @@ describe('Phase2受け入れ基準#4: 質量を増やすと同じ駆動力で加
     const rngLight = mulberry32(4);
     const rngHeavy = mulberry32(4);
 
-    const stateLight = stepVehicle(motorConfig, carLight, createInitialVehicleState(motorConfig, carLight), DT, rngLight);
-    const stateHeavy = stepVehicle(motorConfig, carHeavy, createInitialVehicleState(motorConfig, carHeavy), DT, rngHeavy);
+    const stateLight = stepVehicle(motorConfig, carLight, createInitialVehicleState(motorConfig, carLight), DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: rngLight });
+    const stateHeavy = stepVehicle(motorConfig, carHeavy, createInitialVehicleState(motorConfig, carHeavy), DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: rngHeavy });
 
     expect(stateHeavy.accelerationMps2).toBeLessThan(stateLight.accelerationMps2);
   });
@@ -208,7 +208,7 @@ describe('Phase2受け入れ基準#5: グリップ限界を超えると空転率
 
     let sawSlip = false;
     for (let i = 0; i < 120 * 3; i++) {
-      state = stepVehicle(motorConfig, carConfig, state, DT, rng);
+      state = stepVehicle(motorConfig, carConfig, state, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: rng });
       if (state.isSlipping) sawSlip = true;
       // 案X(接地摩擦の符号付き方式)導入後、driveForceNは符号付き(車体側が
       // ホイールを追い越した場合は負)になり得る。上限は大きさ(絶対値)で判定する
@@ -226,7 +226,7 @@ describe('Phase2受け入れ基準#6: 非空転中は全ステップでv=(ω_mot
     let state = createInitialVehicleState(motorConfig, carConfig);
     const wheelRadius = carConfig.wheelDiameterMm / 2000;
     for (let i = 0; i < 120 * 5; i++) {
-      state = stepVehicle(motorConfig, carConfig, state, DT, rng);
+      state = stepVehicle(motorConfig, carConfig, state, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: rng });
       if (!state.isSlipping) {
         const expectedV = (state.motor.omega / carConfig.gearRatio) * wheelRadius;
         expect(state.velocityMps).toBeCloseTo(expectedV, 6);
@@ -250,7 +250,7 @@ describe('Phase2受け入れ基準#7: 非空転の定常走行でモーター角
     const windowSize = 12;
     const velocities: number[] = [];
     for (let i = 0; i < 120 * 5; i++) {
-      state = stepVehicle(motorConfig, carConfig, state, DT, rng);
+      state = stepVehicle(motorConfig, carConfig, state, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: rng });
       expect(Number.isFinite(state.velocityMps)).toBe(true);
       expect(Number.isFinite(state.motor.omega)).toBe(true);
       velocities.push(state.velocityMps);
@@ -310,7 +310,7 @@ describe('Phase2受け入れ基準#8: 空転開始・再結合境界で速度不
     for (let i = 0; i < 120 * 3; i++) {
       const before = state;
       if (before.isSlipping) wasSlipping = true;
-      state = stepVehicle(motorConfig, carConfig, state, DT, rng);
+      state = stepVehicle(motorConfig, carConfig, state, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: rng });
 
       // E_mech厳密不変条件(コギング位置エネルギー込み)。弱コギングのため
       // 離散化誤差は無視できる
@@ -359,7 +359,7 @@ describe('Phase2受け入れ基準#8: 空転開始・再結合境界で速度不
     let wasSlipping = false;
     let steps = 0;
     while (!state.isSlipping && steps < 120) {
-      state = stepVehicle(motorConfig, carConfig, state, DT, rng);
+      state = stepVehicle(motorConfig, carConfig, state, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: rng });
       steps += 1;
     }
     wasSlipping = state.isSlipping;
@@ -377,7 +377,7 @@ describe('Phase2受け入れ基準#8: 空転開始・再結合境界で速度不
     carConfig = standardCarConfig({ tireGrip: 0.4 });
     for (let i = 0; i < 120 * 3; i++) {
       const before = state;
-      state = stepVehicle(motorConfig, carConfig, state, DT, rng);
+      state = stepVehicle(motorConfig, carConfig, state, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: rng });
 
       expect(Number.isFinite(state.velocityMps)).toBe(true);
       expect(state.energyBreakdown.slipLossJ).toBeGreaterThanOrEqual(0);
@@ -408,7 +408,7 @@ describe('Phase2受け入れ基準#9: モーター停止時に前進・逆走し
     expect(Math.abs(state.velocityMps)).toBeLessThan(0.01);
 
     for (let i = 0; i < 120 * 3; i++) {
-      state = stepVehicle(motorConfig, carConfig, state, DT, rng);
+      state = stepVehicle(motorConfig, carConfig, state, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: rng });
       expect(Math.abs(state.velocityMps)).toBeLessThanOrEqual(0.01);
     }
   });
@@ -442,7 +442,7 @@ describe('Phase2受け入れ基準#11・#12: 磁石近接帯での発進失敗�
     const maxSteps = 120 * 5; // 押し出しからの自然減速+STALL_DETECTION_TIME_Sの猶予を含む
     let steps = 0;
     while (state.status !== 'stalled' && steps < maxSteps) {
-      state = stepVehicle(motorConfig, carConfig, state, DT, rng);
+      state = stepVehicle(motorConfig, carConfig, state, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: rng });
       steps += 1;
     }
     expect(state.status).toBe('stalled');
@@ -451,7 +451,7 @@ describe('Phase2受け入れ基準#11・#12: 磁石近接帯での発進失敗�
     const velocityAtStall = state.velocityMps;
     const omegaAtStall = state.motor.omega;
     for (let i = 0; i < 120 * 3; i++) {
-      state = stepVehicle(motorConfig, carConfig, state, DT, rng);
+      state = stepVehicle(motorConfig, carConfig, state, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: rng });
     }
     expect(state.status).toBe('stalled');
     expect(state.velocityMps).toBe(velocityAtStall);
@@ -467,7 +467,7 @@ describe('Phase2受け入れ基準#13: 短絡時は完走せず、発熱でoverh
     let state = createInitialVehicleState(motorConfig, carConfig);
     let steps = 0;
     while (state.status !== 'overheated' && steps < 600) {
-      state = stepVehicle(motorConfig, carConfig, state, DT, rng);
+      state = stepVehicle(motorConfig, carConfig, state, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: rng });
       steps += 1;
     }
     expect(state.status).toBe('overheated');
@@ -511,8 +511,8 @@ describe('Phase2受け入れ基準#14: 無ワニス構成が高回転域でコ�
     const totalSteps = COIL_DEFORM_FRAMES + 180;
     for (let i = 0; i < totalSteps; i++) {
       const prevMotor = stateCollapsing.motor;
-      stateCollapsing = stepVehicle(motorConfigCollapsing, carConfig, stateCollapsing, DT, rngCollapsing);
-      stateBaseline = stepVehicle(motorConfigBaseline, carConfig, stateBaseline, DT, rngBaseline);
+      stateCollapsing = stepVehicle(motorConfigCollapsing, carConfig, stateCollapsing, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: rngCollapsing });
+      stateBaseline = stepVehicle(motorConfigBaseline, carConfig, stateBaseline, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: rngBaseline });
       if (collapsedAt < 0 && didCollapseJustHappen(prevMotor, stateCollapsing.motor)) {
         collapsedAt = i;
       }
@@ -580,7 +580,7 @@ describe('Phase2受け入れ基準: axisOffsetMm>0構成でのE_mech増加率が
         shadowRng(); // advanceMotorStateが軸ずれ振動用に消費する1回分をシャドウでも消費し、rng列を同期させ続ける
       }
 
-      state = stepVehicle(motorConfig, carConfig, state, DT, realRng);
+      state = stepVehicle(motorConfig, carConfig, state, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: realRng });
       // 上界導出は非空転分岐の式(loadTorque=-tResistReflected、effectiveInertia=jEff)
       // に依存するため、この構成が常に非空転であることを確認する
       expect(state.isSlipping).toBe(false);
@@ -630,7 +630,7 @@ describe('Phase3受け入れ基準: allowReverse=falseのラチェット保持(F
     let convergedFrame = -1;
     let monotonicSinceConverged = true;
     for (let i = 0; i < 120; i++) {
-      state = stepVehicle(motorConfig, carConfig, state, DT, rng, slopeRad, { allowReverse: false });
+      state = stepVehicle(motorConfig, carConfig, state, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: rng, slopeRad: slopeRad, trackInputs: { allowReverse: false } });
       if (state.isSlipping) everSlipped = true;
       if (convergedFrame < 0 && state.motor.omega === 0 && state.velocityMps === 0) convergedFrame = i;
       if (convergedFrame >= 0 && state.motor.batteryHeat < prevBatteryHeat - 1e-9) monotonicSinceConverged = false;
@@ -660,7 +660,7 @@ describe('Phase3受け入れ基準: allowReverse=falseのラチェット保持(F
     const rng = mulberry32(1);
     let state = createInitialVehicleState(motorConfig, carConfig);
     for (let i = 0; i < 600; i++) {
-      state = stepVehicle(motorConfig, carConfig, state, DT, rng, slopeRad, { allowReverse: false });
+      state = stepVehicle(motorConfig, carConfig, state, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: rng, slopeRad: slopeRad, trackInputs: { allowReverse: false } });
       if (state.status !== 'running') break;
     }
     expect(state.status).toBe('stalled');
@@ -689,7 +689,7 @@ describe('Phase3受け入れ基準: allowReverse=falseのラチェット保持(F
     let prevETotal = eTotal(state);
     let sawReverse = false;
     for (let i = 0; i < 300; i++) {
-      state = stepVehicle(motorConfig, carConfig, state, DT, rng, slopeRad, { allowReverse: true });
+      state = stepVehicle(motorConfig, carConfig, state, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: rng, slopeRad: slopeRad, trackInputs: { allowReverse: true } });
       if (state.velocityMps < 0) sawReverse = true;
       const batteryInputThisStep = motorConfig.batteryVoltage * state.motor.current * DT;
       const current = eTotal(state);
@@ -716,7 +716,7 @@ describe('Phase3受け入れ基準: allowReverse=falseのラチェット保持(F
     let found = false;
     for (let i = 0; i < 60; i++) {
       const before = state;
-      state = stepVehicle(motorConfig, carConfig, state, DT, rng, slopeRad, { allowReverse: false });
+      state = stepVehicle(motorConfig, carConfig, state, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: rng, slopeRad: slopeRad, trackInputs: { allowReverse: false } });
       if (before.motor.omega !== 0 && state.motor.omega === 0 && state.velocityMps === 0) {
         const expectedLostKE = 0.5 * jMotor * before.motor.omega * before.motor.omega + 0.5 * massKg * before.velocityMps * before.velocityMps;
         const heatJIncrement = state.energyBreakdown.heatJ - before.energyBreakdown.heatJ;
@@ -748,7 +748,7 @@ describe('Phase3受け入れ基準: allowReverse=falseのラチェット保持(F
       isSlipping: true,
     };
     const rng = mulberry32(1);
-    const next = stepVehicle(motorConfig, carConfig, state, DT, rng, slopeRad, { allowReverse: false });
+    const next = stepVehicle(motorConfig, carConfig, state, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: rng, slopeRad: slopeRad, trackInputs: { allowReverse: false } });
 
     expect(next.velocityMps).toBeGreaterThanOrEqual(0); // クランプにより負にならない
     // モーター側はrunSlipStepの結果そのまま(ラチェットの影響を受けない)。
@@ -772,7 +772,7 @@ describe('Phase3受け入れ基準: allowReverse=falseのラチェット保持(F
     let sawReunion = false;
     for (let i = 0; i < 300; i++) {
       const before = state;
-      state = stepVehicle(motorConfig, carConfig, state, DT, rng, slopeRad, { allowReverse: true });
+      state = stepVehicle(motorConfig, carConfig, state, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: rng, slopeRad: slopeRad, trackInputs: { allowReverse: true } });
       if (state.isSlipping && state.velocityMps < 0) sawReverseSlip = true;
       if (before.isSlipping && !state.isSlipping) sawReunion = true;
       expect(state.energyBreakdown.slipLossJ).toBeGreaterThanOrEqual(0);
@@ -805,7 +805,7 @@ describe('Phase3受け入れ基準: カーブとコースアウト判定(spec §
     let state = buildCurveState(velocity, carConfig, motorConfig);
     const rng = mulberry32(1);
     for (let i = 0; i < 120; i++) {
-      state = stepVehicle(motorConfig, carConfig, state, DT, rng, 0, { curveRadiusM, surfaceGrip });
+      state = stepVehicle(motorConfig, carConfig, state, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: rng, slopeRad: 0, trackInputs: { curveRadiusM, surfaceGrip } });
       if (state.status !== 'running') break;
     }
     return state;
@@ -840,7 +840,7 @@ describe('Phase3受け入れ基準: カーブとコースアウト判定(spec §
     for (const curveRadiusM of [0, -1]) {
       let s = state;
       for (let i = 0; i < 60; i++) {
-        s = stepVehicle(motorConfig, carConfig, s, DT, rng, 0, { curveRadiusM });
+        s = stepVehicle(motorConfig, carConfig, s, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: rng, slopeRad: 0, trackInputs: { curveRadiusM } });
         expect(Number.isFinite(s.velocityMps)).toBe(true);
         expect(Number.isFinite(s.derailDurationS)).toBe(true);
         expect(s.status).not.toBe('derailed');
@@ -861,7 +861,7 @@ describe('Phase3受け入れ基準: カーブとコースアウト判定(spec §
     const rng = mulberry32(1);
     let derailed = false;
     for (let i = 0; i < 120; i++) {
-      state = stepVehicle(motorConfig, carConfig, state, DT, rng, 0, { curveRadiusM: 1.0, surfaceGrip: 0 });
+      state = stepVehicle(motorConfig, carConfig, state, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: rng, slopeRad: 0, trackInputs: { curveRadiusM: 1.0, surfaceGrip: 0 } });
       if (state.status === 'derailed') { derailed = true; break; }
       expect(Number.isFinite(state.velocityMps)).toBe(true); // a_limitが負のままなら異常値が伝播しないことの確認
     }
@@ -881,8 +881,8 @@ describe('Phase3受け入れ基準: でこぼこ道の物理効果(spec §2.3)',
     let stateSmall = createInitialVehicleState(motorConfig, smallWheel);
     let stateLarge = createInitialVehicleState(motorConfig, largeWheel);
     for (let i = 0; i < 120 * 5; i++) {
-      stateSmall = stepVehicle(motorConfig, smallWheel, stateSmall, DT, rngSmall, 0, { roughness: 0.1 });
-      stateLarge = stepVehicle(motorConfig, largeWheel, stateLarge, DT, rngLarge, 0, { roughness: 0.1 });
+      stateSmall = stepVehicle(motorConfig, smallWheel, stateSmall, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: rngSmall, slopeRad: 0, trackInputs: { roughness: 0.1 } });
+      stateLarge = stepVehicle(motorConfig, largeWheel, stateLarge, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: rngLarge, slopeRad: 0, trackInputs: { roughness: 0.1 } });
     }
     expect(stateSmall.velocityMps).toBeLessThan(stateLarge.velocityMps);
   });
@@ -895,8 +895,8 @@ describe('Phase3受け入れ基準: でこぼこ道の物理効果(spec §2.3)',
     let withRoughness = createInitialVehicleState(motorConfig, carConfig);
     let withoutRoughness = createInitialVehicleState(motorConfig, carConfig);
     for (let i = 0; i < 60; i++) {
-      withRoughness = stepVehicle(motorConfig, carConfig, withRoughness, DT, rngA, 0, { roughness: 1.0 });
-      withoutRoughness = stepVehicle(motorConfig, carConfig, withoutRoughness, DT, rngB, 0, { roughness: 0 });
+      withRoughness = stepVehicle(motorConfig, carConfig, withRoughness, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: rngA, slopeRad: 0, trackInputs: { roughness: 1.0 } });
+      withoutRoughness = stepVehicle(motorConfig, carConfig, withoutRoughness, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: rngB, slopeRad: 0, trackInputs: { roughness: 0 } });
       expect(withRoughness.energyBreakdown.heatJ).toBeGreaterThanOrEqual(0);
     }
     expect(withRoughness.energyBreakdown.heatJ).toBeGreaterThan(withoutRoughness.energyBreakdown.heatJ);
@@ -922,7 +922,7 @@ describe('Phase3受け入れ基準: slipRatioの方向非依存化(指摘8)', ()
     let state = createInitialVehicleState(motorConfig, carConfig);
     let sawPositiveSlipRatio = false;
     for (let i = 0; i < 120 * 3; i++) {
-      state = stepVehicle(motorConfig, carConfig, state, DT, rng);
+      state = stepVehicle(motorConfig, carConfig, state, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: rng });
       if (state.isSlipping && state.slipRatio > 0) sawPositiveSlipRatio = true;
       expect(state.slipRatio).toBeGreaterThanOrEqual(0);
       expect(state.slipRatio).toBeLessThanOrEqual(1);
@@ -938,7 +938,7 @@ describe('Phase3受け入れ基準: slipRatioの方向非依存化(指摘8)', ()
     let state = createInitialVehicleState(motorConfig, carConfig);
     let sawNonZeroSlipRatioWhileReversing = false;
     for (let i = 0; i < 300; i++) {
-      state = stepVehicle(motorConfig, carConfig, state, DT, rng, slopeRad, { allowReverse: true });
+      state = stepVehicle(motorConfig, carConfig, state, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: rng, slopeRad: slopeRad, trackInputs: { allowReverse: true } });
       if (state.isSlipping && state.velocityMps < 0 && state.slipRatio > 0) sawNonZeroSlipRatioWhileReversing = true;
       if (state.status !== 'running') break;
     }
@@ -961,7 +961,7 @@ describe('Phase3受け入れ基準: 終端状態の優先順位(overheated→sta
     const rng = mulberry32(1);
     let steps = 0;
     while ((state.status === 'ready' || state.status === 'running') && steps < 600) {
-      state = stepVehicle(motorConfig, carConfig, state, DT, rng, 0, { curveRadiusM: 1.0, surfaceGrip: 0 });
+      state = stepVehicle(motorConfig, carConfig, state, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: rng, slopeRad: 0, trackInputs: { curveRadiusM: 1.0, surfaceGrip: 0 } });
       steps += 1;
     }
     expect(state.status).toBe('overheated');
@@ -978,10 +978,10 @@ describe('Phase3受け入れ基準: energyBreakdown「案B」driveJの二重計�
     let state = createInitialVehicleState(motorConfig, carConfig);
     // 加速中(定常前)の代表的な1フレームを対象にする
     for (let i = 0; i < 5; i++) {
-      state = stepVehicle(motorConfig, carConfig, state, DT, rng);
+      state = stepVehicle(motorConfig, carConfig, state, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: rng });
     }
     const before = state;
-    const next = stepVehicle(motorConfig, carConfig, before, DT, rng);
+    const next = stepVehicle(motorConfig, carConfig, before, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: rng });
 
     // 期待値を独立に計算する(motorConfig・effectiveMotorConfigの違いはaxisOffsetMm=0の
     // ためcomputeCoggingPotentialの結果に影響しない)
@@ -1025,7 +1025,7 @@ describe('Phase3受け入れ基準: energyBreakdown「案B」driveJの二重計�
     const slopeRad = (-15 * Math.PI) / 180; // 下り坂(負の勾配、spec §4.4の符号規約でF_slopeが前進方向に働く)
     const rng = mulberry32(1);
     const before = createInitialVehicleState(motorConfig, carConfig);
-    const next = stepVehicle(motorConfig, carConfig, before, DT, rng, slopeRad, { allowReverse: true, forcePowerOff: true });
+    const next = stepVehicle(motorConfig, carConfig, before, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: rng, slopeRad: slopeRad, trackInputs: { allowReverse: true, forcePowerOff: true } });
 
     expect(next.motor.current).toBe(0); // forcePowerOffが効いていることの確認
     const actualDriveJIncrement = next.energyBreakdown.driveJ - before.energyBreakdown.driveJ;
@@ -1041,11 +1041,11 @@ describe('Phase3受け入れ基準: energyBreakdown「案B」driveJの二重計�
     const rng = mulberry32(1);
     let state = createInitialVehicleState(motorConfig, carConfig);
     for (let i = 0; i < 120 * 15; i++) {
-      state = stepVehicle(motorConfig, carConfig, state, DT, rng);
+      state = stepVehicle(motorConfig, carConfig, state, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: rng });
     }
     const driveJAtSteady = state.energyBreakdown.driveJ;
     for (let i = 0; i < 60; i++) {
-      state = stepVehicle(motorConfig, carConfig, state, DT, rng);
+      state = stepVehicle(motorConfig, carConfig, state, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: rng });
     }
     const driveJIncreaseAfterSteady = state.energyBreakdown.driveJ - driveJAtSteady;
     expect(driveJIncreaseAfterSteady).toBeLessThan(driveJAtSteady * 0.05);
@@ -1057,7 +1057,7 @@ describe('Phase3受け入れ基準: energyBreakdown「案B」driveJの二重計�
     const rng = mulberry32(1);
     let state = createInitialVehicleState(motorConfig, carConfig);
     for (let i = 0; i < 120 * 5; i++) {
-      state = stepVehicle(motorConfig, carConfig, state, DT, rng);
+      state = stepVehicle(motorConfig, carConfig, state, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: rng });
     }
     const sumOfBuckets =
       state.energyBreakdown.driveJ +
@@ -1078,7 +1078,7 @@ describe('Phase3受け入れ基準: energyBreakdown「案B」driveJの二重計�
     const rng = mulberry32(1);
     let state = createInitialVehicleState(motorConfig, carConfig);
     for (let i = 0; i < 300; i++) {
-      state = stepVehicle(motorConfig, carConfig, state, DT, rng, slopeRad, { allowReverse: true });
+      state = stepVehicle(motorConfig, carConfig, state, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: rng, slopeRad: slopeRad, trackInputs: { allowReverse: true } });
       expect(state.energyBreakdown.driveJ).toBeGreaterThanOrEqual(0);
       expect(state.energyBreakdown.gearLossJ).toBeGreaterThanOrEqual(0);
       expect(state.energyBreakdown.slipLossJ).toBeGreaterThanOrEqual(0);

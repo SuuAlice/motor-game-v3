@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { COIL_DEFORM_OMEGA } from '../constants';
 import { evaluateChallenge, evaluateObjectives, validateBuildRestrictions, type HistorySample, type Objective } from '../scoring';
 import { step, type MotorConfig, type SimState } from '../motorPhysics';
 import { createInitialVehicleState, type CarConfig, type VehicleSimState } from '../vehiclePhysics';
@@ -88,7 +89,7 @@ describe('evaluateChallenge(実際のstep()出力を使った統合テスト)', 
     const sampleEverySteps = Math.round(0.1 / DT);
     const totalSteps = 120 * 20; // 20秒分シミュレート
     for (let i = 0; i < totalSteps; i++) {
-      s = step(config, s, DT, NO_NOISE_RNG);
+      s = step(config, s, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: NO_NOISE_RNG });
       if (i % sampleEverySteps === 0) {
         history.push({ t: i * DT, rpm: s.rpm, current: s.current, backEmf: s.backEmf });
       }

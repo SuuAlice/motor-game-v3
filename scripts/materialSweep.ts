@@ -31,6 +31,7 @@ import { BATTERY_MATERIALS, GEAR_MATERIALS, MAGNET_MATERIALS, WIRE_MATERIALS } f
 import { computeCoggingTorque, computeElectricalState, computeMaxTurns, type MotorConfig } from '../src/engine/motorPhysics';
 import { createInitialVehicleState, type CarConfig, type VehicleSimState } from '../src/engine/vehiclePhysics';
 import { createValidatedTrack, stepTrackRun, type ValidatedTrackDefinition } from '../src/engine/trackPhysics';
+import { COIL_DEFORM_OMEGA } from '../src/engine/constants';
 import { TRACK_BY_ID } from '../src/data/tracks';
 
 const DT = 1 / 120;
@@ -217,7 +218,7 @@ function runUntilTerminal(motorConfig: MotorConfig, carConfig: CarConfig, track:
   let allFinite = true;
   for (let i = 0; i < maxSteps; i++) {
     if (state.status !== 'ready' && state.status !== 'running') break;
-    state = stepTrackRun(motorConfig, carConfig, track, state, DT, rng);
+    state = stepTrackRun(motorConfig, carConfig, track, state, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng });
     if (!isStateFinite(state)) {
       allFinite = false;
       break;

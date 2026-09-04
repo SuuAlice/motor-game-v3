@@ -36,7 +36,7 @@ function frameInput(overrides: Partial<DestructionFrameInput> = {}): Destruction
 function validDestructionConfig(overrides: Partial<DestructionConfig> = {}): DestructionConfig {
   return {
     battery: { profile: 'nonLipo', shortCircuitDurationLimitS: 3.0 },
-    d01: { decayExposureScaleRad: 1000, minEffectiveTurnsRatio: 0.5 },
+    d01: { decayExposureScaleRad: 1000, minEffectiveTurnsRatio: 0.5, coilDeformOmegaRadS: COIL_DEFORM_OMEGA },
     d02: { smokeGaugeThreshold: 0.5, coilOverheatGaugeLimit: 1.0, conductionScale: 0.1, dissipationCoefficient: 0.1, smokeResistanceMultiplier: 1.2 },
     d04: { bodyScorchDeltaFraction: 0.2, magnetScorchDeltaFraction: 0.15 },
     d05: {

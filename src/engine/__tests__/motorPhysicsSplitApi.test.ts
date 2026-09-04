@@ -4,6 +4,7 @@
 // を直接呼び出すため、step()経由のテスト(motorPhysics.test.ts等)だけでは
 // 分割APIの契約(唯一の正・RNG消費順序が一致すること)を証明できない。
 import { describe, expect, it } from 'vitest';
+import { COIL_DEFORM_OMEGA } from '../constants';
 import { step, evaluateMotorFrame, advanceMotorState, type MotorConfig, type SimState } from '../motorPhysics';
 import { mulberry32 } from './prng';
 
@@ -95,11 +96,11 @@ describe('Phase2受け入れ基準: 分割API(evaluateMotorFrame/advanceMotorSta
   for (const scenario of scenarios) {
     it(`${scenario.name}: step()の結果と分割API連結結果が完全一致する`, () => {
       const viaStep = countingRng(scenario.seed);
-      const resultViaStep = step(scenario.config, scenario.state, DT, viaStep.rng);
+      const resultViaStep = step(scenario.config, scenario.state, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: viaStep.rng });
 
       const viaSplit = countingRng(scenario.seed);
       const evaluation = evaluateMotorFrame(scenario.config, scenario.state, viaSplit.rng);
-      const resultViaSplit = advanceMotorState(scenario.config, scenario.state, evaluation, DT, viaSplit.rng);
+      const resultViaSplit = advanceMotorState(scenario.config, scenario.state, evaluation, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: viaSplit.rng });
 
       expect(resultViaSplit).toEqual(resultViaStep);
       expect(viaSplit.count()).toBe(viaStep.count());
@@ -110,19 +111,11 @@ describe('Phase2受け入れ基準: 分割API(evaluateMotorFrame/advanceMotorSta
       const effectiveInertia = 5e-5;
 
       const viaStep = countingRng(scenario.seed + 100);
-      const resultViaStep = step(scenario.config, scenario.state, DT, viaStep.rng, loadTorque, effectiveInertia);
+      const resultViaStep = step(scenario.config, scenario.state, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: viaStep.rng, loadTorque: loadTorque, effectiveInertia: effectiveInertia });
 
       const viaSplit = countingRng(scenario.seed + 100);
       const evaluation = evaluateMotorFrame(scenario.config, scenario.state, viaSplit.rng);
-      const resultViaSplit = advanceMotorState(
-        scenario.config,
-        scenario.state,
-        evaluation,
-        DT,
-        viaSplit.rng,
-        loadTorque,
-        effectiveInertia,
-      );
+      const resultViaSplit = advanceMotorState(scenario.config, scenario.state, evaluation, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: viaSplit.rng, loadTorque: loadTorque, effectiveInertia: effectiveInertia });
 
       expect(resultViaSplit).toEqual(resultViaStep);
       expect(viaSplit.count()).toBe(viaStep.count());
@@ -173,7 +166,7 @@ describe('Phase3受け入れ基準: evaluateMotorFrameのpowerOff引数', () => 
     const rng = mulberry32(1);
     for (let i = 0; i < 60; i++) {
       const evaluation = evaluateMotorFrame(config, state, rng, true);
-      state = advanceMotorState(config, state, evaluation, DT, rng);
+      state = advanceMotorState(config, state, evaluation, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: rng });
     }
     // HEAT_DISSIPATIONによる自然冷却のみのため、発熱は初期値を上回らない
     expect(state.batteryHeat).toBeLessThanOrEqual(0.1);

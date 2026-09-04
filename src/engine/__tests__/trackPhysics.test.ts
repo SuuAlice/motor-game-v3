@@ -18,7 +18,7 @@ import {
   type VehicleSimState,
 } from '../vehiclePhysics';
 import { computeCoggingPotential, computeJ, type MotorConfig, type SimState } from '../motorPhysics';
-import { BATTERY_CAPACITY_J_1_5V, BATTERY_CAPACITY_J_3_0V } from '../constants';
+import { BATTERY_CAPACITY_J_1_5V, BATTERY_CAPACITY_J_3_0V, COIL_DEFORM_OMEGA } from '../constants';
 import { mulberry32 } from './prng';
 
 const DT = 1 / 120;
@@ -81,7 +81,7 @@ describe('Phase3受け入れ基準#1: 同一設定+固定シードで結果が�
       let state = createInitialVehicleState(motorConfig, carConfig);
       const rng = mulberry32(1);
       for (let i = 0; i < 120 * 3; i++) {
-        state = stepTrackRun(motorConfig, carConfig, t, state, DT, rng);
+        state = stepTrackRun(motorConfig, carConfig, t, state, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: rng });
         if (state.status !== 'running') break;
       }
       return state;
@@ -99,7 +99,7 @@ describe('Phase3受け入れ基準#1: 同一設定+固定シードで結果が�
       let state = createInitialVehicleState(motorConfig, carConfig);
       const rng = mulberry32(2);
       for (let i = 0; i < 120 * 5; i++) {
-        state = stepTrackRun(motorConfig, carConfig, t, state, DT, rng);
+        state = stepTrackRun(motorConfig, carConfig, t, state, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: rng });
         if (state.status !== 'running') break;
       }
       return state;
@@ -148,7 +148,7 @@ describe('Phase3受け入れ基準#2: 坂を急にすると必要駆動力が単
       let steps = 0;
       const maxSteps = 120 * 15;
       while ((state.status === 'ready' || state.status === 'running') && steps < maxSteps) {
-        state = stepTrackRun(motorConfig, carConfig, t, state, DT, rng);
+        state = stepTrackRun(motorConfig, carConfig, t, state, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: rng });
         steps += 1;
       }
       results.push({ finished: state.status === 'finished', time: steps * DT });
@@ -264,7 +264,7 @@ describe('Phase3受け入れ基準: 区間境界をまたぐフレームでのE_
     for (let i = 0; i < 120 * 10; i++) {
       const beforeIndex = resolveSegmentAt(t, state.positionM)?.index;
       const beforeSlopeRad = (slopeADeg * Math.PI) / 180;
-      state = stepTrackRun(motorConfig, carConfig, t, state, DT, rng);
+      state = stepTrackRun(motorConfig, carConfig, t, state, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: rng });
       const afterIndex = resolveSegmentAt(t, state.positionM)?.index;
 
       const batteryInputThisStep = motorConfig.batteryVoltage * state.motor.current * DT;
@@ -297,7 +297,7 @@ describe('Phase3受け入れ基準: trackSegmentIndexはフレーム終了時点
     const rng = mulberry32(1);
     let crossedFrame = -1;
     for (let i = 0; i < 30; i++) {
-      state = stepTrackRun(motorConfig, carConfig, t, state, DT, rng);
+      state = stepTrackRun(motorConfig, carConfig, t, state, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: rng });
       if (state.trackSegmentIndex === 1) {
         crossedFrame = i;
         break;
@@ -318,7 +318,7 @@ describe('Phase3受け入れ基準: 省エネコースのエネルギー予算(s
     let state = createInitialVehicleState(motorConfig, carConfig);
     const rng = mulberry32(1);
     for (let i = 0; i < 120 * 60; i++) {
-      state = stepTrackRun(motorConfig, carConfig, t, state, DT, rng);
+      state = stepTrackRun(motorConfig, carConfig, t, state, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: rng });
       expect(state.failureCode).not.toBe('energyExhausted');
       if (state.status !== 'running') break;
     }
@@ -334,7 +334,7 @@ describe('Phase3受け入れ基準: 省エネコースのエネルギー予算(s
     const rng = mulberry32(1);
     let steps = 0;
     while (state.status === 'ready' || state.status === 'running') {
-      state = stepTrackRun(motorConfig, carConfig, t, state, DT, rng);
+      state = stepTrackRun(motorConfig, carConfig, t, state, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: rng });
       steps += 1;
       if (steps > 120 * 60) break;
     }
@@ -354,7 +354,7 @@ describe('Phase3受け入れ基準: 省エネコースのエネルギー予算(s
     const rng = mulberry32(11);
     let steps = 0;
     while (state.status === 'ready' || state.status === 'running') {
-      state = stepTrackRun(motorConfig, carConfig, t, state, DT, rng);
+      state = stepTrackRun(motorConfig, carConfig, t, state, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: rng });
       steps += 1;
       if (steps > 120 * 10) break;
     }
@@ -372,7 +372,7 @@ describe('Phase3受け入れ基準: 省エネコースのエネルギー予算(s
     let crossedFrame = -1;
     for (let i = 0; i < 120 * 60; i++) {
       const before = state;
-      state = stepTrackRun(motorConfig, carConfig, t, state, DT, rng);
+      state = stepTrackRun(motorConfig, carConfig, t, state, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: rng });
       if (before.energyUsedJ < BATTERY_CAPACITY_J_1_5V && state.energyUsedJ >= BATTERY_CAPACITY_J_1_5V) {
         crossedFrame = i;
         // このフレーム自体はフル給電されているため、増分はforcePowerOff後の
@@ -410,7 +410,7 @@ describe('Phase3受け入れ基準: 省エネコースのエネルギー予算(s
     let state2 = state;
     const rng2 = mulberry32(1);
     for (let i = 0; i < 120; i++) {
-      state2 = stepTrackRun(motorConfig, carConfig, shortTrack, state2, DT, rng2);
+      state2 = stepTrackRun(motorConfig, carConfig, shortTrack, state2, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: rng2 });
       if (state2.status !== 'running') break;
     }
     expect(state2.status).toBe('finished');
@@ -468,7 +468,7 @@ describe('Phase3受け入れ基準: createValidatedTrack(fail-fast契約)', () =
     let state = createInitialVehicleState(motorConfig, carConfig);
     const rng = mulberry32(1);
     // 型エラーなくstepTrackRunへ渡せること自体がこのテストの主眼(コンパイルが通ること)
-    state = stepTrackRun(motorConfig, carConfig, validated, state, DT, rng);
+    state = stepTrackRun(motorConfig, carConfig, validated, state, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: rng });
     expect(Number.isFinite(state.positionM)).toBe(true);
   });
 });
@@ -485,7 +485,7 @@ describe('Phase2 Step5b: 電池ratio(容量)のengine拡張', () => {
     let state = createInitialVehicleState(motorConfig, carConfig);
     const trajectory: VehicleSimState[] = [state]; // index 0 = 初期state
     for (let i = 0; i < n; i++) {
-      state = stepTrackRun(motorConfig, carConfig, t, state, DT, rng);
+      state = stepTrackRun(motorConfig, carConfig, t, state, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: rng });
       trajectory.push(state);
     }
     return trajectory;
@@ -532,7 +532,7 @@ describe('Phase2 Step5b: 電池ratio(容量)のengine拡張', () => {
           );
         }
         const before = state;
-        state = stepTrackRun(motorConfig, carConfig, t, state, DT, rng);
+        state = stepTrackRun(motorConfig, carConfig, t, state, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: rng });
         steps += 1;
         if (before.energyUsedJ < budget && state.energyUsedJ >= budget) {
           crossingCount += 1;

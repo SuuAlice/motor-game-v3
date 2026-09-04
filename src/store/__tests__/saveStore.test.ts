@@ -14,6 +14,7 @@ import {
   type RunApplicationEnvelope,
 } from '../runOutcomeApplication';
 import { GEAR_TOTAL_TOOTH_COUNT } from '../../materials/inventoryItem';
+import { COIL_DEFORM_OMEGA } from '../../engine/constants';
 import { useGameStore } from '../gameStore';
 import { captureRunSnapshot, restoreRunSnapshot, type CaptureRunSnapshotInput, type DestructionConfig, type DestructionRunContext, type RunOutcome } from '../../engine/destructionOrchestration';
 import { createInitialDestructionState } from '../../engine/destructionModes';
@@ -41,7 +42,7 @@ function goodMotorConfig(): MotorConfig {
 function goodDestructionConfig(): DestructionConfig {
   return {
     battery: { profile: 'lipo', shortCircuitDurationLimitS: 2, runawayHeatThreshold: 0.9, unsafeDischargeStartRatio: 0.9, stageDurations: { swellingS: 1, smokingS: 1 }, internalResistanceDegradationMultiplier: 1.5 },
-    d01: { decayExposureScaleRad: 1000, minEffectiveTurnsRatio: 0.5 },
+    d01: { decayExposureScaleRad: 1000, minEffectiveTurnsRatio: 0.5, coilDeformOmegaRadS: COIL_DEFORM_OMEGA },
     d02: { smokeGaugeThreshold: 0.6, coilOverheatGaugeLimit: 1, conductionScale: 0.1, dissipationCoefficient: 0.1, smokeResistanceMultiplier: 1.2 },
     d04: { bodyScorchDeltaFraction: 0.2, magnetScorchDeltaFraction: 0.15 },
     d05: {

@@ -26,7 +26,6 @@ import {
   COIL_WINDOW,
   K_COG,
   K_COG_B_DISTANCE,
-  COIL_DEFORM_OMEGA,
   COIL_DEFORM_FRAMES,
   R_BATTERY_INTERNAL_1_5V,
   R_BATTERY_INTERNAL_3V,
@@ -94,6 +93,23 @@ export interface MotorConfig {
   // `minEffectiveTurnsRatio`が0を除くのと同じ理由)。合成は
   // `composeEffectiveMotorConfig`の単一乗算点だけで行う。
   windingTurnsRatio?: number;
+}
+
+/**
+ * P4-1C R2-A(2026-08-31人間再承認): `step`/`advanceMotorState`の引数束。
+ *
+ * **`coilDeformOmegaRadS`をrequiredにするため、末尾の省略可能引数をobjectへ束ねた**。
+ * TypeScriptは省略可能引数の後ろにrequired引数を置けないため、位置引数のままでは
+ * 「渡し忘れを型で防ぐ」ことができない。位置引数の途中へ挿入する案は、
+ * `coilDeformOmegaRadS`・`loadTorque`・`effectiveInertia`がいずれも`number`で
+ * **転置しても型検査が通ってしまう**ため採らなかった(145呼出しの機械追随で事故が起きる)。
+ */
+export interface MotorStepOptions {
+  /** D01のコイル崩壊しきい角速度 [rad/s]。**必須**——既定値を置くと供給漏れが静かに通る。 */
+  readonly coilDeformOmegaRadS: number;
+  readonly rng?: Rng;
+  readonly loadTorque?: number;
+  readonly effectiveInertia?: number;
 }
 
 export interface SimState {
@@ -311,10 +327,11 @@ function nextDeformState(
   varnished: boolean,
   highSpeedFrameCount: number,
   alreadyCollapsed: boolean,
+  coilDeformOmegaRadS: number,
 ): { highSpeedFrameCount: number; coilCollapsed: boolean } {
   if (alreadyCollapsed) return { highSpeedFrameCount, coilCollapsed: true };
   if (varnished) return { highSpeedFrameCount: 0, coilCollapsed: false };
-  if (Math.abs(omega) > COIL_DEFORM_OMEGA) {
+  if (Math.abs(omega) > coilDeformOmegaRadS) {
     const nextCount = highSpeedFrameCount + 1;
     return { highSpeedFrameCount: nextCount, coilCollapsed: nextCount >= COIL_DEFORM_FRAMES };
   }
@@ -556,10 +573,12 @@ export function advanceMotorState(
   state: SimState,
   evaluation: MotorFrameEvaluation,
   dt: number,
-  rng: Rng = Math.random,
-  loadTorque: number = 0,
-  effectiveInertia?: number,
+  options: MotorStepOptions,
 ): SimState {
+  const { coilDeformOmegaRadS } = options;
+  const rng = options.rng ?? Math.random;
+  const loadTorque = options.loadTorque ?? 0;
+  const effectiveInertia = options.effectiveInertia;
   const { theta, omega } = state;
   const varnished = resolveVarnished(config);
   const { current, backEmf, tMag, tCog, shorted } = evaluation;
@@ -572,7 +591,7 @@ export function advanceMotorState(
   // 静止摩擦クランプ(spec §3.4 要件1、spec-v1.5.md §3でT_cogを合算するよう拡張)。
   // 早期リターンでもRPM表示・発熱・崩壊判定は更新する。
   if (isStaticFrictionClamped(omega, tMag, tCog, loadTorque, config.brushPressure)) {
-    const deform = nextDeformState(0, varnished, state.highSpeedFrameCount, state.coilCollapsed);
+    const deform = nextDeformState(0, varnished, state.highSpeedFrameCount, state.coilCollapsed, coilDeformOmegaRadS);
     return {
       theta,
       omega: 0,
@@ -602,7 +621,7 @@ export function advanceMotorState(
   const thetaNew = theta + omegaNew * dt;
 
   // ワニス崩壊判定(spec-v1.5.md §2.2)
-  const deform = nextDeformState(omegaNew, varnished, state.highSpeedFrameCount, state.coilCollapsed);
+  const deform = nextDeformState(omegaNew, varnished, state.highSpeedFrameCount, state.coilCollapsed, coilDeformOmegaRadS);
 
   return {
     theta: thetaNew,
@@ -620,15 +639,11 @@ export function advanceMotorState(
 }
 
 // 既存互換のラッパー。evaluateMotorFrame→advanceMotorStateを内部で連結する。
-// シグネチャ・挙動はPhase1完了時点から完全に維持され、既存呼び出し元は無改修。
-export function step(
-  config: MotorConfig,
-  state: SimState,
-  dt: number,
-  rng: Rng = Math.random,
-  loadTorque: number = 0,
-  effectiveInertia?: number,
-): SimState {
-  const evaluation = evaluateMotorFrame(config, state, rng);
-  return advanceMotorState(config, state, evaluation, dt, rng, loadTorque, effectiveInertia);
+// 二段APIの意味・分割・戻り値・決定論、および挙動はPhase1完了時点から不変。
+// P4-1C R2-A(2026-08-31人間再承認)でシグネチャのみ、位置引数(rng/loadTorque/
+// effectiveInertia)からrequired`MotorStepOptions`へ移し全呼出し元を機械追随した。
+// 必須化したのはD01閾値`coilDeformOmegaRadS`だけで、他3つは任意・既定値も不変。
+export function step(config: MotorConfig, state: SimState, dt: number, options: MotorStepOptions): SimState {
+  const evaluation = evaluateMotorFrame(config, state, options.rng ?? Math.random);
+  return advanceMotorState(config, state, evaluation, dt, options);
 }

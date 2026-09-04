@@ -12,7 +12,7 @@
 
 import type { SimState } from './motorPhysics';
 import type { VehicleSimState } from './vehiclePhysics';
-import { BATTERY_HEAT_LIMIT, COIL_DEFORM_OMEGA } from './constants';
+import { BATTERY_HEAT_LIMIT } from './constants';
 
 export type DestructionModeId = 'D01' | 'D02' | 'D03' | 'D04' | 'D05' | 'D06' | 'D07' | 'D09';
 // D08はPhase3のengine型に含めない(Phase5の(e)周回拡張完成後)。
@@ -82,7 +82,11 @@ export interface DestructionConfig {
   // 漸減」、P3-1-Q1返済)の較正値。decayExposureScaleRadは進行量(rad単位の累積曝露)から
   // effectiveTurnsRatioへの写像スケール定数、minEffectiveTurnsRatioは劣化の下限
   // (0を除く——0だと磁気結合が消滅する退化値になるため)。人間再承認バンドル対象。
-  d01: { decayExposureScaleRad: number; minEffectiveTurnsRatio: number };
+  // P4-1C R2-A(2026-08-31人間再承認): D01のコイル崩壊しきい角速度をここへ**単一出典化**する。
+  // 発火判定(motorPhysics.nextDeformState)と発火後の超過回転曝露(advanceD01)は
+  // **必ず同じこのfield**を読む。二つの閾値へ分裂させない(P41-R5条件3)。
+  // 既定値は`constants.ts`の`COIL_DEFORM_OMEGA`と厳密同値で、移設段階の挙動変更は0。
+  d01: { decayExposureScaleRad: number; minEffectiveTurnsRatio: number; coilDeformOmegaRadS: number };
   // 正式Fable P3-3-Q1・Q2裁定(確定): conductionScale/dissipationCoefficientはcoilLossW
   // (I²R)から0-1熱ゲージへの伝導・放散係数。smokeResistanceMultiplierは発煙後の
   // wireResistivityRatio悪化倍率(単一固定値、段階内比例則は較正根拠のない発明として不採用)。
@@ -163,7 +167,7 @@ export interface D01Progress {
   triggeredAtT: number | null;
   causeLog: D01CauseLog | null;
   // 正式Fable P3-3-Q4裁定(確定、P3-1-Q1返済): 崩壊後の回転曝露累積(rad単位、
-  // `max(0, |angularVelocityRadS| − COIL_DEFORM_OMEGA) × dt`の積分)。`triggered===false`の
+  // `max(0, |angularVelocityRadS| − d01.coilDeformOmegaRadS) × dt`の積分)。`triggered===false`の
   // 間は0固定(崩壊前は漸減しない)。単調非減少。
   decayExposureRad: number;
 }
@@ -434,16 +438,17 @@ export const DURATION_COMPARISON_EPSILON_S = 1e-9;
 
 // 正式Fable P3-3-Q4裁定(確定、候補b): 崩壊は不可逆・一度きり(spec §7.1.1)だが、崩壊後は
 // 「実効巻数・占積が漸減、走行継続」という返済対象(P3-1-Q1)が進行する。進行量は崩壊トリガと
-// 同じ閾値(COIL_DEFORM_OMEGA)を超えた回転曝露の時間積分——原因と進行が同じ物理機構である
+// 同じ閾値(d01.coilDeformOmegaRadS)を超えた回転曝露の時間積分——原因と進行が同じ物理機構である
 // ことの正直な表現(Fable評)。
 function advanceD01(
   prev: D01Progress,
   frame: DestructionFrameInput,
   elapsedTimeS: number,
   dt: number,
+  d01Config: DestructionConfig['d01'],
 ): { next: D01Progress; event: UnstampedDestructionEvent | null } {
   if (prev.triggered) {
-    const excessOmega = Math.max(0, Math.abs(frame.angularVelocityRadS) - COIL_DEFORM_OMEGA);
+    const excessOmega = Math.max(0, Math.abs(frame.angularVelocityRadS) - d01Config.coilDeformOmegaRadS);
     if (excessOmega === 0) return { next: prev, event: null }; // 停止時ゼロ(必須DoD)
     return { next: { ...prev, decayExposureRad: prev.decayExposureRad + excessOmega * dt }, event: null };
   }
@@ -974,7 +979,7 @@ export function advanceDestructionState(
     batteryEvent = d04Result.event;
   }
 
-  const d01Result = advanceD01(prev.modes.D01, frame, nextShared.elapsedTimeS, dt);
+  const d01Result = advanceD01(prev.modes.D01, frame, nextShared.elapsedTimeS, dt, config.d01);
   const d02Result = advanceD02(prev.modes.D02, frame, config.d02, nextShared.elapsedTimeS, dt);
   const d05Result = advanceD05(prev.modes.D05, frame, config.d05, nextShared.elapsedTimeS, dt);
   const d06Result = advanceD06(prev.modes.D06, frame, config.d06, runContext, nextShared.elapsedTimeS, dt);

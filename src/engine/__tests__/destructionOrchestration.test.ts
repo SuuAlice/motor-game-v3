@@ -99,7 +99,7 @@ function goodDestructionConfig(
       : { profile: 'nonLipo', shortCircuitDurationLimitS: 2, ...nonLipoOverrides };
   return {
     battery,
-    d01: { decayExposureScaleRad: 1000, minEffectiveTurnsRatio: 0.5 },
+    d01: { decayExposureScaleRad: 1000, minEffectiveTurnsRatio: 0.5, coilDeformOmegaRadS: COIL_DEFORM_OMEGA },
     d02: { smokeGaugeThreshold: 0.6, coilOverheatGaugeLimit: 1, conductionScale: 0.1, dissipationCoefficient: 0.1, smokeResistanceMultiplier: 1.2 },
     d04: { bodyScorchDeltaFraction: 0.2, magnetScorchDeltaFraction: 0.15 },
     d05: {
@@ -493,6 +493,30 @@ describe('destructionOrchestration.ts: restoreRunSnapshot(12段階検証)', () =
     const result = restoreRunSnapshot(JSON.parse(JSON.stringify(snapshot)));
     expect(result.ok).toBe(true);
   });
+
+  // P4-1C R2-A(2026-08-31人間再承認): 契約versionは3のまま、`d01.coilDeformOmegaRadS`を
+  // 持たない**旧snapshot**を移設元の単一出典`COIL_DEFORM_OMEGA`で補完する(復元後の挙動は
+  // 移設前と完全一致)。fieldが存在する場合は補完せず、不正値はfail-closedで拒否する。
+  it('18-a. 旧snapshot(d01.coilDeformOmegaRadS欠落、contractVersionは3のまま)はCOIL_DEFORM_OMEGAで補完して復元する', () => {
+    const snapshot = captureRunSnapshot(motorSnapshotInput());
+    const raw = JSON.parse(JSON.stringify(snapshot));
+    delete raw.destructionConfig.d01.coilDeformOmegaRadS;
+    expect(raw.contractVersion).toBe(3); // versionは上げない
+    const result = restoreRunSnapshot(raw);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.snapshot.destructionConfig.d01.coilDeformOmegaRadS).toBe(COIL_DEFORM_OMEGA);
+  });
+
+  it.each([0, -1, Number.NaN, Number.POSITIVE_INFINITY, 'x' as unknown as number])(
+    '18-b. d01.coilDeformOmegaRadS=%pを持つsnapshotは補完せずinvalidSchemaで拒否する(fail-closed)',
+    (badValue) => {
+      const snapshot = captureRunSnapshot(motorSnapshotInput());
+      const raw = JSON.parse(JSON.stringify(snapshot));
+      raw.destructionConfig.d01.coilDeformOmegaRadS = badValue;
+      const result = restoreRunSnapshot(raw);
+      expect(result.ok).toBe(false);
+    },
+  );
 
   it('19. 正常なvehicle文脈snapshot(track非null)を復元できる(ok:true)', () => {
     const snapshot = captureRunSnapshot(vehicleSnapshotInput({ track: goodTrack(), courseLengthM: null, slopeRad: null }));
@@ -1442,6 +1466,53 @@ describe('destructionOrchestration.ts: stepMotorWithDestruction(P3-1、D01は非
     expect(sawD01).toBe(true);
   });
 
+  // P4-1C R2-A(2026-08-31人間再承認)の有効性fixture。`COIL_DEFORM_OMEGA`を
+  // `DestructionConfig.d01.coilDeformOmegaRadS`へ移設したことにより、**同一の設定値**が
+  // (1)発火側=`nextDeformState`(motorPhysics.ts、highSpeedFrameCountの積算条件)と
+  // (2)漸減側=`advanceD01`(destructionModes.ts、decayExposureRadの積算量)の
+  // **両方**へ届いていることを、1本のテストで示す。閾値を既定の0.5倍にしたときだけ
+  // 発火stepとdecayExposureRadが同時に動くことが、単一出典化が効いている証拠になる
+  // (どちらか一方が旧ハードコード定数を見ていれば、この差は出ない)。
+  //
+  // 構成: この`motorConfig`の自走ω定常値は約187.5rad/s。既定閾値209.44rad/s(2000RPM)は
+  // 超えないが、0.5倍の104.72rad/sは超え続けるため、閾値**だけ**が結果を分ける。
+  it('R2-A有効性: d01.coilDeformOmegaRadSを既定の0.5倍にすると、発火step(triggeredAtT)とdecayExposureRadの双方が動く', () => {
+    const motorConfig: MotorConfig = goodMotorConfig({ varnished: false, brushPressure: 0.05, magnetDistanceMm: 5 });
+    const spinningState: SimState = { ...initialSimState(), omega: 50 }; // 既定・0.5倍いずれの閾値も未超過の初期値
+
+    function runUntil(coilDeformOmegaRadS: number, steps: number) {
+      const base = goodDestructionConfig('nonLipo');
+      const destructionConfig: DestructionConfig = { ...base, d01: { ...base.d01, coilDeformOmegaRadS } };
+      const snapshot = captureRunSnapshot(motorSnapshotInput({ motorConfig, destructionConfig, initialMotorState: spinningState }));
+      let accumulator = createRunAccumulator(snapshot);
+      let motorState: SimState = spinningState;
+      let firedAtStep: number | null = null;
+      for (let i = 0; i < steps; i++) {
+        const result = stepMotorWithDestruction(motorState, accumulator, 1 / 120, mulberry32(1));
+        motorState = result.physicsState;
+        accumulator = result.accumulator;
+        if (firedAtStep === null && accumulator.destructionState.modes.D01.triggered) firedAtStep = i;
+      }
+      return { firedAtStep, d01: accumulator.destructionState.modes.D01 };
+    }
+
+    const STEPS = 800; // COIL_DEFORM_FRAMES(360)+spin-up+漸減積算に十分な長さ
+    const withDefault = runUntil(COIL_DEFORM_OMEGA, STEPS);
+    const withHalf = runUntil(COIL_DEFORM_OMEGA * 0.5, STEPS);
+
+    // 既定閾値: 定常ωが閾値へ届かないため発火せず、漸減も一切積算されない
+    expect(withDefault.firedAtStep).toBeNull();
+    expect(withDefault.d01.triggered).toBe(false);
+    expect(withDefault.d01.triggeredAtT).toBeNull();
+    expect(withDefault.d01.decayExposureRad).toBe(0);
+
+    // 0.5倍閾値: (1)発火side・(2)漸減sideが同時に動く
+    expect(withHalf.firedAtStep).not.toBeNull();
+    expect(withHalf.d01.triggered).toBe(true);
+    expect(withHalf.d01.triggeredAtT).not.toBeNull();
+    expect(withHalf.d01.decayExposureRad).toBeGreaterThan(0);
+  });
+
   it('D03(実物理、短絡): 発火するとtermination!==null・endReason="destructionTerminal"・terminalModesに"D03"を含む', () => {
     const config: MotorConfig = goodMotorConfig({ slitWidthMm: 0 }); // 持続短絡
     let motorState: SimState = { ...initialSimState() };
@@ -1872,7 +1943,7 @@ describe('destructionOrchestration.ts: stepMotorWithDestruction(P3-3ゲート3�
     let state: SimState = initialSimState();
     const isChatteringPerFrame: boolean[] = [];
     for (let i = 0; i < CHATTER_BURST_FRAMES + 1; i++) {
-      const next = step(config, state, 1 / 120, rng);
+      const next = step(config, state, 1 / 120, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: rng });
       isChatteringPerFrame.push(state.chatterFramesLeft > 0 || next.chatterFramesLeft > 0);
       state = next;
     }
@@ -1916,7 +1987,7 @@ describe('destructionOrchestration.ts: stepMotorWithDestruction(P3-2ゲート4�
     // omega=COIL_DEFORM_OMEGA*3はコイル変形(チャタリング、rng消費)を誘発する構成のため、
     // rngを明示的に固定しないとwrapped/directが独立にMath.random()を消費し非決定的に食い違う。
     const wrapped = stepMotorWithDestruction(motorState, accumulator, 1 / 120, mulberry32(1));
-    const direct = step(config, motorState, 1 / 120, mulberry32(1));
+    const direct = step(config, motorState, 1 / 120, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: mulberry32(1) });
     expect(wrapped.physicsState).toEqual(direct);
   });
 
@@ -1956,8 +2027,8 @@ describe('destructionOrchestration.ts: stepMotorWithDestruction(P3-2ゲート4�
     expect(effective.batteryInternalResistanceRatio).toBeCloseTo((baseConfig.batteryInternalResistanceRatio ?? 1) * 1.5, 12); // 前提確認
 
     const wrapped = stepMotorWithDestruction(motorState, accumulator, 1 / 120, mulberry32(1));
-    const expectedFromEffective = step(effective, motorState, 1 / 120, mulberry32(1));
-    const expectedFromBase = step(baseConfig, motorState, 1 / 120, mulberry32(1));
+    const expectedFromEffective = step(effective, motorState, 1 / 120, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: mulberry32(1) });
+    const expectedFromBase = step(baseConfig, motorState, 1 / 120, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: mulberry32(1) });
     expect(expectedFromEffective).not.toEqual(expectedFromBase); // 前提確認: 内部抵抗変更が実際に物理へ効く構成であること
 
     expect(wrapped.physicsState).toEqual(expectedFromEffective);
@@ -2002,8 +2073,8 @@ describe('destructionOrchestration.ts: stepMotorWithDestruction(P3-2ゲート4�
     expect(effective.magnetStrength).toBeCloseTo(baseConfig.magnetStrength * 0.95 * 0.9, 12); // 前提確認: 磁力低下が実際に合成されていること
 
     const wrapped = stepMotorWithDestruction(motorState, accumulator, 1 / 120, mulberry32(1));
-    const expectedFromEffective = step(effective, motorState, 1 / 120, mulberry32(1));
-    const expectedFromBase = step(baseConfig, motorState, 1 / 120, mulberry32(1));
+    const expectedFromEffective = step(effective, motorState, 1 / 120, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: mulberry32(1) });
+    const expectedFromBase = step(baseConfig, motorState, 1 / 120, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: mulberry32(1) });
     expect(expectedFromEffective).not.toEqual(expectedFromBase); // 前提確認: 磁力低下が実際に物理へ効く構成であること
 
     expect(wrapped.physicsState).toEqual(expectedFromEffective);
@@ -2282,15 +2353,7 @@ describe('destructionOrchestration.ts: stepTestRunWithDestruction(P3-2ゲート6
       nonZero.accumulator.destructionState,
       nonZero.accumulator.replaySnapshot.destructionConfig,
     );
-    const expectedPhysicsState = stepTestRun(
-      effectiveConfig,
-      nonZero.accumulator.replaySnapshot.carConfig!,
-      nonZero.vehicleState,
-      1 / 120,
-      nonZero.accumulator.replaySnapshot.courseLengthM!,
-      mulberry32(1),
-      nonZeroSlopeRad,
-    );
+    const expectedPhysicsState = stepTestRun(effectiveConfig, nonZero.accumulator.replaySnapshot.carConfig!, nonZero.vehicleState, 1 / 120, nonZero.accumulator.replaySnapshot.courseLengthM!, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: mulberry32(1), slopeRad: nonZeroSlopeRad });
     expect(nonZero.result.physicsState).toEqual(expectedPhysicsState);
   });
 
@@ -2919,8 +2982,8 @@ describe('vehiclePhysics.ts: gearReflectedInertiaKgM2(P3-4 G3 §10.3)', () => {
     let a = withoutField;
     let b = withZero;
     for (let i = 0; i < 120; i++) {
-      a = stepTestRun(motorConfig, carConfig, a, 1 / 120, 100, mulberry32(1), 0);
-      b = stepTestRun(motorConfig, { ...carConfig, gearReflectedInertiaKgM2: 0 }, b, 1 / 120, 100, mulberry32(1), 0);
+      a = stepTestRun(motorConfig, carConfig, a, 1 / 120, 100, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: mulberry32(1), slopeRad: 0 });
+      b = stepTestRun(motorConfig, { ...carConfig, gearReflectedInertiaKgM2: 0 }, b, 1 / 120, 100, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: mulberry32(1), slopeRad: 0 });
     }
     expect(b).toEqual(a); // 0恒等性
   });
@@ -2931,7 +2994,7 @@ describe('vehiclePhysics.ts: gearReflectedInertiaKgM2(P3-4 G3 §10.3)', () => {
     function distanceAfter(gearReflectedInertiaKgM2: number, steps: number): number {
       const cfg = { ...carConfig, gearReflectedInertiaKgM2 };
       let s = createInitialVehicleState(motorConfig, cfg);
-      for (let i = 0; i < steps; i++) s = stepTestRun(motorConfig, cfg, s, 1 / 120, 1000, mulberry32(1), 0);
+      for (let i = 0; i < steps; i++) s = stepTestRun(motorConfig, cfg, s, 1 / 120, 1000, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: mulberry32(1), slopeRad: 0 });
       return s.positionM;
     }
     // jMotorと同オーダーの値を与えて有意差を作る(較正値そのものの妥当性はG5 sweepの対象)。
@@ -2942,7 +3005,7 @@ describe('vehiclePhysics.ts: gearReflectedInertiaKgM2(P3-4 G3 §10.3)', () => {
     const motorConfig = goodMotorConfig();
     const carConfig = { ...standardCarConfig(), gearReflectedInertiaKgM2: 1e-4 };
     let s = createInitialVehicleState(motorConfig, carConfig);
-    for (let i = 0; i < 600; i++) s = stepTestRun(motorConfig, carConfig, s, 1 / 120, 1000, mulberry32(1), 0);
+    for (let i = 0; i < 600; i++) s = stepTestRun(motorConfig, carConfig, s, 1 / 120, 1000, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: mulberry32(1), slopeRad: 0 });
     expect(Number.isFinite(s.positionM)).toBe(true);
     expect(Number.isFinite(s.velocityMps)).toBe(true);
     expect(Number.isFinite(s.motor.omega)).toBe(true);

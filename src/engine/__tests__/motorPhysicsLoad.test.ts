@@ -5,7 +5,7 @@
 import { describe, expect, it } from 'vitest';
 import { step, computeB, computeRCoil, computeContactResistance, computeBatteryInternalResistance, type MotorConfig, type SimState } from '../motorPhysics';
 import { isInDeadZone } from '../commutator';
-import { K_T, FLICK_INITIAL_OMEGA, BATTERY_HEAT_LIMIT } from '../constants';
+import { BATTERY_HEAT_LIMIT, COIL_DEFORM_OMEGA, FLICK_INITIAL_OMEGA, K_T } from '../constants';
 import { mulberry32 } from './prng';
 
 const DT = 1 / 120;
@@ -53,7 +53,7 @@ function runSteps(
 ): SimState {
   let s = initial;
   for (let i = 0; i < steps; i++) {
-    s = step(config, s, DT, rng, loadTorque);
+    s = step(config, s, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: rng, loadTorque: loadTorque });
   }
   return s;
 }
@@ -64,8 +64,8 @@ describe('Phase1受け入れ基準: 後方互換(loadTorque省略 === loadTorque
     const rng1 = mulberry32(1);
     const rng2 = mulberry32(1);
     const s0 = flickState(0, FLICK_INITIAL_OMEGA);
-    const withoutArg = step(config, s0, DT, rng1);
-    const withZero = step(config, s0, DT, rng2, 0);
+    const withoutArg = step(config, s0, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: rng1 });
+    const withZero = step(config, s0, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: rng2, loadTorque: 0 });
     expect(withZero).toEqual(withoutArg);
   });
 });
@@ -74,9 +74,9 @@ describe('loadTorqueの符号規約: 前進方向(ω>0)基準に固定された�
   it('ω>0(前進)では、正のloadTorqueは減速、負のloadTorqueは加速する', () => {
     const config = goodConfig();
     const s0 = flickState(Math.PI / 3, 5);
-    const sNoLoad = step(config, s0, DT, mulberry32(9), 0);
-    const sPosLoad = step(config, s0, DT, mulberry32(9), 0.01);
-    const sNegLoad = step(config, s0, DT, mulberry32(9), -0.01);
+    const sNoLoad = step(config, s0, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: mulberry32(9), loadTorque: 0 });
+    const sPosLoad = step(config, s0, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: mulberry32(9), loadTorque: 0.01 });
+    const sNegLoad = step(config, s0, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: mulberry32(9), loadTorque: -0.01 });
     expect(sPosLoad.omega).toBeLessThan(sNoLoad.omega);
     expect(sNegLoad.omega).toBeGreaterThan(sNoLoad.omega);
   });
@@ -87,9 +87,9 @@ describe('loadTorqueの符号規約: 前進方向(ω>0)基準に固定された�
     // 排除する。slitWidthMm=1.5 → デッドゾーン半幅0.15radなのでこの範囲内)
     const deadZoneTheta = 0.05;
     const s0 = flickState(deadZoneTheta, -5);
-    const sNoLoad = step(config, s0, DT, mulberry32(9), 0);
-    const sPosLoad = step(config, s0, DT, mulberry32(9), 0.01);
-    const sNegLoad = step(config, s0, DT, mulberry32(9), -0.01);
+    const sNoLoad = step(config, s0, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: mulberry32(9), loadTorque: 0 });
+    const sPosLoad = step(config, s0, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: mulberry32(9), loadTorque: 0.01 });
+    const sNegLoad = step(config, s0, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: mulberry32(9), loadTorque: -0.01 });
     // 正のloadTorqueは常にωを減少させる向きに働くため、ω<0では絶対値が増える(後退が加速する)
     expect(sPosLoad.omega).toBeLessThan(sNoLoad.omega);
     // 負のloadTorqueは常にωを増加させる向きに働くため、ω<0では0に近づく(後退が減速する)
@@ -112,7 +112,7 @@ describe('Phase1受け入れ基準: 一定負荷を与えると回転数が単�
     const sampleStride = 6; // コギングリップル等の短周期振動による誤検出を避けるため間引く
     let prevRpm = s.rpm;
     for (let i = 0; i < 120 * 6; i++) {
-      s = step(config, s, DT, rng, loadTorque);
+      s = step(config, s, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: rng, loadTorque: loadTorque });
       if (i % sampleStride === 0) {
         expect(s.rpm).toBeLessThanOrEqual(prevRpm + EPS);
         prevRpm = s.rpm;
@@ -149,7 +149,7 @@ describe('Phase1受け入れ基準: 停動時の電流が内部抵抗込みの�
     // 早期returnパスの安定性確認: 停止後さらに1ステップ進めても、omegaとthetaは固定され、
     // 計算済み停動電流が維持される(batteryHeat等は早期returnパスでも更新されるため、
     // 状態全体が不変とは限らない)
-    const sNext = step(config, s, DT, rng, loadTorque);
+    const sNext = step(config, s, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng: rng, loadTorque: loadTorque });
     expect(sNext.omega).toBe(0);
     expect(sNext.theta).toBe(s.theta);
     expect(sNext.current).toBeCloseTo(expectedStallCurrent, 6);

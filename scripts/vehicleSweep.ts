@@ -1,6 +1,7 @@
 import { computeMaxTurns, type MotorConfig } from '../src/engine/motorPhysics';
 import { createInitialVehicleState, type CarConfig, type VehicleSimState } from '../src/engine/vehiclePhysics';
 import { stepTrackRun, type ValidatedTrackDefinition } from '../src/engine/trackPhysics';
+import { COIL_DEFORM_OMEGA } from '../src/engine/constants';
 import { TRACKS } from '../src/data/tracks';
 import { auditUniversalMonotonicity, percentileTarget, type ParameterScoreTable } from '../src/data/trackSweep';
 import { validateBuildRestrictions } from '../src/engine/scoring';
@@ -77,7 +78,7 @@ function simulate(track: ValidatedTrackDefinition, motor: MotorConfig, car: CarC
   const rng = mulberry32(seed);
   for (let step = 0; step < MAX_SECONDS / DT; step++) {
     if (state.status === 'finished' || state.status === 'stalled' || state.status === 'derailed' || state.status === 'overheated') break;
-    state = stepTrackRun(motor, car, track, state, DT, rng);
+    state = stepTrackRun(motor, car, track, state, DT, { coilDeformOmegaRadS: COIL_DEFORM_OMEGA, rng });
   }
   return state;
 }
