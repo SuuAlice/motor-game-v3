@@ -2134,14 +2134,14 @@ describe('P4-1A: completeRotorAssemblyActionの原子境界', () => {
     expect(result.ok).toBe(true);
     const after = useSaveStore.getState().progress.config;
     expect(after.coilTurns).toBe(30);
-    expect(after.windingTurnsRatio).toBeCloseTo(28 / 30, 12);
+    expect(after.windingTurnsRatio).toBeCloseTo((28 / 30) * 0.925, 12);
     expect(after.wireGaugeMm).toBe(0.4);
     expect(after.parallelStrands).toBe(1);
     expect(after).not.toBe(before);
     // 永続実体にも同じconfigが入っている
     const persisted = readPersisted();
     expect(persisted.progress.config.coilTurns).toBe(30);
-    expect(persisted.progress.config.windingTurnsRatio).toBeCloseTo(28 / 30, 12);
+    expect(persisted.progress.config.windingTurnsRatio).toBeCloseTo((28 / 30) * 0.925, 12);
   });
 
   it('生成されたローターはrecorded由来で、記録がそのまま保存される', () => {

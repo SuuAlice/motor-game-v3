@@ -781,7 +781,8 @@ describe('P4-1B: MC4(巻線記録の収載)', () => {
     const recipe = fullRecipe({ motorConfig: fullMotorConfig({ coilTurns: 30 }), windingRecord: record });
     const decoded = decodeRecipe(encodeRecipe(recipe));
     expect(decoded.motorConfig.windingTurnsRatio).toBe(deriveWindingMotorFields(record).windingTurnsRatio);
-    expect(decoded.motorConfig.windingTurnsRatio).toBeCloseTo(22 / 30, 12);
+    // P4-1C C1: 方向一貫性22/30 × 張力占積0.925(全ターンtension=0.5)。
+    expect(decoded.motorConfig.windingTurnsRatio).toBeCloseTo((22 / 30) * 0.925, 12);
   });
 
   it('MC2/MC3/M15のdecode結果はwindingRecord=nullで、記録を逆生成しない', () => {

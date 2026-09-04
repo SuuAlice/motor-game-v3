@@ -188,16 +188,17 @@ describe('巻線→MotorConfigフィールドの写像(承認項目8)', () => {
   });
 
   it('coilTurnsは記録長、windingTurnsRatioは方向一貫性、axisOffsetMmはbalance×K_axis', () => {
-    // 30ターン中1ターン逆巻き、左21/右9 → ratio=28/30、balance=12/30
+    // 30ターン中1ターン逆巻き、左21/右9 → 方向一貫性28/30、balance=12/30。
+    // P4-1C C1: 全ターンtension=0.5なので張力占積は0.85+0.15×0.5=0.925。積が実効値になる。
     const fields = deriveWindingMotorFields(record(30, { leftCount: 21, reversedAt: 10 }));
     expect(fields.coilTurns).toBe(30);
-    expect(fields.windingTurnsRatio).toBeCloseTo(28 / 30, 12);
+    expect(fields.windingTurnsRatio).toBeCloseTo((28 / 30) * 0.925, 12);
     expect(fields.axisOffsetMm).toBeCloseTo((12 / 30) * 3, 12);
   });
 
-  it('全ターン同方向・左右均等ならratio=1・axisOffsetMm=0', () => {
+  it('全ターン同方向・左右均等なら方向一貫性1・axisOffsetMm=0(実効値は張力占積のみ)', () => {
     const fields = deriveWindingMotorFields(record(30, { leftCount: 15 }));
-    expect(fields.windingTurnsRatio).toBe(1);
+    expect(fields.windingTurnsRatio).toBeCloseTo(1 * 0.925, 12);
     expect(fields.axisOffsetMm).toBe(0);
   });
 
@@ -273,7 +274,7 @@ describe('config同時導出(承認項目8・9)', () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.config.coilTurns).toBe(30);
-    expect(result.config.windingTurnsRatio).toBeCloseTo(28 / 30, 12);
+    expect(result.config.windingTurnsRatio).toBeCloseTo((28 / 30) * 0.925, 12);
     expect(result.config.axisOffsetMm).toBeCloseTo((12 / 30) * PRODUCTION_AXIS_OFFSET_COEFFICIENT_MM, 12);
     expect(result.config.wireGaugeMm).toBe(0.4);
     expect(result.config.parallelStrands).toBe(1);
@@ -297,7 +298,7 @@ describe('config同時導出(承認項目8・9)', () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.config.coilTurns).toBe(30);
-    expect(result.config.windingTurnsRatio).toBeCloseTo(28 / 30, 12);
+    expect(result.config.windingTurnsRatio).toBeCloseTo((28 / 30) * 0.925, 12);
     expect(result.config.wireGaugeMm).toBe(0.4);
     expect(result.config.parallelStrands).toBe(1);
   });
@@ -342,7 +343,7 @@ describe('順逆同数の記録は生成境界で拒否する(windingTurnsRatio=
     const result = resolveRotorAssemblyCompletion(makeInput({ record }));
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(result.config.windingTurnsRatio).toBeCloseTo(1 / 11, 12);
+    expect(result.config.windingTurnsRatio).toBeCloseTo((1 / 11) * 0.925, 12);
   });
 
   it('拒否時は引数を一切変更しない', () => {
