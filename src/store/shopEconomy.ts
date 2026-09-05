@@ -151,6 +151,26 @@ function invalidNumberReason(value: number, labelJa: string): string | null {
 }
 
 /**
+ * **在庫数量**の検証(2026-09-05人間承認、管理メモ§7)。P4-1A以降、線材在庫はメートルの
+ * 連続量であり、完成・破断のあとは整数になりません(1ターン = 2π × WINDING_MEAN_RADIUS_M)。
+ * `StackableStockEntry`の宣言(src/materials/inventoryItem.ts)が
+ * 「quantityM/quantityMlは有限・0以上であることを呼び出し元が保証すること」と定めており、
+ * 本述語はその契約そのものです——**緩和ではなく、宣言済み契約への復帰**です。
+ * saveのvalidator(saveStore.ts の isValidStackableStockEntry)も同じ契約で受理しています。
+ *
+ * **金額・個数・IDカウンタには使わないこと。** そちらは整数であることが正しく、
+ * `isFiniteNonNegativeInteger`/`invalidNumberReason`を引き続き使います。
+ */
+function isFiniteNonNegativeQuantity(value: number): boolean {
+  return Number.isFinite(value) && value >= 0;
+}
+
+/** `isFiniteNonNegativeQuantity`の日本語reason付き版。文言に「整数」を含めない。 */
+function invalidQuantityReason(value: number, labelJa: string): string | null {
+  return isFiniteNonNegativeQuantity(value) ? null : `${labelJa}が有限の非負の数値ではありません`;
+}
+
+/**
  * 購入ダイアログの確定操作を事前に無効化できるかの判定(Suu_mot3コードレビュー指摘)。
  * purchaseMaterial内の残高不足チェックと同じ条件をダイアログ表示前に使えるよう公開する。
  */
@@ -206,11 +226,11 @@ function mergeStackablePurchase(
 
   const entry = stock[index];
   const currentQuantity = entry.family === 'wire' ? entry.quantityM : entry.quantityMl;
-  const currentError = invalidNumberReason(currentQuantity, '既存在庫の数量');
+  const currentError = invalidQuantityReason(currentQuantity, '既存在庫の数量');
   if (currentError) return { ok: false, reason: currentError };
 
   const nextQuantity = currentQuantity + 1;
-  const nextError = invalidNumberReason(nextQuantity, '在庫数量の更新結果');
+  const nextError = invalidQuantityReason(nextQuantity, '在庫数量の更新結果');
   if (nextError) return { ok: false, reason: nextError };
 
   const updatedStock = stock.map((e, i) => {

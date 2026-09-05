@@ -21,9 +21,14 @@ import {
   purchaseMaterial,
   type ShopEconomyState,
 } from '../shopEconomy';
+import { resolveRotorAssemblyCompletion, resolveWireBreakConsumption } from '../rotorAssembly';
+import { createInitialPlayerInventoryAndLoadout } from '../runOutcomeApplication';
+import { __testOnly, type PersistedSaveState } from '../saveStore';
+import type { PlayerInventory } from '../../materials/inventoryItem';
+import type { WindingRecord } from '../../materials/windingRecord';
 import { GEAR_TOTAL_TOOTH_COUNT } from '../../materials/inventoryItem';
 import type { InventoryItem, StackableStockEntry } from '../../materials/inventoryItem';
-import { ALL_MATERIALS, type Material } from '../../materials/materials';
+import { ALL_MATERIALS, type Material, type MaterialId } from '../../materials/materials';
 
 function materialOf(id: string) {
   const material = ALL_MATERIALS.find((m) => m.id === id);
@@ -483,5 +488,185 @@ describe('fixture整合性', () => {
     const state = createInitialShopEconomyState();
     for (const item of state.items) expect(() => materialOf(item.materialId)).not.toThrow();
     for (const entry of state.stackableStock) expect(() => materialOf(entry.materialId)).not.toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 補充導線の是正(2026-09-05人間承認、管理メモ§7)。
+//
+// P4-1A以降、線材在庫はメートルの**連続量**であり、完成・破断のあとは整数になりません
+// (1ターン = 2π × WINDING_MEAN_RADIUS_M)。`StackableStockEntry`の宣言
+// (src/materials/inventoryItem.ts)は「quantityM/quantityMlは有限・0以上」を契約とし、
+// saveのvalidatorもその契約どおり小数を受理します。購入側だけが整数を要求していたため、
+// 小数残量になった素材の再購入が拒否されていました。
+//
+// **小数残量は消費関数から作ります**——期待値へ消費量を直書きすると、消費式が変わった
+// ときにテストだけが古い前提で通り続けます。
+// ---------------------------------------------------------------------------
+
+const WIRE_ID = 'wire-copper-standard';
+const COATING_ID = 'coating-polyester';
+const LOT = { wireMaterialId: WIRE_ID, windingWireGaugeMm: 0.4, windingParallelStrands: 1 as const };
+
+function windingRecord(turnCount: number): WindingRecord {
+  return Array.from({ length: turnCount }, () => ({
+    position: 0.25,
+    arm: 'left' as const,
+    direction: 1 as const,
+    tension: 0.5,
+  }));
+}
+
+/** 実際の完成経路を通して小数残量を作る(手書きの小数を置かない)。 */
+function completeOneRotor(turnCount: number) {
+  const { inventory, loadout } = createInitialPlayerInventoryAndLoadout();
+  const result = resolveRotorAssemblyCompletion({
+    command: {
+      record: windingRecord(turnCount),
+      wireMaterialId: WIRE_ID,
+      windingWireGaugeMm: LOT.windingWireGaugeMm,
+      windingParallelStrands: LOT.windingParallelStrands,
+      motorDraft: {
+        slitWidthMm: 1.5,
+        sandingQuality: 0.9,
+        brushPressure: 0.3,
+        magnetStrength: 0.5,
+        magnetDistanceMm: 10,
+        batteryVoltage: 1.5,
+        varnished: true,
+      },
+    },
+    inventory,
+    loadout,
+    assemblyId: 'assembly-0001',
+  });
+  if (!result.ok) throw new Error(`完成が失敗した: ${JSON.stringify(result.failure)}`);
+  return result;
+}
+
+function wireStockM(inventory: PlayerInventory): number {
+  const entry = inventory.stackableStock.find((s) => s.family === 'wire' && s.materialId === WIRE_ID);
+  return entry !== undefined && entry.family === 'wire' ? entry.quantityM : Number.NaN;
+}
+
+function coatingStockMl(inventory: PlayerInventory): number {
+  const entry = inventory.stackableStock.find((s) => s.family === 'coating' && s.materialId === COATING_ID);
+  return entry !== undefined && entry.family === 'coating' ? entry.quantityMl : Number.NaN;
+}
+
+function toShopState(inventory: PlayerInventory): ShopEconomyState {
+  return { ...inventory, nextSessionIdCounter: 1 };
+}
+
+function withWireStock(inventory: PlayerInventory, quantityM: number): PlayerInventory {
+  return {
+    ...inventory,
+    stackableStock: inventory.stackableStock.map((e) =>
+      e.family === 'wire' && e.materialId === WIRE_ID ? { ...e, quantityM } : e,
+    ),
+  };
+}
+
+describe('在庫数量の検証(P4-1A以降の連続量)', () => {
+  it('R1: 完成で生じた小数残量から同じ線材を単品購入できる', () => {
+    const completed = completeOneRotor(80);
+    const before = wireStockM(completed.inventory);
+    // 前提そのものの確認: 完成後の残量は整数ではない
+    expect(Number.isInteger(before)).toBe(false);
+
+    const result = purchaseMaterial(toShopState(completed.inventory), WIRE_ID);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(wireStockM(result.state)).toBeCloseTo(before + 1, 12);
+  });
+
+  it('R2: 破断消費で生じた小数残量からも同じ線材を単品購入できる', () => {
+    const { inventory } = createInitialPlayerInventoryAndLoadout();
+    const broken = resolveWireBreakConsumption({ command: { lot: LOT, brokenTurnCount: 12 }, inventory });
+    expect(broken.ok).toBe(true);
+    if (!broken.ok) return;
+    const before = wireStockM(broken.inventory);
+    expect(Number.isInteger(before)).toBe(false);
+
+    const result = purchaseMaterial(toShopState(broken.inventory), WIRE_ID);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(wireStockM(result.state)).toBeCloseTo(before + 1, 12);
+  });
+
+  it.each([Number.NaN, Number.POSITIVE_INFINITY, -1])(
+    'R3: 在庫が%pのときは拒否し、入力状態を一切変更しない',
+    (bad) => {
+      const { inventory } = createInitialPlayerInventoryAndLoadout();
+      const state = toShopState(withWireStock(inventory, bad));
+      const snapshot = structuredClone(state);
+
+      const result = purchaseMaterial(state, WIRE_ID);
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.reason).toBe('既存在庫の数量が有限の非負の数値ではありません');
+      expect(state).toEqual(snapshot);
+    },
+  );
+
+  it('R4-a: 所持金が小数なら拒否する(金額の整数制約は緩んでいない)', () => {
+    const { inventory } = createInitialPlayerInventoryAndLoadout();
+    const result = purchaseMaterial({ ...toShopState(inventory), cashG: 1.5 }, WIRE_ID);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toBe('所持金が有限の非負整数ではありません');
+  });
+
+  it('R4-b: IDカウンタが小数なら拒否する(カウンタの整数制約は緩んでいない)', () => {
+    const { inventory } = createInitialPlayerInventoryAndLoadout();
+    const result = purchaseMaterial({ ...inventory, nextSessionIdCounter: 1.5 }, WIRE_ID);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toBe('ID発行カウンタが有限の非負整数ではありません');
+  });
+
+  it('R4-c: カート個数が小数なら拒否する(既存文言をそのまま維持する)', () => {
+    const { inventory } = createInitialPlayerInventoryAndLoadout();
+    const lines = [{ materialId: WIRE_ID as MaterialId, quantity: 1.5 }];
+    const total = computeCartTotalG(lines);
+    expect(total.ok).toBe(false);
+    if (total.ok) return;
+    expect(total.reason).toBe(`${WIRE_ID}の数量が正しくありません`);
+    expect(purchaseCart(toShopState(inventory), lines).ok).toBe(false);
+  });
+
+  it('R5: 完成で生じた小数残量からカート購入できる', () => {
+    const completed = completeOneRotor(80);
+    const before = wireStockM(completed.inventory);
+    const result = purchaseCart(toShopState(completed.inventory), [{ materialId: WIRE_ID as MaterialId, quantity: 2 }]);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(wireStockM(result.state)).toBeCloseTo(before + 2, 12);
+  });
+
+  it('R6: 同じ小数在庫を既存のsave validatorも受理する(片側だけ厳しい状態を作らない)', () => {
+    const completed = completeOneRotor(80);
+    const candidate: PersistedSaveState = {
+      ...__testOnly.freshBootstrap(),
+      inventory: completed.inventory,
+      equipmentLoadout: completed.loadout,
+    };
+    expect(__testOnly.isValidPersistedSaveState(candidate)).toBe(true);
+    expect(purchaseMaterial(toShopState(completed.inventory), WIRE_ID).ok).toBe(true);
+  });
+
+  it('R7: ワニスの小数在庫も同じ数量契約で受理する(線材だけ整数を要求する非対称を作らない)', () => {
+    // ワニスには消費経路がまだ無いため、検証用の小数入力で試す(管理メモ§7の条件4)。
+    const { inventory } = createInitialPlayerInventoryAndLoadout();
+    const fractional: PlayerInventory = {
+      ...inventory,
+      stackableStock: inventory.stackableStock.map((e) =>
+        e.family === 'coating' && e.materialId === COATING_ID ? { ...e, quantityMl: 2.5 } : e,
+      ),
+    };
+    const result = purchaseMaterial(toShopState(fractional), COATING_ID);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(coatingStockMl(result.state)).toBeCloseTo(3.5, 12);
   });
 });
